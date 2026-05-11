@@ -12,6 +12,7 @@
 		A100000000000000000000AC /* BleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F2 /* BleClient.swift */; };
 		A100000000000000000000AD /* FileSyncViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F3 /* FileSyncViewModel.swift */; };
 		A100000000000000000000AE /* FileSyncScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* FileSyncScreen.swift */; };
+		A100000000000000000000AF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +22,7 @@
 		A100000000000000000000F3 /* FileSyncViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncViewModel.swift; sourceTree = "<group>"; };
 		A100000000000000000000F4 /* FileSyncScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncScreen.swift; sourceTree = "<group>"; };
 		A100000000000000000000F5 /* MovementLogger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovementLogger.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A100000000000000000000F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -48,6 +50,7 @@
 				A100000000000000000000F0 /* MovementLoggerApp.swift */,
 				A100000000000000000000D2 /* BLE */,
 				A100000000000000000000D3 /* UI */,
+				A100000000000000000000F6 /* Assets.xcassets */,
 			);
 			path = MovementLogger;
 			sourceTree = "<group>";
@@ -136,6 +139,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A100000000000000000000AF /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -279,9 +283,10 @@
 		A100000000000000000000E2 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
@@ -309,9 +314,10 @@
 		A100000000000000000000E3 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;

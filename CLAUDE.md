@@ -13,14 +13,44 @@ Phase 2+ (not started): the ~7.5 kLOC of Rust numerics from `stbox-viz/` (Madgwi
 ## Build & run
 
 ```sh
+# CI-style compile check, no signing
 xcodebuild -project MovementLogger.xcodeproj -scheme MovementLogger \
     -destination 'generic/platform=iOS' -configuration Debug \
-    build CODE_SIGNING_ALLOWED=NO          # CI-style compile check, no signing
+    build CODE_SIGNING_ALLOWED=NO
+
+# Signed build for device (uses keychain identity for team 4B37356EGR)
+xcodebuild -project MovementLogger.xcodeproj -scheme MovementLogger \
+    -destination 'generic/platform=iOS' -configuration Debug \
+    -allowProvisioningUpdates build
+
+# Find connected device and install
+xcrun devicectl list devices               # grab the iPhone identifier
+xcrun devicectl device install app --device <UUID> \
+    ~/Library/Developer/Xcode/DerivedData/MovementLogger-*/Build/Products/Debug-iphoneos/MovementLogger.app
+xcrun devicectl device process launch --device <UUID> ch.pumptsueri.movementlogger
 ```
 
-For on-device runs: open `MovementLogger.xcodeproj` in Xcode, set a development team under the target's Signing & Capabilities pane (the project is created with `CODE_SIGN_STYLE = Automatic` and no team), then ⌘R. Simulator builds work too but BLE is non-functional in the simulator — pair a real device.
+The phone must be **unlocked** when `devicectl install` runs (iOS needs to mount the developer disk image). If the install fails with `kAMDMobileImageMounterDeviceLocked`, unlock the screen and retry.
 
-Targets: iOS 17.0+, universal (iPhone + iPad). Bundle id `ch.pumptsueri.movementlogger`. Marketing version is bumped in the target's Debug + Release `MARKETING_VERSION` settings.
+Targets: iOS 17.0+, universal (iPhone + iPad). Bundle id `ch.pumptsueri.movementlogger`. Marketing version is bumped via the target's Debug + Release `MARKETING_VERSION` settings.
+
+## Signing
+
+`DEVELOPMENT_TEAM = 4B37356EGR` (ywesee GmbH) is set as a build setting on both Debug and Release. `CODE_SIGN_STYLE = Automatic`, so Xcode/`xcodebuild -allowProvisioningUpdates` fetches the right provisioning profile from the App Store Connect / developer portal using the developer certificate in the macOS keychain (`Apple Development: Zeno Davatz` or `Apple Distribution: ywesee GmbH`). Apple API credentials for the team live at `~/.apple/credentials.json` + `~/.apple/AuthKey_*.p8`.
+
+## Icon
+
+`MovementLogger/Assets.xcassets/AppIcon.appiconset/Icon-1024.png` is the iOS app icon: a 1024×1024 composite of the Android adaptive icon's foreground (orange/cyan/purple hydrofoil) over the adaptive icon's background color `#F8FAFC`. Regenerate from the Android source:
+
+```sh
+python3 -c "
+from PIL import Image
+fg = Image.open('../movement_logger_android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png').convert('RGBA')
+bg = Image.new('RGBA', (1024, 1024), (0xF8, 0xFA, 0xFC, 0xFF))
+bg.alpha_composite(fg.resize((1024, 1024), Image.LANCZOS))
+bg.convert('RGB').save('MovementLogger/Assets.xcassets/AppIcon.appiconset/Icon-1024.png', 'PNG', optimize=True)
+"
+```
 
 ## Architecture
 
