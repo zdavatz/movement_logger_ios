@@ -536,6 +536,7 @@ private struct GpsTrackPanel: View {
 
 private struct ExportRow: View {
     @Bindable var vm: ReplayViewModel
+    @State private var showingPlayer: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -568,13 +569,70 @@ private struct ExportRow: View {
                         .font(.footnote)
                         .foregroundStyle(.tint)
                 }
+                // Play the exported composite directly in-app. iOS doesn't
+                // expose a public way to deep-link to a specific PHAsset
+                // by localIdentifier — `photos-redirect://` only opens the
+                // main view — so we use AVPlayerViewController (the same
+                // full-screen UI Photos uses internally) on the file URL.
+                Button {
+                    showingPlayer = true
+                } label: {
+                    Label("Play composite video", systemImage: "play.rectangle.fill")
+                }
+                .buttonStyle(.bordered)
             } else if vm.videoMeta?.creationTimeMillis == nil && vm.videoUrl != nil {
                 Text("video has no creation_time — load a clip with embedded date")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
         }
+        .fullScreenCover(isPresented: $showingPlayer) {
+            if let path = vm.lastExportedPath {
+                ExportedVideoPlayer(url: URL(fileURLWithPath: path)) {
+                    showingPlayer = false
+                }
+            }
+        }
     }
+}
+
+/// Full-screen, native iOS playback of the exported composite. Wraps
+/// `AVPlayerViewController` so we get the standard Photos-style transport
+/// controls (scrubber, AirPlay, PiP) for free. Tap the close button to
+/// dismiss.
+private struct ExportedVideoPlayer: View {
+    let url: URL
+    let onDismiss: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            AVPlayerContainer(url: url)
+                .ignoresSafeArea()
+            Button(action: onDismiss) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 36))
+                    .foregroundStyle(.white, .black.opacity(0.6))
+                    .padding()
+            }
+        }
+        .background(Color.black)
+    }
+}
+
+private struct AVPlayerContainer: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        let player = AVPlayer(url: url)
+        controller.player = player
+        controller.showsPlaybackControls = true
+        controller.allowsPictureInPicturePlayback = true
+        player.play()
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
 }
 
 // MARK: - Helpers

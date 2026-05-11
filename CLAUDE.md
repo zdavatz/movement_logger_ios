@@ -136,6 +136,8 @@ Two gotchas worth remembering — both were the source of multiple bad first att
 
 Progress is polled from `session.progress` on a background `Task` every 100 ms — `AVAssetExportSession` exposes progress as a property rather than a callback.
 
+After export, a **"Play composite video"** button presents `AVPlayerViewController` in a `.fullScreenCover` for the just-written file URL. This deliberately avoids deep-linking into the Photos app — iOS has no public scheme to open a specific `PHAsset` by `localIdentifier` (`photos-redirect://` only opens Photos's main view, and anything that takes an asset ID is private API). In-app playback gives the same UI Photos uses internally (transport controls, AirPlay, PiP) and skips the app switch.
+
 ## iOS BLE specifics that differ from Android
 
 - iOS doesn't expose stable MAC addresses; `CBPeripheral.identifier` is a `UUID` scoped to this app installation. The view-model uses that UUID instead of an address. To connect, the client must hold the `CBPeripheral` reference from the scan — we keep a `[UUID: CBPeripheral]` map populated during `centralManager(_:didDiscover:advertisementData:rssi:)`.

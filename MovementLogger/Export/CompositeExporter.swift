@@ -362,86 +362,36 @@ enum CompositeExporter {
     }
 
     // -------------------------------------------------------------------------
-    //  Live per-frame value labels — CALayer subclass animated through
-    //  `frameIndex` so its `display()` re-renders text on every output frame.
+    //  Live per-frame value labels via the "filmstrip" pattern.
+    //
+    //  AVVideoCompositionCoreAnimationTool's offline render pass doesn't
+    //  honor custom `CALayer.display()` re-renders during animation —
+    //  it snapshots the layer tree once and only animates standard
+    //  CA-animatable properties (position, opacity, transform, contentsRect,
+    //  etc.). So instead of mutating `contents` on every frame from
+    //  display(), we pre-render every frame's text into a single tall
+    //  CGImage (a "filmstrip", one frame per row, stacked top-down) and
+    //  animate `contentsRect` through it with `calculationMode = .discrete`.
+    //  `contentsRect` is a built-in animatable property the AVF render
+    //  path honors.
     // -------------------------------------------------------------------------
 
-    /// Custom `CALayer` whose `display()` reads a precomputed `[Double]`
-    /// per series at the current `frameIndex` (animated by CAKeyframeAnimation
-    /// over the video's clock) and re-renders one line of text per series.
-    /// Matches the Android Replay screen's "now X.X" / "fused +X.XX m" labels.
-    final class LiveValueLayer: CALayer {
-        // CA animates this. Has to be a numeric type — we round to Int at
-        // display() time to look up into `valueArrays`.
-        @NSManaged var frameIndex: CGFloat
-
-        // Configuration (set before the animation is added)
-        var valueArrays: [[Double]] = []
-        var labelFormats: [String] = []
-        var labelColors: [UIColor] = []
-        var labelFont: UIFont = .monospacedSystemFont(ofSize: 22, weight: .regular)
-        var lineHeight: CGFloat = 30
-
-        override class func needsDisplay(forKey key: String) -> Bool {
-            if key == "frameIndex" { return true }
-            return super.needsDisplay(forKey: key)
-        }
-
-        override func action(forKey event: String) -> CAAction? {
-            // Disable implicit animations on bounds / position changes so the
-            // layer doesn't fade in / move during the export pipeline.
-            if event == "contents" || event == "bounds" || event == "position" {
-                return NSNull()
-            }
-            return super.action(forKey: event)
-        }
-
-        override func display() {
-            let idx = Int(((presentation() ?? self).frameIndex).rounded())
-            let format = UIGraphicsImageRendererFormat.default()
-            format.scale = 1
-            format.opaque = false
-            let renderer = UIGraphicsImageRenderer(size: bounds.size, format: format)
-            let img = renderer.image { ctx in
-                UIColor.clear.setFill()
-                ctx.cgContext.fill(CGRect(origin: .zero, size: bounds.size))
-                var y: CGFloat = 0
-                for (j, values) in valueArrays.enumerated() {
-                    guard !values.isEmpty else { continue }
-                    let safeIdx = min(max(0, idx), values.count - 1)
-                    let v = values[safeIdx]
-                    let text = String(format: labelFormats[j], v)
-                    let attrs: [NSAttributedString.Key: Any] = [
-                        .font: labelFont,
-                        .foregroundColor: labelColors[j],
-                    ]
-                    (text as NSString).draw(
-                        at: CGPoint(x: 0, y: y), withAttributes: attrs
-                    )
-                    y += lineHeight
-                }
-            }
-            contents = img.cgImage
-        }
-    }
-
-    /// Build a `LiveValueLayer` for the given panel, pre-computing the per-
-    /// video-frame value of each dynamic label. The cursor's data-array index
-    /// for each video frame is the same nearest-by-time lookup the cursor
-    /// animation uses — we just sample the corresponding data series at that
-    /// index for the label string. Returns nil for the GPS panel (which only
-    /// has the dot, no numeric labels).
+    /// Build a CALayer for the given panel that shows live "now <value>"
+    /// labels matching the Android Replay screen's top-left stack. Returns
+    /// nil for the GPS panel (which only has the dot — no numeric labels).
     private static func makeLiveValueLayer(
         panelIndex: Int, panelSize: CGSize,
         durationS: Double, inputs: CompositeExportInputs
-    ) -> LiveValueLayer? {
-        // Per-frame sampling rate matches the cursor animation's 30 fps.
-        let stepS = 1.0 / 30.0
-        let steps = max(2, Int((durationS / stepS).rounded()))
+    ) -> CALayer? {
+        // Update rate: 10 Hz is plenty for human-readable values (100 ms
+        // refresh) and keeps the filmstrip image at a reasonable size.
+        let updateHz: Double = 10.0
+        let steps = max(2, Int((durationS * updateHz).rounded()))
         let videoCreation = inputs.videoCreationMs
 
-        // Lookup helper: at video time t (frame s of steps), what's the index
-        // into the relevant abs-time array?
+        // Map each frame s ∈ 0..<steps to the nearest data-array index, using
+        // the same time-mapping logic as the cursor sweep so labels and
+        // cursor stay in lock-step.
         func indices(for times: [Int64], count: Int) -> [Int] {
             var out = [Int](repeating: 0, count: steps)
             guard count >= 1, !times.isEmpty else { return out }
@@ -455,51 +405,97 @@ enum CompositeExporter {
             return out
         }
 
-        let layer = LiveValueLayer()
-        layer.contentsScale = 1
-        layer.isOpaque = false
-        // Position: just below the title in the panel's top-left.
-        // Panel coords are top-down (parent has isGeometryFlipped).
-        layer.frame = CGRect(x: 16, y: 56, width: panelSize.width - 32, height: 60)
+        // Per-series resolved value arrays (length = steps).
+        let valueArrays: [[Double]]
+        let labelFormats: [String]
+        let labelColors: [UIColor]
 
         switch panelIndex {
         case 0:
             let idxs = indices(for: inputs.gpsAbsTimesMs, count: inputs.speedSmoothedKmh.count)
-            let vals = idxs.map { inputs.speedSmoothedKmh[$0] }
-            layer.valueArrays = [vals]
-            layer.labelFormats = ["now %.1f"]
-            layer.labelColors = [UIColor.label]
+            valueArrays = [idxs.map { inputs.speedSmoothedKmh[$0] }]
+            labelFormats = ["now %.1f"]
+            labelColors = [UIColor.label]
         case 1:
             let idxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.pitchDeg.count)
-            let vals = idxs.map { inputs.pitchDeg[$0] }
-            layer.valueArrays = [vals]
-            layer.labelFormats = ["now %+.1f°"]
-            layer.labelColors = [UIColor.label]
+            valueArrays = [idxs.map { inputs.pitchDeg[$0] }]
+            labelFormats = ["now %+.1f°"]
+            labelColors = [UIColor.label]
         case 2:
-            let fusedIdxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.fusedHeightM.count)
-            let baroIdxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.baroHeightM.count)
-            let fusedVals = fusedIdxs.map { inputs.fusedHeightM[$0] }
-            let baroVals = baroIdxs.map { inputs.baroHeightM[$0] }
-            layer.valueArrays = [fusedVals, baroVals]
-            layer.labelFormats = ["fused %+.2f m", "baro  %+.2f m"]
-            layer.labelColors = [UIColor.systemBlue, UIColor.secondaryLabel]
-            layer.frame.size.height = 90  // room for 2 lines + a bit
+            let fIdxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.fusedHeightM.count)
+            let bIdxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.baroHeightM.count)
+            valueArrays = [
+                fIdxs.map { inputs.fusedHeightM[$0] },
+                bIdxs.map { inputs.baroHeightM[$0] },
+            ]
+            labelFormats = ["fused %+.2f m", "baro  %+.2f m"]
+            labelColors = [UIColor.systemBlue, UIColor.secondaryLabel]
         default:
             return nil
         }
 
-        // Animate frameIndex from 0 → steps-1 across the video duration.
-        let anim = CAKeyframeAnimation(keyPath: "frameIndex")
-        anim.values = (0..<steps).map { CGFloat($0) }
-        anim.keyTimes = (0..<steps).map { NSNumber(value: Double($0) / Double(steps - 1)) }
+        let labelFont = UIFont.monospacedSystemFont(ofSize: 22, weight: .regular)
+        let lineHeight: CGFloat = 30
+        let lines = valueArrays.count
+        let frameHeight = lineHeight * CGFloat(lines)
+        let frameWidth = panelSize.width - 32
+
+        // Render the filmstrip: each of `steps` frames is one row, stacked
+        // top-down.
+        let stripSize = CGSize(width: frameWidth, height: frameHeight * CGFloat(steps))
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: stripSize, format: format)
+        let stripImage = renderer.image { ctx in
+            UIColor.clear.setFill()
+            ctx.cgContext.fill(CGRect(origin: .zero, size: stripSize))
+            for s in 0..<steps {
+                let yBase = CGFloat(s) * frameHeight
+                for (j, vals) in valueArrays.enumerated() {
+                    let v = vals[s]
+                    let text = String(format: labelFormats[j], v)
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: labelFont,
+                        .foregroundColor: labelColors[j],
+                    ]
+                    (text as NSString).draw(
+                        at: CGPoint(x: 0, y: yBase + CGFloat(j) * lineHeight),
+                        withAttributes: attrs
+                    )
+                }
+            }
+        }
+
+        // Layer is the size of ONE frame in the filmstrip — `contentsRect`
+        // controls which slice of the strip is visible.
+        let layer = CALayer()
+        layer.contents = stripImage.cgImage
+        layer.contentsGravity = .resize
+        layer.frame = CGRect(x: 16, y: 56, width: frameWidth, height: frameHeight)
+        layer.isOpaque = false
+        // Start showing frame 0 of the strip.
+        let frac = 1.0 / Double(steps)
+        layer.contentsRect = CGRect(x: 0, y: 0, width: 1, height: frac)
+
+        // Keyframe animation that snaps `contentsRect` to each frame in
+        // turn. `.discrete` means no interpolation between frames — each
+        // value holds until the next keyTime.
+        let values = (0..<steps).map { s in
+            NSValue(cgRect: CGRect(x: 0, y: Double(s) * frac, width: 1, height: frac))
+        }
+        let keyTimes = (0..<steps).map { NSNumber(value: Double($0) / Double(steps - 1)) }
+
+        let anim = CAKeyframeAnimation(keyPath: "contentsRect")
+        anim.values = values
+        anim.keyTimes = keyTimes
+        anim.calculationMode = .discrete
         anim.duration = max(durationS, 0.001)
         anim.beginTime = AVCoreAnimationBeginTimeAtZero
         anim.fillMode = .forwards
         anim.isRemovedOnCompletion = false
         layer.add(anim, forKey: "values")
 
-        // Kick an initial display so the first frame has content.
-        layer.setNeedsDisplay()
         return layer
     }
 
