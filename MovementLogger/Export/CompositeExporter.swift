@@ -184,6 +184,16 @@ enum CompositeExporter {
                 panel.addSublayer(dot)
             }
 
+            // Live "now X.X" / "fused / baro" value labels — re-rendered per
+            // output frame so the numbers track the cursor as the video plays.
+            // Matches the Android Replay screen's top-left label stack.
+            if let live = makeLiveValueLayer(
+                panelIndex: i, panelSize: panelSize,
+                durationS: durationS, inputs: inputs
+            ) {
+                panel.addSublayer(live)
+            }
+
             // Add panel sublayers AFTER videoLayer so they're composited on top.
             parentLayer.addSublayer(panel)
         }
@@ -290,11 +300,49 @@ enum CompositeExporter {
             case 2: title = "Height above water (m)"
             default: title = "GPS track"
             }
-            let attrs: [NSAttributedString.Key: Any] = [
+            let titleAttrs: [NSAttributedString.Key: Any] = [
                 .font: UIFont.systemFont(ofSize: 28, weight: .semibold),
                 .foregroundColor: UIColor.label,
             ]
-            title.draw(at: CGPoint(x: 16, y: 8), withAttributes: attrs)
+            title.draw(at: CGPoint(x: 16, y: 8), withAttributes: titleAttrs)
+
+            // Bake the static label (max / ± / range) below where the dynamic
+            // labels will be drawn by the LiveValueLayer at render time.
+            // Layout: title at y=8, then dynamic lines starting at y=56, each
+            // ~30 tall. Static label sits at the bottom of the stack.
+            let staticLabel: String?
+            let staticY: CGFloat
+            let labelFont = UIFont.monospacedSystemFont(ofSize: 22, weight: .regular)
+            let staticAttrs: [NSAttributedString.Key: Any] = [
+                .font: labelFont,
+                .foregroundColor: UIColor.secondaryLabel,
+            ]
+            switch index {
+            case 0:
+                let maxV = max(inputs.speedSmoothedKmh.max() ?? 0, 5.0)
+                staticLabel = String(format: "max %.1f", maxV)
+                staticY = 90
+            case 1:
+                let pitch = inputs.pitchDeg
+                let minV = pitch.min() ?? 0
+                let maxV = pitch.max() ?? 0
+                let absMax = max(abs(minV), abs(maxV), 5.0)
+                staticLabel = String(format: "±%.0f°", absMax)
+                staticY = 90
+            case 2:
+                var minV = Double.infinity
+                var maxV = -Double.infinity
+                for v in inputs.baroHeightM { if v < minV { minV = v }; if v > maxV { maxV = v } }
+                for v in inputs.fusedHeightM { if v < minV { minV = v }; if v > maxV { maxV = v } }
+                staticLabel = String(format: "range %+.2f .. %+.2f", minV, maxV)
+                staticY = 120
+            default:
+                staticLabel = nil
+                staticY = 0
+            }
+            if let s = staticLabel {
+                s.draw(at: CGPoint(x: 16, y: staticY), withAttributes: staticAttrs)
+            }
 
             let inset = UIEdgeInsets(top: 56, left: 16, bottom: 16, right: 16)
             let plot = CGRect(
@@ -311,6 +359,148 @@ enum CompositeExporter {
             }
         }
         return img.cgImage
+    }
+
+    // -------------------------------------------------------------------------
+    //  Live per-frame value labels — CALayer subclass animated through
+    //  `frameIndex` so its `display()` re-renders text on every output frame.
+    // -------------------------------------------------------------------------
+
+    /// Custom `CALayer` whose `display()` reads a precomputed `[Double]`
+    /// per series at the current `frameIndex` (animated by CAKeyframeAnimation
+    /// over the video's clock) and re-renders one line of text per series.
+    /// Matches the Android Replay screen's "now X.X" / "fused +X.XX m" labels.
+    final class LiveValueLayer: CALayer {
+        // CA animates this. Has to be a numeric type — we round to Int at
+        // display() time to look up into `valueArrays`.
+        @NSManaged var frameIndex: CGFloat
+
+        // Configuration (set before the animation is added)
+        var valueArrays: [[Double]] = []
+        var labelFormats: [String] = []
+        var labelColors: [UIColor] = []
+        var labelFont: UIFont = .monospacedSystemFont(ofSize: 22, weight: .regular)
+        var lineHeight: CGFloat = 30
+
+        override class func needsDisplay(forKey key: String) -> Bool {
+            if key == "frameIndex" { return true }
+            return super.needsDisplay(forKey: key)
+        }
+
+        override func action(forKey event: String) -> CAAction? {
+            // Disable implicit animations on bounds / position changes so the
+            // layer doesn't fade in / move during the export pipeline.
+            if event == "contents" || event == "bounds" || event == "position" {
+                return NSNull()
+            }
+            return super.action(forKey: event)
+        }
+
+        override func display() {
+            let idx = Int(((presentation() ?? self).frameIndex).rounded())
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = 1
+            format.opaque = false
+            let renderer = UIGraphicsImageRenderer(size: bounds.size, format: format)
+            let img = renderer.image { ctx in
+                UIColor.clear.setFill()
+                ctx.cgContext.fill(CGRect(origin: .zero, size: bounds.size))
+                var y: CGFloat = 0
+                for (j, values) in valueArrays.enumerated() {
+                    guard !values.isEmpty else { continue }
+                    let safeIdx = min(max(0, idx), values.count - 1)
+                    let v = values[safeIdx]
+                    let text = String(format: labelFormats[j], v)
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: labelFont,
+                        .foregroundColor: labelColors[j],
+                    ]
+                    (text as NSString).draw(
+                        at: CGPoint(x: 0, y: y), withAttributes: attrs
+                    )
+                    y += lineHeight
+                }
+            }
+            contents = img.cgImage
+        }
+    }
+
+    /// Build a `LiveValueLayer` for the given panel, pre-computing the per-
+    /// video-frame value of each dynamic label. The cursor's data-array index
+    /// for each video frame is the same nearest-by-time lookup the cursor
+    /// animation uses — we just sample the corresponding data series at that
+    /// index for the label string. Returns nil for the GPS panel (which only
+    /// has the dot, no numeric labels).
+    private static func makeLiveValueLayer(
+        panelIndex: Int, panelSize: CGSize,
+        durationS: Double, inputs: CompositeExportInputs
+    ) -> LiveValueLayer? {
+        // Per-frame sampling rate matches the cursor animation's 30 fps.
+        let stepS = 1.0 / 30.0
+        let steps = max(2, Int((durationS / stepS).rounded()))
+        let videoCreation = inputs.videoCreationMs
+
+        // Lookup helper: at video time t (frame s of steps), what's the index
+        // into the relevant abs-time array?
+        func indices(for times: [Int64], count: Int) -> [Int] {
+            var out = [Int](repeating: 0, count: steps)
+            guard count >= 1, !times.isEmpty else { return out }
+            for s in 0..<steps {
+                let t = Double(s) / Double(steps - 1)
+                let videoTimeMs = Int64(t * durationS * 1000.0)
+                let target = videoCreation + videoTimeMs
+                let idx = nearestIndexByTime(times, target: target)
+                out[s] = max(0, min(count - 1, idx))
+            }
+            return out
+        }
+
+        let layer = LiveValueLayer()
+        layer.contentsScale = 1
+        layer.isOpaque = false
+        // Position: just below the title in the panel's top-left.
+        // Panel coords are top-down (parent has isGeometryFlipped).
+        layer.frame = CGRect(x: 16, y: 56, width: panelSize.width - 32, height: 60)
+
+        switch panelIndex {
+        case 0:
+            let idxs = indices(for: inputs.gpsAbsTimesMs, count: inputs.speedSmoothedKmh.count)
+            let vals = idxs.map { inputs.speedSmoothedKmh[$0] }
+            layer.valueArrays = [vals]
+            layer.labelFormats = ["now %.1f"]
+            layer.labelColors = [UIColor.label]
+        case 1:
+            let idxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.pitchDeg.count)
+            let vals = idxs.map { inputs.pitchDeg[$0] }
+            layer.valueArrays = [vals]
+            layer.labelFormats = ["now %+.1f°"]
+            layer.labelColors = [UIColor.label]
+        case 2:
+            let fusedIdxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.fusedHeightM.count)
+            let baroIdxs = indices(for: inputs.sensorAbsTimesMs, count: inputs.baroHeightM.count)
+            let fusedVals = fusedIdxs.map { inputs.fusedHeightM[$0] }
+            let baroVals = baroIdxs.map { inputs.baroHeightM[$0] }
+            layer.valueArrays = [fusedVals, baroVals]
+            layer.labelFormats = ["fused %+.2f m", "baro  %+.2f m"]
+            layer.labelColors = [UIColor.systemBlue, UIColor.secondaryLabel]
+            layer.frame.size.height = 90  // room for 2 lines + a bit
+        default:
+            return nil
+        }
+
+        // Animate frameIndex from 0 → steps-1 across the video duration.
+        let anim = CAKeyframeAnimation(keyPath: "frameIndex")
+        anim.values = (0..<steps).map { CGFloat($0) }
+        anim.keyTimes = (0..<steps).map { NSNumber(value: Double($0) / Double(steps - 1)) }
+        anim.duration = max(durationS, 0.001)
+        anim.beginTime = AVCoreAnimationBeginTimeAtZero
+        anim.fillMode = .forwards
+        anim.isRemovedOnCompletion = false
+        layer.add(anim, forKey: "values")
+
+        // Kick an initial display so the first frame has content.
+        layer.setNeedsDisplay()
+        return layer
     }
 
     private static func drawSpeedSeries(_ cg: CGContext, plot: CGRect, smoothed: [Double]) {

@@ -126,10 +126,13 @@ Each panel takes its own absolute-time array (`gpsAbsTimesMs` or `sensorAbsTimes
 
 Built on **`AVAssetExportSession` + `AVVideoCompositionCoreAnimationTool`** — the OS-managed parallel pipeline with the hardware H.264 encoder. End-to-end ~30-50 s for a 39-s 1080×3200 clip on iPhone 17 Pro Max.
 
+**Live value labels** in each panel (mirroring the Android Replay screen's "now X.X" / "fused +X.XX m" top-left stack) come from a `LiveValueLayer: CALayer` subclass. Its `@NSManaged var frameIndex: CGFloat` is animated 0 → numFrames−1 across the video duration via a `CAKeyframeAnimation`; CA's render pass calls `display()` once per output frame, which reads `presentation().frameIndex`, indexes into a precomputed per-frame `[Double]` series (one per dynamic label), and rasterises the text into the layer's `contents`. Pre-computation maps each video frame to the nearest data-array index using the same `nearestIndexByTime(gpsAbsTimesMs, target: videoCreation + t*1000)` that drives the cursor sweep — so labels and cursor stay in lock-step. Static labels (`max`, `±X°`, `range`) are baked once into the panel CGImage; only the dynamic lines re-render per frame.
+
 Two gotchas worth remembering — both were the source of multiple bad first attempts:
 
 1. **`videoLayer.frame` MUST equal `parentLayer.frame` MUST equal `videoComp.renderSize`.** When the videoLayer is a smaller sub-region of parent, the CA tool letterboxes the renderSize-sized video composition output to fit inside the videoLayer's bounds, leaving a black gap. To position the video within a larger canvas, set `videoLayer.frame == parentLayer.frame == renderSize` and use the layer instruction's transform to place the source frame in the top region of renderSize. Opaque sibling sublayers (panel `CALayer`s, added AFTER `videoLayer`) cover the empty bottom of the video render.
 2. **`UIGraphicsImageRendererFormat.scale` defaults to device scale (3× on iPhone).** For offline export rendering, this allocates `3× × 3×` pixels — a 1080×3200 canvas becomes a 31 MP bitmap. Set `format.scale = 1` for any export-only render to keep it at native pixel dimensions.
+3. **Custom CALayer animating non-standard property:** subclass `CALayer`, declare `@NSManaged var prop: CGFloat`, override `needsDisplay(forKey:)` to return `true` for that key, override `display()` to rasterise contents based on `presentation().prop`. Then attach a `CAKeyframeAnimation(keyPath: "prop")`. This is how `LiveValueLayer` re-renders text every frame against the video clock without thousands of pre-baked CGImages.
 
 Progress is polled from `session.progress` on a background `Task` every 100 ms — `AVAssetExportSession` exposes progress as a property rather than a callback.
 
