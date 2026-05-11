@@ -16,7 +16,11 @@ struct ReplayScreen: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    VideoSurface(player: player, hasVideo: vm.videoUrl != nil)
+                    VideoSurface(
+                        player: player,
+                        hasVideo: vm.videoUrl != nil,
+                        aspect: vm.videoMeta?.displayedSize
+                    )
                     PhotosPicker(
                         selection: $pickerItem,
                         matching: .videos,
@@ -28,7 +32,9 @@ struct ReplayScreen: View {
 
                     Divider()
 
-                    RecordingPicker(vm: vm)
+                    RecordingPicker(vm: vm) { url in
+                        Task { await loadVideoFromUrl(url) }
+                    }
 
                     if vm.loading {
                         InlineSpinner(label: "loading…")
@@ -39,6 +45,8 @@ struct ReplayScreen: View {
                     }
 
                     AlignmentSummary(vm: vm)
+
+                    ExportRow(vm: vm)
 
                     if !vm.speedSmoothedKmh.isEmpty {
                         SpeedPanel(
@@ -86,8 +94,7 @@ struct ReplayScreen: View {
             guard let item = newItem else { return }
             Task {
                 if let movie = try? await item.loadTransferable(type: VideoFile.self) {
-                    await vm.pickVideo(movie.url)
-                    player.replaceCurrentItem(with: AVPlayerItem(url: movie.url))
+                    await loadVideoFromUrl(movie.url)
                 }
             }
         }
@@ -102,6 +109,11 @@ struct ReplayScreen: View {
             }
         }
     }
+
+    private func loadVideoFromUrl(_ url: URL) async {
+        await vm.pickVideo(url)
+        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+    }
 }
 
 // MARK: - Video surface
@@ -109,12 +121,19 @@ struct ReplayScreen: View {
 private struct VideoSurface: View {
     let player: AVPlayer
     let hasVideo: Bool
+    /// Real displayed size of the loaded video (after preferred transform).
+    /// We use it to set the player's aspect ratio so portrait clips don't
+    /// collapse to zero height — without an explicit aspect SwiftUI's
+    /// `VideoPlayer` reports no intrinsic size and the view disappears.
+    let aspect: CGSize?
 
     var body: some View {
         ZStack {
             if hasVideo {
+                let a = aspect ?? CGSize(width: 9, height: 16)
                 VideoPlayer(player: player)
-                    .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                    .aspectRatio(a.width / a.height, contentMode: .fit)
+                    .frame(maxHeight: 420)
             } else {
                 Rectangle()
                     .fill(Color(.systemGray5))
@@ -131,17 +150,27 @@ private struct VideoSurface: View {
 
 private struct RecordingPicker: View {
     @Bindable var vm: ReplayViewModel
+    /// Invoked when the user taps Load on a video file under Documents.
+    /// The parent owns the AVPlayer so it knows how to swap clips.
+    let onVideoPick: (URL) -> Void
 
     var body: some View {
         let recordings = vm.listLocalRecordings()
         let sensorCandidates = recordings.filter { isSensCsv($0.lastPathComponent) }
         let gpsCandidates = recordings.filter { isGpsCsv($0.lastPathComponent) }
+        let videoCandidates = recordings.filter { isVideoFile($0.lastPathComponent) }
 
         if recordings.isEmpty {
             Text("No CSVs in this app's storage yet. Use the Sync tab to download some first.")
                 .foregroundStyle(.secondary)
         } else {
             VStack(alignment: .leading, spacing: 8) {
+                if !videoCandidates.isEmpty {
+                    Text("Video (in Files)").font(.subheadline.weight(.semibold))
+                    FileChooserList(files: videoCandidates, selected: vm.videoUrl) { url in
+                        onVideoPick(url)
+                    }
+                }
                 Text("Sensor CSV").font(.subheadline.weight(.semibold))
                 FileChooserList(files: sensorCandidates, selected: vm.sensorFile) { url in
                     Task { await vm.pickSensorCsv(url) }
@@ -205,13 +234,19 @@ private struct AlignmentSummary: View {
             Text(vm.videoMeta?.creationTimeMillis.map { "video creation: \(formatLocalTime($0)) (local)" }
                 ?? "video creation: —")
                 .font(.system(size: 12, design: .monospaced))
-            Text(vm.gpsAnchorUtcMillis.map { "gps t0:          \(formatLocalTime($0)) (local, today's date)" }
+            Text(vm.gpsAnchorUtcMillis.map { "gps t0:          \(formatLocalTime($0)) (local)" }
                 ?? "gps t0:          —")
                 .font(.system(size: 12, design: .monospaced))
             Text("sensor rows:     \(vm.sensorRows.count == 0 ? "—" : String(vm.sensorRows.count))")
                 .font(.system(size: 12, design: .monospaced))
             Text("gps rows:        \(vm.gpsRows.count == 0 ? "—" : String(vm.gpsRows.count))")
                 .font(.system(size: 12, design: .monospaced))
+            if let s = vm.rideSlicingSummary {
+                Text(s)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -497,6 +532,51 @@ private struct GpsTrackPanel: View {
     }
 }
 
+// MARK: - Export
+
+private struct ExportRow: View {
+    @Bindable var vm: ReplayViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Button {
+                    Task { await vm.exportComposite() }
+                } label: {
+                    Text(vm.exporting ? "Exporting…" : "Export composite MOV")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    vm.exporting
+                    || vm.videoUrl == nil
+                    || vm.videoMeta?.creationTimeMillis == nil
+                    || vm.pitchDeg.isEmpty
+                    || vm.fusedHeightM.isEmpty
+                )
+                if vm.exporting {
+                    ProgressView(value: vm.exportProgress)
+                        .frame(maxWidth: .infinity)
+                }
+            }
+            if let path = vm.lastExportedPath {
+                Text("saved → \(path)")
+                    .font(.footnote)
+                    .foregroundStyle(.tint)
+                    .lineLimit(2)
+                if vm.savedToPhotos {
+                    Text("also added to Photos library")
+                        .font(.footnote)
+                        .foregroundStyle(.tint)
+                }
+            } else if vm.videoMeta?.creationTimeMillis == nil && vm.videoUrl != nil {
+                Text("video has no creation_time — load a clip with embedded date")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 // MARK: - Helpers
 
 private struct ErrorBanner: View {
@@ -574,6 +654,14 @@ private func isGpsCsv(_ name: String) -> Bool {
     let n = name.lowercased()
     if n.hasPrefix("._") { return false }
     return n.hasPrefix("gps") && n.hasSuffix(".csv")
+}
+
+private func isVideoFile(_ name: String) -> Bool {
+    let n = name.lowercased()
+    if n.hasPrefix("._") { return false }
+    // Hide the exporter's own output so the picker only shows the source clip.
+    if n.hasPrefix("combined_") { return false }
+    return n.hasSuffix(".mov") || n.hasSuffix(".mp4") || n.hasSuffix(".m4v")
 }
 
 private func fileSize(_ url: URL) -> Int64 {

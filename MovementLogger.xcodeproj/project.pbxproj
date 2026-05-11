@@ -25,6 +25,7 @@
 		A1000000000000000000010A /* MainNav.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020A /* MainNav.swift */; };
 		A1000000000000000000010B /* ReplayViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020B /* ReplayViewModel.swift */; };
 		A1000000000000000000010C /* ReplayScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020C /* ReplayScreen.swift */; };
+		A1000000000000000000010D /* CompositeExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020D /* CompositeExporter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +48,7 @@
 		A1000000000000000000020A /* MainNav.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainNav.swift; sourceTree = "<group>"; };
 		A1000000000000000000020B /* ReplayViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayViewModel.swift; sourceTree = "<group>"; };
 		A1000000000000000000020C /* ReplayScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayScreen.swift; sourceTree = "<group>"; };
+		A1000000000000000000020D /* CompositeExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositeExporter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -75,9 +77,18 @@
 				A100000000000000000000D2 /* BLE */,
 				A100000000000000000000D5 /* Data */,
 				A100000000000000000000D3 /* UI */,
+				A100000000000000000000D6 /* Export */,
 				A100000000000000000000F6 /* Assets.xcassets */,
 			);
 			path = MovementLogger;
+			sourceTree = "<group>";
+		};
+		A100000000000000000000D6 /* Export */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000020D /* CompositeExporter.swift */,
+			);
+			path = Export;
 			sourceTree = "<group>";
 		};
 		A100000000000000000000D5 /* Data */ = {
@@ -211,6 +222,7 @@
 				A1000000000000000000010A /* MainNav.swift in Sources */,
 				A1000000000000000000010B /* ReplayViewModel.swift in Sources */,
 				A1000000000000000000010C /* ReplayScreen.swift in Sources */,
+				A1000000000000000000010D /* CompositeExporter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -347,6 +359,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Movement Logger talks to the PumpTsueri SensorTile.box over BLE to download recorded sessions.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Movement Logger saves the composite replay video to your Photos library so you can share it.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
@@ -378,6 +391,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Movement Logger talks to the PumpTsueri SensorTile.box over BLE to download recorded sessions.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Movement Logger saves the composite replay video to your Photos library so you can share it.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;

@@ -12,6 +12,10 @@ import AVFoundation
 struct VideoMetadata: Equatable {
     let creationTimeMillis: Int64?
     let durationMillis: Int64
+    /// Displayed dimensions after applying the track's preferred transform.
+    /// Used by the SwiftUI preview to lock its aspect ratio so portrait
+    /// clips render upright instead of collapsing to zero size.
+    let displayedSize: CGSize
 }
 
 enum VideoMetadataReader {
@@ -29,9 +33,26 @@ enum VideoMetadataReader {
             if creationMs == nil {
                 creationMs = await firstCreationDateMillisFromQuickTime(asset: asset)
             }
-            return VideoMetadata(creationTimeMillis: creationMs, durationMillis: durationMs)
+            // Displayed dimensions: load the first video track, apply its
+            // preferred transform to the natural size to handle portrait
+            // clips that are encoded landscape.
+            var displayedSize = CGSize(width: 9, height: 16)  // sensible default
+            if let track = try await asset.loadTracks(withMediaType: .video).first {
+                let natural = try await track.load(.naturalSize)
+                let xform = try await track.load(.preferredTransform)
+                let rect = CGRect(origin: .zero, size: natural).applying(xform)
+                displayedSize = CGSize(width: abs(rect.width), height: abs(rect.height))
+            }
+            return VideoMetadata(
+                creationTimeMillis: creationMs,
+                durationMillis: durationMs,
+                displayedSize: displayedSize
+            )
         } catch {
-            return VideoMetadata(creationTimeMillis: nil, durationMillis: 0)
+            return VideoMetadata(
+                creationTimeMillis: nil, durationMillis: 0,
+                displayedSize: CGSize(width: 9, height: 16)
+            )
         }
     }
 
