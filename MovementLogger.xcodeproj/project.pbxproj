@@ -13,6 +13,18 @@
 		A100000000000000000000AD /* FileSyncViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F3 /* FileSyncViewModel.swift */; };
 		A100000000000000000000AE /* FileSyncScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* FileSyncScreen.swift */; };
 		A100000000000000000000AF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* Assets.xcassets */; };
+		A10000000000000000000101 /* CsvParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000201 /* CsvParsers.swift */; };
+		A10000000000000000000102 /* GpsTime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000202 /* GpsTime.swift */; };
+		A10000000000000000000103 /* VideoMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000203 /* VideoMetadata.swift */; };
+		A10000000000000000000104 /* GpsMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000204 /* GpsMath.swift */; };
+		A10000000000000000000105 /* Butterworth.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000205 /* Butterworth.swift */; };
+		A10000000000000000000106 /* EulerAngles.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000206 /* EulerAngles.swift */; };
+		A10000000000000000000107 /* Madgwick.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000207 /* Madgwick.swift */; };
+		A10000000000000000000108 /* Baro.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000208 /* Baro.swift */; };
+		A10000000000000000000109 /* FusionHeight.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000209 /* FusionHeight.swift */; };
+		A1000000000000000000010A /* MainNav.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020A /* MainNav.swift */; };
+		A1000000000000000000010B /* ReplayViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020B /* ReplayViewModel.swift */; };
+		A1000000000000000000010C /* ReplayScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020C /* ReplayScreen.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -23,6 +35,18 @@
 		A100000000000000000000F4 /* FileSyncScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncScreen.swift; sourceTree = "<group>"; };
 		A100000000000000000000F5 /* MovementLogger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovementLogger.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000000000000000000F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		A10000000000000000000201 /* CsvParsers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CsvParsers.swift; sourceTree = "<group>"; };
+		A10000000000000000000202 /* GpsTime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsTime.swift; sourceTree = "<group>"; };
+		A10000000000000000000203 /* VideoMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoMetadata.swift; sourceTree = "<group>"; };
+		A10000000000000000000204 /* GpsMath.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsMath.swift; sourceTree = "<group>"; };
+		A10000000000000000000205 /* Butterworth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Butterworth.swift; sourceTree = "<group>"; };
+		A10000000000000000000206 /* EulerAngles.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EulerAngles.swift; sourceTree = "<group>"; };
+		A10000000000000000000207 /* Madgwick.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Madgwick.swift; sourceTree = "<group>"; };
+		A10000000000000000000208 /* Baro.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Baro.swift; sourceTree = "<group>"; };
+		A10000000000000000000209 /* FusionHeight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FusionHeight.swift; sourceTree = "<group>"; };
+		A1000000000000000000020A /* MainNav.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainNav.swift; sourceTree = "<group>"; };
+		A1000000000000000000020B /* ReplayViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayViewModel.swift; sourceTree = "<group>"; };
+		A1000000000000000000020C /* ReplayScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayScreen.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -49,10 +73,27 @@
 			children = (
 				A100000000000000000000F0 /* MovementLoggerApp.swift */,
 				A100000000000000000000D2 /* BLE */,
+				A100000000000000000000D5 /* Data */,
 				A100000000000000000000D3 /* UI */,
 				A100000000000000000000F6 /* Assets.xcassets */,
 			);
 			path = MovementLogger;
+			sourceTree = "<group>";
+		};
+		A100000000000000000000D5 /* Data */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000201 /* CsvParsers.swift */,
+				A10000000000000000000202 /* GpsTime.swift */,
+				A10000000000000000000203 /* VideoMetadata.swift */,
+				A10000000000000000000204 /* GpsMath.swift */,
+				A10000000000000000000205 /* Butterworth.swift */,
+				A10000000000000000000206 /* EulerAngles.swift */,
+				A10000000000000000000207 /* Madgwick.swift */,
+				A10000000000000000000208 /* Baro.swift */,
+				A10000000000000000000209 /* FusionHeight.swift */,
+			);
+			path = Data;
 			sourceTree = "<group>";
 		};
 		A100000000000000000000D2 /* BLE */ = {
@@ -67,8 +108,11 @@
 		A100000000000000000000D3 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				A1000000000000000000020A /* MainNav.swift */,
 				A100000000000000000000F3 /* FileSyncViewModel.swift */,
 				A100000000000000000000F4 /* FileSyncScreen.swift */,
+				A1000000000000000000020B /* ReplayViewModel.swift */,
+				A1000000000000000000020C /* ReplayScreen.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -155,6 +199,18 @@
 				A100000000000000000000AC /* BleClient.swift in Sources */,
 				A100000000000000000000AD /* FileSyncViewModel.swift in Sources */,
 				A100000000000000000000AE /* FileSyncScreen.swift in Sources */,
+				A10000000000000000000101 /* CsvParsers.swift in Sources */,
+				A10000000000000000000102 /* GpsTime.swift in Sources */,
+				A10000000000000000000103 /* VideoMetadata.swift in Sources */,
+				A10000000000000000000104 /* GpsMath.swift in Sources */,
+				A10000000000000000000105 /* Butterworth.swift in Sources */,
+				A10000000000000000000106 /* EulerAngles.swift in Sources */,
+				A10000000000000000000107 /* Madgwick.swift in Sources */,
+				A10000000000000000000108 /* Baro.swift in Sources */,
+				A10000000000000000000109 /* FusionHeight.swift in Sources */,
+				A1000000000000000000010A /* MainNav.swift in Sources */,
+				A1000000000000000000010B /* ReplayViewModel.swift in Sources */,
+				A1000000000000000000010C /* ReplayScreen.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -4,7 +4,7 @@ import SwiftUI
 struct MovementLoggerApp: App {
     var body: some Scene {
         WindowGroup {
-            FileSyncScreen()
+            MainNav()
         }
     }
 }
