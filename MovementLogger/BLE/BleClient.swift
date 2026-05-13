@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import UIKit
 
 /// Single-worker BLE client for the PumpTsueri FileSync protocol.
 ///
@@ -61,6 +62,18 @@ final class BleClient: NSObject {
     private var workerTask: Task<Void, Never>?
     private var watchdogTask: Task<Void, Never>?
 
+    // ----- Background-task assertion -----------------------------------------
+    //
+    // `bluetooth-central` in UIBackgroundModes lets BLE callbacks fire while the
+    // app is in the background. To keep the runloop / worker Task / `Task.sleep`
+    // timers alive during the quiet moments between BLE notifications (e.g. the
+    // 500 ms LIST-inactivity wait, the post-START_LOG sleep, gaps between READ
+    // chunks), we also hold a UIApplication background-task assertion while a
+    // peripheral is connected. iOS extends that assertion as long as BLE traffic
+    // keeps arriving, so a long READ doesn't get suspended even if the user
+    // switches apps.
+    private var bgTaskID: UIBackgroundTaskIdentifier = .invalid
+
     override init() {
         var ec: AsyncStream<BleEvent>.Continuation!
         self.events = AsyncStream(BleEvent.self, bufferingPolicy: .bufferingNewest(256)) { ec = $0 }
@@ -97,6 +110,33 @@ final class BleClient: NSObject {
         eventsCont.finish()
         if let p = peripheral { central.cancelPeripheralConnection(p) }
         peripheral = nil
+        endBackgroundAssertion()
+    }
+
+    // -------------------------------------------------------------------------
+    //  Background-task assertion
+    // -------------------------------------------------------------------------
+
+    private func beginBackgroundAssertion() {
+        // UIApplication APIs must be touched on the main actor.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if self.bgTaskID != .invalid { return }
+            self.bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "ble-sync") { [weak self] in
+                // Expiration handler — iOS is about to suspend us. End the
+                // assertion so the system doesn't kill the app outright.
+                self?.endBackgroundAssertion()
+            }
+        }
+    }
+
+    private func endBackgroundAssertion() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard self.bgTaskID != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(self.bgTaskID)
+            self.bgTaskID = .invalid
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -206,6 +246,7 @@ final class BleClient: NSObject {
         peripheral = nil
         cmdChar = nil
         dataChar = nil
+        endBackgroundAssertion()
         if emitEvent { emit(.disconnected) }
     }
 
@@ -296,6 +337,10 @@ final class BleClient: NSObject {
                 disconnectInner(emitEvent: true)
             } else {
                 op = .idle
+                // Keep the app alive in the background for the whole session.
+                // Paired with the `bluetooth-central` UIBackgroundMode so that
+                // long READs continue when the user switches apps.
+                beginBackgroundAssertion()
                 emit(.connected)
             }
         case .notification(let data):

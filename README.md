@@ -4,7 +4,7 @@ Movement Logger GUI for iOS — SwiftUI + CoreBluetooth + AVKit. Talks to the Pu
 
 ## Features
 
-- **Sync tab** — BLE scan / connect / LIST / READ / DELETE / STOP_LOG / START_LOG against the PumpTsueri SensorTile.box. CSVs land in the app's `Documents/`, accessible from the Files app.
+- **Sync tab** — BLE scan / connect / LIST / READ / DELETE / STOP_LOG / START_LOG against the PumpTsueri SensorTile.box. CSVs land in the app's `Documents/`, accessible from the Files app. Long READs continue in the background — switch to another app while a session downloads and the bytes keep flowing (`UIBackgroundModes = bluetooth-central` + per-session `beginBackgroundTask` assertion).
 - **Replay tab** — pick a video (Photos or `Documents/`) + a `Sens*.csv` + a `Gps*.csv`. Data is sliced to the ride window (the section of the session overlapping the video clip). Pipeline: Madgwick 6DOF IMU AHRS → drift-corrected nose angle, GPS-anchored TC-compensated baro height, α-β complementary fused height, smoothed GPS-derived speed.
 - **Composite export** — single tap produces an H.264 `.mov` with the source video on top and the four panels stacked below. Cursor sweeps, GPS dot, and live "now X.X" / "fused +X.XX m" value labels animate against the video clock. Saves to `Documents/combined_<basename>.mov` and adds to Photos. A "Play composite video" button opens the result full-screen in the native iOS player.
 
