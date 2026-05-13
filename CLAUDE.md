@@ -65,7 +65,9 @@ Canonical backup of the slim Apple Distribution `.p12` + its password sits in `~
 
 ## App Store screenshots
 
-`scripts/resize_screenshots.py` (PIL/LANCZOS) downsizes the four 1320×2868 source screenshots in `screenshots/` to App Store Connect's required sizes: 1284 × 2778 (6.7" iPhone, output to `screenshots/store/iphone_67/`) and 1242 × 2688 (6.5" iPhone, `screenshots/store/iphone_65/`). The downscale is non-uniform (source aspect 0.4602, target 0.4622) but the 0.4% distortion is imperceptible.
+`scripts/resize_screenshots.py` (PIL/LANCZOS) downsizes the four 1320×2868 source screenshots in `screenshots/` to App Store Connect's required sizes: **1290 × 2796** (6.7" iPhone — APP_IPHONE_67, output to `screenshots/store/iphone_67/`) and **1242 × 2688** (6.5" iPhone — APP_IPHONE_65, `screenshots/store/iphone_65/`). The downscale aspect is essentially identical to the source (~0.4%), imperceptible.
+
+**6.5" vs 6.7" gotcha.** The App Store Connect upload UI lists `1284 × 2778` under the 6.5" Display slot — that's a legitimate 6.5"-class size (iPhone 13 Pro Max era). But it is REJECTED by the `APP_IPHONE_67` slot (returns `IMAGE_INCORRECT_DIMENSIONS` and `assetDeliveryState = FAILED`). For 6.7" (modern Pro Max gen 14+) you MUST produce exactly 1290 × 2796. The earlier version of this script targeted 1284 × 2778 for the 6.7" slot and the uploads got stuck in "still uploading" state until re-uploaded at 1290 × 2796.
 
 `scripts/upload_store_screenshots.py` walks the App Store Connect API: App → AppStoreVersion (the one in `PREPARE_FOR_SUBMISSION` etc.) → AppStoreVersionLocalization (prefers English, falls back to whatever is first) → AppScreenshotSet (one per `screenshotDisplayType`, e.g. `APP_IPHONE_67`) → AppScreenshot. JWT signed with the `.p8` API key from `~/.apple/credentials.json`. Idempotent: deletes any screenshots already in each set before re-uploading, so the local PNGs are always the source of truth. Requires the local venv (`python3 -m venv .venv && .venv/bin/pip install Pillow PyJWT cryptography requests`).
 

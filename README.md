@@ -56,7 +56,7 @@ A canonical backup of the slim Apple Distribution `.p12` and its password live i
 
 ## App Store screenshots
 
-`screenshots/store/iphone_67/` (1284 × 2778) and `screenshots/store/iphone_65/` (1242 × 2688) hold the resized screenshots that App Store Connect requires for the 6.7" and 6.5" iPhone display slots. Regenerate from the 1320 × 2868 sources:
+`screenshots/store/iphone_67/` (1290 × 2796) and `screenshots/store/iphone_65/` (1242 × 2688) hold the resized screenshots that App Store Connect requires for the 6.7" and 6.5" iPhone display slots. Regenerate from the 1320 × 2868 sources:
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install Pillow PyJWT cryptography requests
