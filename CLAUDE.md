@@ -41,6 +41,34 @@ Targets: iOS 17.0+, universal (iPhone + iPad). Bundle id `ch.pumptsueri.movement
 
 `DEVELOPMENT_TEAM = 4B37356EGR` (ywesee GmbH) is set as a build setting on both Debug and Release. `CODE_SIGN_STYLE = Automatic`, so Xcode/`xcodebuild -allowProvisioningUpdates` fetches the right provisioning profile from the App Store Connect / developer portal using the developer certificate in the macOS keychain (`Apple Development: Zeno Davatz` or `Apple Distribution: ywesee GmbH`). Apple API credentials for the team live at `~/.apple/credentials.json` + `~/.apple/AuthKey_*.p8`.
 
+**Duplicate Apple Distribution certs gotcha.** The keychain has three `Apple Distribution: ywesee GmbH (4B37356EGR)` entries (expired 2022, expired 2024, current expires 2027). Xcode auto-picks the latest, but anything that exports by CN alone (e.g. `security export -t identities`, a naive PEM-split script) may grab the FIRST match — which is the expired 2022 one. The CI cert-bundle in `APPLE_CERT_P12_BASE64` was rebuilt to disambiguate by `notAfter` and pick the latest. If you ever need to re-roll the cert secret, use the same disambiguation (sort candidates by `notAfter`, take the last).
+
+## Release (tag-driven CI)
+
+Push `vX.Y.Z` → CI builds, signs, uploads to App Store Connect, and cuts a GitHub release with the IPA attached. Workflow lives at `.github/workflows/release.yml`. Trigger:
+
+```sh
+git tag v0.0.6
+git push origin v0.0.6
+```
+
+The workflow parses the tag (`v0.0.6` → version `0.0.6`, build `6` from the patch component), sed-patches `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` into the pbxproj at build time (so the source on the tagged commit doesn't need to be re-bumped), then runs `xcodebuild archive` → `xcodebuild -exportArchive` → `xcrun altool --upload-app` → `gh release create`. macos-15 runner, automatic signing authenticated with the App Store Connect API key.
+
+Required GitHub Actions secrets (set once via `gh secret set --repo zdavatz/movement_logger_ios`):
+
+- `APPLE_API_KEY_ID`, `APPLE_API_ISSUER_ID`
+- `APPLE_API_KEY_P8_BASE64` — base64 of `~/.apple/AuthKey_<id>.p8`
+- `APPLE_CERT_P12_BASE64` — base64 of slim single-identity `.p12` for `Apple Distribution: ywesee GmbH (4B37356EGR)` (NOT a full keychain export — those exceed GitHub's secret size limit)
+- `APPLE_CERT_PASSWORD`, `APPLE_KEYCHAIN_PASSWORD`
+
+Canonical backup of the slim Apple Distribution `.p12` + its password sits in `~/Library/Mobile Documents/com~apple~CloudDocs/ywesee/p12/apple_distribution_ios.{p12,password.txt}` (re-encrypted with modern AES-256 instead of the RC2-40 default that `security export` produces; OpenSSL 3 refuses to read the latter without `-legacy`).
+
+## App Store screenshots
+
+`scripts/resize_screenshots.py` (PIL/LANCZOS) downsizes the four 1320×2868 source screenshots in `screenshots/` to App Store Connect's required sizes: 1284 × 2778 (6.7" iPhone, output to `screenshots/store/iphone_67/`) and 1242 × 2688 (6.5" iPhone, `screenshots/store/iphone_65/`). The downscale is non-uniform (source aspect 0.4602, target 0.4622) but the 0.4% distortion is imperceptible.
+
+`scripts/upload_store_screenshots.py` walks the App Store Connect API: App → AppStoreVersion (the one in `PREPARE_FOR_SUBMISSION` etc.) → AppStoreVersionLocalization (prefers English, falls back to whatever is first) → AppScreenshotSet (one per `screenshotDisplayType`, e.g. `APP_IPHONE_67`) → AppScreenshot. JWT signed with the `.p8` API key from `~/.apple/credentials.json`. Idempotent: deletes any screenshots already in each set before re-uploading, so the local PNGs are always the source of truth. Requires the local venv (`python3 -m venv .venv && .venv/bin/pip install Pillow PyJWT cryptography requests`).
+
 ## Icon
 
 `MovementLogger/Assets.xcassets/AppIcon.appiconset/Icon-1024.png` is the iOS app icon: a 1024×1024 composite of the Android adaptive icon's foreground (orange/cyan/purple hydrofoil) over the adaptive icon's background color `#F8FAFC`. Regenerate from the Android source:
