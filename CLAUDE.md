@@ -71,6 +71,18 @@ Canonical backup of the slim Apple Distribution `.p12` + its password sits in `~
 
 `scripts/upload_store_screenshots.py` walks the App Store Connect API: App → AppStoreVersion (the one in `PREPARE_FOR_SUBMISSION` etc.) → AppStoreVersionLocalization (prefers English, falls back to whatever is first) → AppScreenshotSet (one per `screenshotDisplayType`, e.g. `APP_IPHONE_67`) → AppScreenshot. JWT signed with the `.p8` API key from `~/.apple/credentials.json`. Idempotent: deletes any screenshots already in each set before re-uploading, so the local PNGs are always the source of truth. Requires the local venv (`python3 -m venv .venv && .venv/bin/pip install Pillow PyJWT cryptography requests`).
 
+**iPad screenshots** live under `screenshots/store/ipad_13/` (2064 × 2752, `APP_IPAD_PRO_3GEN_129`) and are captured directly on the iPad Pro 13-inch (M4) simulator — no resize step. Required because the build is universal (`TARGETED_DEVICE_FAMILY = "1,2"`); without iPad screenshots App Store Connect blocks submission with "Lade einen Screenshot für 13-Zoll-Displays (iPad) hoch".
+
+To capture more iPad screenshots without fighting UI automation: `MainNav.swift` reads `SIMCTL_CHILD_INITIAL_TAB` from the launch env and starts on the Replay tab when the value is `"replay"`. Run the simulator with that variable set and the segmented TabView opens straight onto Replay — much more reliable than `cliclick` against the new iPadOS 18 top-of-screen TabView (whose hit area didn't take taps when I tried). The Sync tab is the default if the variable is missing, so shipping this behavior costs nothing at runtime.
+
+```sh
+xcrun simctl boot "iPad Pro 13-inch (M4)"
+SIMCTL_CHILD_INITIAL_TAB=replay xcrun simctl launch <udid> ch.pumptsueri.movementlogger
+xcrun simctl io <udid> screenshot screenshots/store/ipad_13/02_replay_empty.png
+```
+
+Note: the iPad simulator's Sync screen logs `ERROR: BLE unsupported on this device` because the simulator has no Bluetooth radio — looks slightly ugly but acceptable. On a physical iPad the line wouldn't appear.
+
 ## Icon
 
 `MovementLogger/Assets.xcassets/AppIcon.appiconset/Icon-1024.png` is the iOS app icon: a 1024×1024 composite of the Android adaptive icon's foreground (orange/cyan/purple hydrofoil) over the adaptive icon's background color `#F8FAFC`. Regenerate from the Android source:

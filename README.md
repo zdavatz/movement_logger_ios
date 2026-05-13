@@ -56,7 +56,7 @@ A canonical backup of the slim Apple Distribution `.p12` and its password live i
 
 ## App Store screenshots
 
-`screenshots/store/iphone_67/` (1290 × 2796) and `screenshots/store/iphone_65/` (1242 × 2688) hold the resized screenshots that App Store Connect requires for the 6.7" and 6.5" iPhone display slots. Regenerate from the 1320 × 2868 sources:
+`screenshots/store/iphone_67/` (1290 × 2796), `screenshots/store/iphone_65/` (1242 × 2688), and `screenshots/store/ipad_13/` (2064 × 2752 — native iPad Pro 13" M4) hold the screenshots App Store Connect requires for the 6.7" iPhone, 6.5" iPhone, and 13" iPad display slots respectively. The two iPhone sets come from `scripts/resize_screenshots.py` (PIL/LANCZOS over the 1320 × 2868 sources). The iPad set was captured live on the iPad Pro 13-inch (M4) simulator and is committed as-is (no resize step).
 
 ```sh
 python3 -m venv .venv && .venv/bin/pip install Pillow PyJWT cryptography requests
@@ -70,3 +70,12 @@ Push them to the current "Prepare for Submission" App Store version via the App 
 ```
 
 The uploader is idempotent — re-running deletes whatever is in each `AppScreenshotSet` and re-uploads the local PNGs, so iterating on screenshots is just edit-and-rerun.
+
+To capture more iPad screenshots, launch the app on the iPad simulator with `SIMCTL_CHILD_INITIAL_TAB=replay` to land directly on the Replay tab (otherwise SwiftUI's iPadOS 18 segmented TabView is hard to drive from the command line):
+
+```sh
+xcrun simctl boot "iPad Pro 13-inch (M4)"
+xcrun simctl install <udid> ~/Library/Developer/Xcode/DerivedData/MovementLogger-*/Build/Products/Debug-iphonesimulator/MovementLogger.app
+SIMCTL_CHILD_INITIAL_TAB=replay xcrun simctl launch <udid> ch.pumptsueri.movementlogger
+xcrun simctl io <udid> screenshot screenshots/store/ipad_13/03_xyz.png
+```
