@@ -36,8 +36,9 @@ API_BASE = "https://api.appstoreconnect.apple.com/v1"
 
 # (display_type, source_dir) — order in source_dir == order on the store page
 TARGETS = [
-    ("APP_IPHONE_67", ROOT / "screenshots" / "store" / "iphone_67"),
-    ("APP_IPHONE_65", ROOT / "screenshots" / "store" / "iphone_65"),
+    ("APP_IPHONE_67",        ROOT / "screenshots" / "store" / "iphone_67"),
+    ("APP_IPHONE_65",        ROOT / "screenshots" / "store" / "iphone_65"),
+    ("APP_IPAD_PRO_3GEN_129", ROOT / "screenshots" / "store" / "ipad_13"),
 ]
 
 
