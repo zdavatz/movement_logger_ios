@@ -83,6 +83,45 @@ xcrun simctl io <udid> screenshot screenshots/store/ipad_13/02_replay_empty.png
 
 Note: the iPad simulator's Sync screen logs `ERROR: BLE unsupported on this device` because the simulator has no Bluetooth radio — looks slightly ugly but acceptable. On a physical iPad the line wouldn't appear.
 
+## App Previews (videos)
+
+`scripts/upload_store_previews.py` walks `App → AppStoreVersion → AppStoreVersionLocalization → AppPreviewSet → AppPreview`. Mirrors `upload_store_screenshots.py` one-for-one but uses the `/appPreviews` + `/appPreviewSets` endpoints. Idempotent — deletes existing previews per slot before re-uploading.
+
+**Different prefix scheme from screenshots.** `AppScreenshotSet.screenshotDisplayType` uses values like `APP_IPHONE_67`. `AppPreviewSet.previewType` uses the SAME slot identifier but WITHOUT the `APP_` prefix: `IPHONE_67`, `IPHONE_65`, `IPAD_PRO_3GEN_129`. Apple's API quirk; easy to miss when adapting one script from the other.
+
+**Strict spec for App Preview files** (Apple silently sets `assetDeliveryState=FAILED` if any of these don't line up — same failure mode as wrong-dimension screenshots):
+
+- Duration **15–30 s** (inclusive on both ends)
+- 30 / 25 / 24 fps (NOT 60)
+- H.264 video + AAC audio (or no audio)
+- Resolution must exactly match the slot:
+  - `IPHONE_67` / `IPHONE_65`: 1080×1920, 886×1920, 1920×1080, 1920×886
+  - `IPAD_PRO_3GEN_129`: 1200×1600, 1600×1200
+
+**Source-of-truth files live in `screenshots/store/previews/`.** The same MP4 goes to both iPhone slots (the iPad slot is currently skipped because the composite layout doesn't fit 1200×1600 nicely). The committed clips came from the app's own composite-MOV export (1080×3200 native), then `ffmpeg`-transcoded:
+
+- Pillarboxed to 1080×1920 — keeps all 4 data panels visible at the cost of 216 px black bars left+right. Cropping the source to fit 1080×1920 would cut out the panels, which defeats the entire point of the App Preview for this app.
+- Trimmed (>30 s sources) or slowed via `setpts` + `atempo` (<15 s sources) into the 15-30 s window.
+
+```sh
+# Trim+pillarbox a long composite to 30 s:
+ffmpeg -ss 0 -t 30 -i combined.mov \
+    -vf "scale=648:1920,pad=1080:1920:216:0:black" \
+    -c:v libx264 -profile:v high -pix_fmt yuv420p -r 30 -b:v 10M -movflags +faststart \
+    -c:a aac -b:a 192k -ar 48000 \
+    screenshots/store/previews/01_ride.mp4
+
+# Slow a <15 s composite (1.4× → ~15-16 s):
+ffmpeg -i short.mov \
+    -filter_complex "[0:v]setpts=1.4*PTS,scale=648:1920,pad=1080:1920:216:0:black[v];[0:a]atempo=0.7143[a]" \
+    -map "[v]" -map "[a]" \
+    -c:v libx264 -profile:v high -pix_fmt yuv420p -r 30 -b:v 10M -movflags +faststart \
+    -c:a aac -b:a 192k -ar 48000 \
+    screenshots/store/previews/02_short.mp4
+```
+
+After upload, Apple takes 5–15 min to process each video asynchronously. Poll `/v1/appPreviews/<id>` and watch `assetDeliveryState` go through `UPLOAD_COMPLETE → PROCESSING → COMPLETE` (or `FAILED` with error codes).
+
 ## Icon
 
 `MovementLogger/Assets.xcassets/AppIcon.appiconset/Icon-1024.png` is the iOS app icon: a 1024×1024 composite of the Android adaptive icon's foreground (orange/cyan/purple hydrofoil) over the adaptive icon's background color `#F8FAFC`. Regenerate from the Android source:

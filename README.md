@@ -79,3 +79,30 @@ xcrun simctl install <udid> ~/Library/Developer/Xcode/DerivedData/MovementLogger
 SIMCTL_CHILD_INITIAL_TAB=replay xcrun simctl launch <udid> ch.pumptsueri.movementlogger
 xcrun simctl io <udid> screenshot screenshots/store/ipad_13/03_xyz.png
 ```
+
+## App Previews (videos)
+
+`screenshots/store/previews/*.mp4` hold the 15–30 s clips that play on the App Store listing. Both iPhone slots (`IPHONE_67`, `IPHONE_65`) accept the same `1080 × 1920` portrait at 30 fps, so one set of files covers both. Push them to App Store Connect via:
+
+```sh
+.venv/bin/python scripts/upload_store_previews.py
+```
+
+The source clips are composite-MOV exports straight out of the app's own Replay tab (`Documents/combined_<basename>.mov`), but the app emits `1080 × 3200` (source video on top + 4 panels below) which Apple rejects. The committed files were transcoded with `ffmpeg`:
+
+```sh
+# Trim to ≤30 s and pillarbox to 1080×1920 (preserves all 4 panels):
+ffmpeg -ss 0 -t 30 -i combined.mov \
+    -vf "scale=648:1920,pad=1080:1920:216:0:black" \
+    -c:v libx264 -profile:v high -pix_fmt yuv420p -r 30 -b:v 10M -movflags +faststart \
+    -c:a aac -b:a 192k -ar 48000 \
+    screenshots/store/previews/01_ride.mp4
+
+# For clips <15 s, slow them with setpts/atempo:
+ffmpeg -i short.mov \
+    -filter_complex "[0:v]setpts=1.4*PTS,scale=648:1920,pad=1080:1920:216:0:black[v];[0:a]atempo=0.7143[a]" \
+    -map "[v]" -map "[a]" \
+    -c:v libx264 -profile:v high -pix_fmt yuv420p -r 30 -b:v 10M -movflags +faststart \
+    -c:a aac -b:a 192k -ar 48000 \
+    screenshots/store/previews/02_short.mp4
+```
