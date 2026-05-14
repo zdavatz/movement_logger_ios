@@ -30,8 +30,9 @@ final class BleClient: NSObject {
         case disconnected(error: Error?)
         case servicesDiscovered(error: Error?)
         case characteristicsDiscovered(error: Error?)
-        case notifyStateUpdated(error: Error?)
-        case notification(Data)
+        case notifyStateUpdated(charUUID: CBUUID, error: Error?)
+        /// `charUUID` distinguishes FileData (FileSync) from SensorStream (Live tab).
+        case notification(charUUID: CBUUID, data: Data)
         case scanTimedOut
         case tick
     }
@@ -52,10 +53,26 @@ final class BleClient: NSObject {
     private var peripheral: CBPeripheral?
     private var cmdChar: CBCharacteristic?
     private var dataChar: CBCharacteristic?
+    private var streamChar: CBCharacteristic?
+    /// True once we've kicked off the SensorStream `setNotifyValue(true, …)`;
+    /// resets on disconnect. Used to keep `onCharacteristicsDiscovered` (which
+    /// fires once per discovered service) idempotent — it can be called
+    /// multiple times during connect.
+    private var streamSubscribeKicked: Bool = false
     private var op: CurrentOp = .idle
     private var scanning: Bool = false
     private var scanStopTask: Task<Void, Never>?
     private var centralReady: Bool = false
+
+    /// 3-chunk reassembly state for the SensorStream MTU-fallback path
+    /// (DESIGN.md §3). When the negotiated MTU is too small for a 46-byte
+    /// single notify, the firmware splits the snapshot across three sequential
+    /// notifies with first-byte sequence indices 0x00 / 0x01 / 0x02. iOS
+    /// auto-negotiates MTU up to ~185 B so this path rarely triggers in
+    /// practice, but the firmware can still chunk and we shouldn't drop those
+    /// frames silently.
+    private var streamAsm: Data = Data()
+    private var streamAsmNext: UInt8 = 0
 
     // ----- Worker tasks ------------------------------------------------------
 
@@ -246,6 +263,10 @@ final class BleClient: NSObject {
         peripheral = nil
         cmdChar = nil
         dataChar = nil
+        streamChar = nil
+        streamSubscribeKicked = false
+        streamAsm.removeAll(keepingCapacity: true)
+        streamAsmNext = 0
         endBackgroundAssertion()
         if emitEvent { emit(.disconnected) }
     }
@@ -331,20 +352,10 @@ final class BleClient: NSObject {
             onServicesDiscovered(error: err)
         case .characteristicsDiscovered(let err):
             onCharacteristicsDiscovered(error: err)
-        case .notifyStateUpdated(let err):
-            if let err = err {
-                emitErr("subscribe failed: \(err.localizedDescription)")
-                disconnectInner(emitEvent: true)
-            } else {
-                op = .idle
-                // Keep the app alive in the background for the whole session.
-                // Paired with the `bluetooth-central` UIBackgroundMode so that
-                // long READs continue when the user switches apps.
-                beginBackgroundAssertion()
-                emit(.connected)
-            }
-        case .notification(let data):
-            onNotification(data)
+        case .notifyStateUpdated(let charUUID, let err):
+            onNotifyStateUpdated(charUUID: charUUID, error: err)
+        case .notification(let charUUID, let data):
+            onNotification(charUUID: charUUID, data: data)
         case .scanTimedOut:
             stopScan()
         case .tick:
@@ -397,26 +408,115 @@ final class BleClient: NSObject {
             for ch in (svc.characteristics ?? []) {
                 if ch.uuid == FileSyncProtocol.fileCmdUUID { cmdChar = ch }
                 if ch.uuid == FileSyncProtocol.fileDataUUID { dataChar = ch }
+                if ch.uuid == FileSyncProtocol.streamUUID { streamChar = ch }
             }
         }
-        // Wait until both are found across all service-discovery callbacks.
-        // didDiscoverCharacteristicsFor fires once per service; we may not have
-        // both characteristics yet on the first call.
+        // Wait until both required characteristics are found across all
+        // service-discovery callbacks. didDiscoverCharacteristicsFor fires
+        // once per service; we may not have both characteristics yet on the
+        // first call.
         guard let data = dataChar, cmdChar != nil else { return }
         p.setNotifyValue(true, for: data)
         // BleEvent.Connected emitted from notifyStateUpdated on success.
+
+        // SensorStream is optional — only PumpLogger firmware exposes it.
+        // Subscribe in parallel; CoreBluetooth queues the GATT op internally.
+        // Soft-fail: a missing or unsubscribable stream char never blocks
+        // FileSync — the Live tab just stays empty.
+        if let s = streamChar, !streamSubscribeKicked {
+            streamSubscribeKicked = true
+            p.setNotifyValue(true, for: s)
+        } else if streamChar == nil {
+            emitStatus("SensorStream characteristic not advertised — legacy firmware, Live tab will be empty")
+        }
     }
 
-    private func onNotification(_ value: Data) {
+    private func onNotifyStateUpdated(charUUID: CBUUID, error: Error?) {
+        switch charUUID {
+        case FileSyncProtocol.fileDataUUID:
+            if let error = error {
+                emitErr("subscribe failed: \(error.localizedDescription)")
+                disconnectInner(emitEvent: true)
+            } else {
+                op = .idle
+                // Keep the app alive in the background for the whole session.
+                // Paired with the `bluetooth-central` UIBackgroundMode so that
+                // long READs continue when the user switches apps.
+                beginBackgroundAssertion()
+                emit(.connected)
+            }
+        case FileSyncProtocol.streamUUID:
+            if let error = error {
+                emitStatus("SensorStream subscribe failed (\(error.localizedDescription)) — Live tab will be empty")
+            } else {
+                emitStatus("SensorStream subscribed (live data at 0.5 Hz)")
+            }
+        default:
+            break
+        }
+    }
+
+    private func onNotification(charUUID: CBUUID, data: Data) {
+        if charUUID == FileSyncProtocol.streamUUID {
+            handleStreamNotify(data)
+            return
+        }
+        // FileData path — drive the in-flight op's state machine.
         switch op {
         case .idle:
             break  // stray notify between ops — harmless
         case .listing:
-            handleListNotify(value)
+            handleListNotify(data)
         case .reading:
-            handleReadNotify(value)
+            handleReadNotify(data)
         case .deleting:
-            handleDeleteNotify(value)
+            handleDeleteNotify(data)
+        }
+    }
+
+    /// SensorStream notification handler — single 46-byte notify when the
+    /// negotiated ATT MTU is large enough, 3-chunk fallback (seq bytes
+    /// 0x00/0x01/0x02) when it isn't. Malformed packets drop silently; the
+    /// stream auto-resyncs on the next 0x00 start.
+    private func handleStreamNotify(_ bytes: Data) {
+        if bytes.count == LiveSample.wireSize {
+            // Single-notify path. Reset any in-flight chunked frame so a
+            // mid-frame MTU upgrade doesn't leave the asm in a bad state.
+            streamAsm.removeAll(keepingCapacity: true)
+            streamAsmNext = 0
+            if let s = LiveSample.parse(bytes) {
+                emit(.sample(s))
+            }
+            return
+        }
+        guard !bytes.isEmpty else { return }
+        let seq = bytes[bytes.startIndex]
+        let body = bytes.dropFirst()
+        switch seq {
+        case 0x00:
+            streamAsm.removeAll(keepingCapacity: true)
+            streamAsm.append(body)
+            streamAsmNext = 1
+        case 0x01:
+            guard streamAsmNext == 1 else {
+                streamAsm.removeAll(keepingCapacity: true); streamAsmNext = 0
+                return
+            }
+            streamAsm.append(body)
+            streamAsmNext = 2
+        case 0x02:
+            guard streamAsmNext == 2 else {
+                streamAsm.removeAll(keepingCapacity: true); streamAsmNext = 0
+                return
+            }
+            streamAsm.append(body)
+            if streamAsm.count == LiveSample.wireSize,
+               let s = LiveSample.parse(streamAsm) {
+                emit(.sample(s))
+            }
+            streamAsm.removeAll(keepingCapacity: true); streamAsmNext = 0
+        default:
+            streamAsm.removeAll(keepingCapacity: true); streamAsmNext = 0
         }
     }
 
@@ -567,7 +667,7 @@ extension BleClient: CBCentralManagerDelegate {
                         rssi RSSI: NSNumber) {
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? peripheral.name ?? ""
-        guard name == FileSyncProtocol.boxName else { return }
+        guard FileSyncProtocol.boxNames.contains(name) else { return }
         // Retain the CBPeripheral so we can connect to it later.
         discovered[peripheral.identifier] = peripheral
         workerCont.yield(.raw(.discovered(
@@ -608,15 +708,20 @@ extension BleClient: CBPeripheralDelegate {
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateNotificationStateFor characteristic: CBCharacteristic,
                     error: Error?) {
-        guard characteristic.uuid == FileSyncProtocol.fileDataUUID else { return }
-        workerCont.yield(.raw(.notifyStateUpdated(error: error)))
+        // Both FileData (FileSync) and SensorStream (Live) subscribe via CCCD;
+        // route the ack by characteristic UUID so the worker can update the
+        // right state-machine slot.
+        let u = characteristic.uuid
+        guard u == FileSyncProtocol.fileDataUUID || u == FileSyncProtocol.streamUUID else { return }
+        workerCont.yield(.raw(.notifyStateUpdated(charUUID: u, error: error)))
     }
 
     func peripheral(_ peripheral: CBPeripheral,
                     didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
-        guard characteristic.uuid == FileSyncProtocol.fileDataUUID,
+        let u = characteristic.uuid
+        guard u == FileSyncProtocol.fileDataUUID || u == FileSyncProtocol.streamUUID,
               let value = characteristic.value else { return }
-        workerCont.yield(.raw(.notification(value)))
+        workerCont.yield(.raw(.notification(charUUID: u, data: value)))
     }
 }

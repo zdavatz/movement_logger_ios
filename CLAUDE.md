@@ -6,10 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 iOS port of `~/Documents/software/movement_logger_android` (Jetpack Compose + Kotlin), which is itself an Android port of the Movement Logger desktop app at `~/Documents/software/fp-sns-stbox1/Utilities/rust`. Talks to the PumpTsueri SensorTile.box over BLE, downloads CSV recordings, and replays them time-synced against a phone-recorded video. SwiftUI + CoreBluetooth + AVKit, no external dependencies.
 
-Two tabs:
+Three tabs (matches the desktop and Android tab order):
 
+- **Live** — when connected to a PumpLogger-firmware box (advertises as `STBoxFs`), renders the 0.5 Hz SensorStream snapshot: accel / gyro / mag / baro / GPS readouts + two `Canvas` sparklines (acc magnitude, pressure). Subscription is automatic on Connect. Legacy PumpTsueri firmware doesn't expose the SensorStream characteristic — the tab stays empty with a status-line log entry.
 - **Sync** — scan / connect / LIST / READ / DELETE / STOP_LOG / START_LOG. Downloaded files land in the app's `Documents/` (exposed in the Files app via `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`).
 - **Replay** — pick a video (Photos picker OR a `.mov`/`.mp4`/`.m4v` already in `Documents/`) + a `Sens*.csv` + a `Gps*.csv` from the Sync tab's downloads, watch the four overlay panels (speed, pitch / Nasenwinkel, height above water, GPS track) update against the video playhead, then optionally export a V-stack composite MOV (source video on top, panels below with animated cursors) — the iOS equivalent of the desktop's `combined_*.mov`. The composite is saved to `Documents/combined_<basename>.mov` AND added to the Photos library.
+
+The Live tab observes the same `FileSyncViewModel` instance as Sync — `MainNav` owns it (`@State`) and passes a `@Bindable` reference to both tabs. The BLE client subscribes to FileData *and* SensorStream characteristics in parallel; the desktop's per-firmware advertise-name handling (`PumpTsueri` vs `STBoxFs`) is mirrored via `FileSyncProtocol.boxNames`. iOS auto-negotiates ATT MTU up to ~185 B at connect time, so the firmware delivers full 46-byte snapshots in a single notify; the 3-chunk reassembly path (sequence bytes 0x00/0x01/0x02) is implemented as a fallback but rarely triggers in practice.
 
 The `stbox-viz/` Rust crate's board-3D animation and plotly HTML output stay desktop-only — the phone renders SwiftUI `Canvas` panels for live preview and uses `AVAssetExportSession` + `AVVideoCompositionCoreAnimationTool` for the offline composite export.
 
@@ -73,7 +76,7 @@ Canonical backup of the slim Apple Distribution `.p12` + its password sits in `~
 
 **iPad screenshots** live under `screenshots/store/ipad_13/` (2064 × 2752, `APP_IPAD_PRO_3GEN_129`) and are captured directly on the iPad Pro 13-inch (M4) simulator — no resize step. Required because the build is universal (`TARGETED_DEVICE_FAMILY = "1,2"`); without iPad screenshots App Store Connect blocks submission with "Lade einen Screenshot für 13-Zoll-Displays (iPad) hoch".
 
-To capture more iPad screenshots without fighting UI automation: `MainNav.swift` reads `SIMCTL_CHILD_INITIAL_TAB` from the launch env and starts on the Replay tab when the value is `"replay"`. Run the simulator with that variable set and the segmented TabView opens straight onto Replay — much more reliable than `cliclick` against the new iPadOS 18 top-of-screen TabView (whose hit area didn't take taps when I tried). The Sync tab is the default if the variable is missing, so shipping this behavior costs nothing at runtime.
+To capture more iPad screenshots without fighting UI automation: `MainNav.swift` reads `SIMCTL_CHILD_INITIAL_TAB` from the launch env and starts on the named tab. Values: `live` / `sync` / `replay`. Run the simulator with that variable set and the segmented TabView opens straight onto the chosen tab — much more reliable than `cliclick` against the new iPadOS 18 top-of-screen TabView (whose hit area didn't take taps when I tried). Live is the default if the variable is missing, so shipping this behavior costs nothing at runtime.
 
 ```sh
 xcrun simctl boot "iPad Pro 13-inch (M4)"
@@ -142,8 +145,9 @@ bg.convert('RGB').save('MovementLogger/Assets.xcassets/AppIcon.appiconset/Icon-1
 MovementLogger/
 ├── MovementLoggerApp.swift          @main → MainNav (TabView)
 ├── BLE/
-│   ├── FileSyncProtocol.swift       UUIDs, opcodes, status bytes
-│   └── BleClient.swift              single-worker CoreBluetooth state machine
+│   ├── FileSyncProtocol.swift       UUIDs (FileCmd / FileData / SensorStream), opcodes, status bytes
+│   ├── LiveSample.swift             46-byte SensorStream wire-layout decoder
+│   └── BleClient.swift              single-worker CoreBluetooth state machine (FileSync + SensorStream)
 ├── Data/                            Numerics, ported from Android `data/` (which is in turn from `stbox-viz/*.rs`)
 │   ├── CsvParsers.swift             Sens / Gps / Bat CSV → typed rows
 │   ├── GpsTime.swift                hhmmss.ss → absolute UTC ms
@@ -155,8 +159,9 @@ MovementLogger/
 │   ├── Baro.swift                   GPS-anchored TC'd-pressure height
 │   └── FusionHeight.swift           α-β baro + body-frame acc complementary
 ├── UI/
-│   ├── MainNav.swift                TabView scaffold (Sync / Replay)
-│   ├── FileSyncViewModel.swift      Sync state machine (@Observable)
+│   ├── MainNav.swift                TabView scaffold (Live / Sync / Replay), owns FileSyncViewModel
+│   ├── LiveScreen.swift             Live tab UI: readout grid + 2 SwiftUI Canvas sparklines
+│   ├── FileSyncViewModel.swift      Sync + Live state machine (@Observable, single shared instance)
 │   ├── FileSyncScreen.swift         Sync tab UI
 │   ├── ReplayViewModel.swift        CSV + fusion pipeline orchestration + ride-window slicing
 │   └── ReplayScreen.swift           Replay tab UI + 4 SwiftUI Canvas panels + export button

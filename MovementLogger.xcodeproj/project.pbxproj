@@ -26,6 +26,8 @@
 		A1000000000000000000010B /* ReplayViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020B /* ReplayViewModel.swift */; };
 		A1000000000000000000010C /* ReplayScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020C /* ReplayScreen.swift */; };
 		A1000000000000000000010D /* CompositeExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020D /* CompositeExporter.swift */; };
+		A1000000000000000000010E /* LiveSample.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020E /* LiveSample.swift */; };
+		A1000000000000000000010F /* LiveScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020F /* LiveScreen.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -49,6 +51,8 @@
 		A1000000000000000000020B /* ReplayViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayViewModel.swift; sourceTree = "<group>"; };
 		A1000000000000000000020C /* ReplayScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayScreen.swift; sourceTree = "<group>"; };
 		A1000000000000000000020D /* CompositeExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositeExporter.swift; sourceTree = "<group>"; };
+		A1000000000000000000020E /* LiveSample.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSample.swift; sourceTree = "<group>"; };
+		A1000000000000000000020F /* LiveScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveScreen.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -111,6 +115,7 @@
 			isa = PBXGroup;
 			children = (
 				A100000000000000000000F1 /* FileSyncProtocol.swift */,
+				A1000000000000000000020E /* LiveSample.swift */,
 				A100000000000000000000F2 /* BleClient.swift */,
 			);
 			path = BLE;
@@ -120,6 +125,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000000000000000000020A /* MainNav.swift */,
+				A1000000000000000000020F /* LiveScreen.swift */,
 				A100000000000000000000F3 /* FileSyncViewModel.swift */,
 				A100000000000000000000F4 /* FileSyncScreen.swift */,
 				A1000000000000000000020B /* ReplayViewModel.swift */,
@@ -223,6 +229,8 @@
 				A1000000000000000000010B /* ReplayViewModel.swift in Sources */,
 				A1000000000000000000010C /* ReplayScreen.swift in Sources */,
 				A1000000000000000000010D /* CompositeExporter.swift in Sources */,
+				A1000000000000000000010E /* LiveSample.swift in Sources */,
+				A1000000000000000000010F /* LiveScreen.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

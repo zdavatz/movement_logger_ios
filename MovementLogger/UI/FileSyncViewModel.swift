@@ -25,6 +25,27 @@ struct DownloadProgress: Equatable {
 
 enum ConnectionStatus { case disconnected, connecting, connected }
 
+/// Sparkline sample for the Live tab. `tSec` is seconds since the first
+/// sample of this connection (relative — the box has no RTC), `value` is
+/// already in display units (g for acc magnitude, hPa for pressure).
+struct LivePoint: Equatable {
+    let tSec: Double
+    let value: Double
+}
+
+/// Live SensorStream state. Cleared on disconnect.
+struct LiveState: Equatable {
+    var latestSample: LiveSample? = nil
+    /// Wall-clock receive time for the latest sample. Drives the "x s ago"
+    /// freshness label so a stalled stream becomes obvious.
+    var latestSampleAt: Date? = nil
+    var sampleCount: UInt64 = 0
+    var accHistory: [LivePoint] = []
+    var pressureHistory: [LivePoint] = []
+    /// True iff the connected firmware exposed the SensorStream char.
+    var streamCapable: Bool = false
+}
+
 /// In-flight LOG session on the box. Recorded optimistically when the user
 /// taps Start session: the firmware reboots ~50 ms later so the BLE link
 /// dies, and the box is invisible to Scan until `durationSeconds` elapses.
@@ -52,6 +73,12 @@ final class FileSyncViewModel {
     var log: [String] = []
     var sessionDurationSeconds: Int = 1800  // 30-min default, matches desktop
     var sessionRunning: SessionRunning? = nil
+    var live: LiveState = LiveState()
+
+    /// First-sample box-timestamp; sparkline X axis is
+    /// `(s.timestampMs - liveT0Ms) / 1000`. Tracked outside `LiveState` so
+    /// SwiftUI doesn't re-render when only this internal anchor changes.
+    private var liveT0Ms: UInt32? = nil
 
     private let ble: BleClient
     private var eventTask: Task<Void, Never>?
@@ -169,6 +196,11 @@ final class FileSyncViewModel {
             files = []
             listing = false
             downloads = [:]
+            // Drop the live-stream buffers so a stale sparkline doesn't
+            // masquerade as a live stream on reconnect (the box restarts
+            // its monotonic timestamp axis on reboot).
+            live = LiveState()
+            liveT0Ms = nil
             logLine("disconnected")
         case .listEntry(let name, let size):
             files.append(RemoteFile(name: name, size: size))
@@ -189,7 +221,29 @@ final class FileSyncViewModel {
         case .deleteDone(let name):
             files.removeAll { $0.name == name }
             logLine("deleted \(name)")
+        case .sample(let s):
+            onSample(s)
         }
+    }
+
+    private func onSample(_ s: LiveSample) {
+        let t0 = liveT0Ms ?? s.timestampMs
+        if liveT0Ms == nil { liveT0Ms = t0 }
+        let dt = Double(s.timestampMs &- t0) / 1000.0
+        var acc = live.accHistory
+        var pres = live.pressureHistory
+        acc.append(LivePoint(tSec: dt, value: s.accMagnitudeG()))
+        pres.append(LivePoint(tSec: dt, value: Double(s.pressurePa) / 100.0))
+        if acc.count > Self.liveHistoryLen { acc.removeFirst(acc.count - Self.liveHistoryLen) }
+        if pres.count > Self.liveHistoryLen { pres.removeFirst(pres.count - Self.liveHistoryLen) }
+        live = LiveState(
+            latestSample: s,
+            latestSampleAt: Date(),
+            sampleCount: live.sampleCount &+ 1,
+            accHistory: acc,
+            pressureHistory: pres,
+            streamCapable: true
+        )
     }
 
     private func saveFile(name: String, bytes: Data) -> String {
@@ -216,4 +270,6 @@ final class FileSyncViewModel {
     }
 
     private static let maxLogLines = 200
+    /// Bounded rolling buffer for the Live tab sparklines. 120 × 2 s = 4 min. */
+    private static let liveHistoryLen = 120
 }

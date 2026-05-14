@@ -2,7 +2,11 @@ import SwiftUI
 import CoreBluetooth
 
 struct FileSyncScreen: View {
-    @State private var vm = FileSyncViewModel()
+    /// Owned by `MainNav` so the Live tab can observe the same instance
+    /// (shared SensorStream samples). When this screen is shown stand-alone
+    /// in previews / tests, `MainNav` wraps it with a freshly-constructed
+    /// view model.
+    @Bindable var vm: FileSyncViewModel
 
     var body: some View {
         NavigationStack {

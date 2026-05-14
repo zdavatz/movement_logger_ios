@@ -5,10 +5,18 @@ import CoreBluetooth
 /// Authoritative spec lives in the firmware source (`Core/Src/ble_filesync.c`)
 /// and the desktop Rust client (`stbox-viz-gui/src/ble.rs`).
 enum FileSyncProtocol {
-    static let boxName: String = "PumpTsueri"
+    /// Accepted advertise names. `PumpTsueri` is the legacy SDDataLogFileX
+    /// firmware; `STBoxFs` is the PumpLogger firmware (Peter's PR #18) which
+    /// adds the SensorStream characteristic. Match either so one build handles
+    /// both during the firmware transition.
+    static let boxNames: [String] = ["PumpTsueri", "STBoxFs"]
 
     static let fileCmdUUID: CBUUID = CBUUID(string: "00000080-0010-11e1-ac36-0002a5d5c51b")
     static let fileDataUUID: CBUUID = CBUUID(string: "00000040-0010-11e1-ac36-0002a5d5c51b")
+    /// SensorStream — 0.5 Hz packed 46-byte all-sensor snapshot. Optional;
+    /// only PumpLogger firmware exposes it. Subscribing is enough to start
+    /// the stream; the box has no STREAM_START opcode.
+    static let streamUUID: CBUUID = CBUUID(string: "00000100-0010-11e1-ac36-0002a5d5c51b")
 
     // Opcodes (first byte of FileCmd write).
     static let opList: UInt8 = 0x01
@@ -63,4 +71,8 @@ enum BleEvent {
     case readDone(name: String, content: Data)
     case deleteDone(name: String)
     case error(String)
+    /// One decoded SensorStream snapshot (0.5 Hz). Only emitted while
+    /// connected to PumpLogger firmware that exposes the SensorStream
+    /// characteristic; legacy PumpTsueri builds never produce this event.
+    case sample(LiveSample)
 }
