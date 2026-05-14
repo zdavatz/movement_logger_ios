@@ -23,3 +23,7 @@ Package.resolved
 Pods/
 Carthage/Build/
 .venv/
+
+# Python caches
+__pycache__/
+*.pyc
