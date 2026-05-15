@@ -126,6 +126,24 @@ private struct ReadoutGrid: View {
                        a: String(format: "X %+d", Int(s.magMg.0)),
                        b: String(format: "Y %+d", Int(s.magMg.1)),
                        c: String(format: "Z %+d", Int(s.magMg.2)))
+            ReadoutRow(label: "Angles (°)",
+                       a: String(format: "Roll %+6.1f", s.rollDeg()),
+                       b: String(format: "Pitch %+6.1f", s.pitchDeg()),
+                       c: String(format: "Yaw %5.1f", s.headingDeg()))
+            let accA = s.accAxisAnglesDeg()
+            ReadoutRow(label: "Acc∠grav (°)",
+                       a: String(format: "X %5.1f", accA.0),
+                       b: String(format: "Y %5.1f", accA.1),
+                       c: String(format: "Z %5.1f", accA.2))
+            let magA = s.magAxisAnglesDeg()
+            ReadoutRow(label: "Mag∠field (°)",
+                       a: String(format: "X %5.1f", magA.0),
+                       b: String(format: "Y %5.1f", magA.1),
+                       c: String(format: "Z %5.1f", magA.2))
+            ReadoutRow(label: "Mag dir (°)",
+                       a: String(format: "Head %5.1f", s.magHeadingRawDeg()),
+                       b: String(format: "Dip %+5.1f", s.magDipDeg()),
+                       c: "")
             ReadoutRow(label: "Baro",
                        a: String(format: "%.2f hPa", presHpa),
                        b: String(format: "%+.2f °C", tempC),
@@ -166,7 +184,7 @@ private struct ReadoutGrid: View {
     private func label(_ text: String) -> some View {
         Text(text)
             .fontWeight(.semibold)
-            .frame(width: 88, alignment: .leading)
+            .frame(width: 104, alignment: .leading)
     }
 
     private func flagChip(_ text: String, on: Bool) -> some View {
@@ -185,7 +203,7 @@ private struct ReadoutRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label).fontWeight(.semibold).frame(width: 88, alignment: .leading)
+            Text(label).fontWeight(.semibold).frame(width: 104, alignment: .leading)
             Text(a).font(.system(size: 13, design: .monospaced))
                 .frame(maxWidth: .infinity, alignment: .leading)
             Text(b).font(.system(size: 13, design: .monospaced))

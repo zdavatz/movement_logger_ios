@@ -53,6 +53,76 @@ struct LiveSample: Equatable {
         return (x * x + y * y + z * z).squareRoot()
     }
 
+    /// Roll φ (around the X axis), in degrees, derived from the gravity
+    /// component of accel. Meaningful only when net non-gravitational
+    /// acceleration is small. Range (-180, 180].
+    func rollDeg() -> Double {
+        let ay = Double(accMg.1), az = Double(accMg.2)
+        return atan2(ay, az) * 180.0 / .pi
+    }
+
+    /// Pitch θ (around the Y axis), in degrees. Range [-90, 90].
+    func pitchDeg() -> Double {
+        let ax = Double(accMg.0), ay = Double(accMg.1), az = Double(accMg.2)
+        return atan2(-ax, (ay * ay + az * az).squareRoot()) * 180.0 / .pi
+    }
+
+    /// Tilt-compensated compass heading ψ (yaw), in degrees, normalized to
+    /// [0, 360). Uses accel-derived roll/pitch to project the mag vector
+    /// onto the horizontal plane before taking atan2 of its components.
+    /// Standard formula — see e.g. ST AN4248.
+    func headingDeg() -> Double {
+        let ax = Double(accMg.0), ay = Double(accMg.1), az = Double(accMg.2)
+        let mx = Double(magMg.0), my = Double(magMg.1), mz = Double(magMg.2)
+        let roll = atan2(ay, az)
+        let pitch = atan2(-ax, (ay * ay + az * az).squareRoot())
+        let sR = sin(roll), cR = cos(roll)
+        let sP = sin(pitch), cP = cos(pitch)
+        let mxH = mx * cP + my * sR * sP + mz * cR * sP
+        let myH = my * cR - mz * sR
+        var deg = atan2(-myH, mxH) * 180.0 / .pi
+        if deg < 0 { deg += 360.0 }
+        return deg
+    }
+
+    /// Per-axis tilt: angle between each board axis and the measured gravity
+    /// vector, in degrees [0, 180]. `acos(component / ‖a‖)`. Meaningful only
+    /// while net non-gravitational acceleration is small (same caveat as
+    /// `rollDeg`/`pitchDeg`).
+    func accAxisAnglesDeg() -> (Double, Double, Double) {
+        let x = Double(accMg.0), y = Double(accMg.1), z = Double(accMg.2)
+        let m = (x * x + y * y + z * z).squareRoot()
+        guard m > 1e-6 else { return (0, 0, 0) }
+        func ang(_ c: Double) -> Double { acos(min(max(c / m, -1), 1)) * 180.0 / .pi }
+        return (ang(x), ang(y), ang(z))
+    }
+
+    /// Per-axis angle between each board axis and the measured magnetic
+    /// field vector, in degrees [0, 180].
+    func magAxisAnglesDeg() -> (Double, Double, Double) {
+        let x = Double(magMg.0), y = Double(magMg.1), z = Double(magMg.2)
+        let m = (x * x + y * y + z * z).squareRoot()
+        guard m > 1e-6 else { return (0, 0, 0) }
+        func ang(_ c: Double) -> Double { acos(min(max(c / m, -1), 1)) * 180.0 / .pi }
+        return (ang(x), ang(y), ang(z))
+    }
+
+    /// Raw (NOT tilt-compensated) magnetic heading from the board-plane
+    /// components, `atan2(my, mx)`, normalized to [0, 360). Contrast with
+    /// `headingDeg()`, which projects out roll/pitch first.
+    func magHeadingRawDeg() -> Double {
+        var deg = atan2(Double(magMg.1), Double(magMg.0)) * 180.0 / .pi
+        if deg < 0 { deg += 360.0 }
+        return deg
+    }
+
+    /// Magnetic inclination (dip): angle of the field vector relative to the
+    /// board's XY plane, `atan2(mz, ‖mxy‖)`, in degrees [-90, 90].
+    func magDipDeg() -> Double {
+        let x = Double(magMg.0), y = Double(magMg.1), z = Double(magMg.2)
+        return atan2(z, (x * x + y * y).squareRoot()) * 180.0 / .pi
+    }
+
     /// Decode the 46-byte little-endian wire layout. Returns nil on bad length.
     static func parse(_ data: Data) -> LiveSample? {
         guard data.count == wireSize else { return nil }
