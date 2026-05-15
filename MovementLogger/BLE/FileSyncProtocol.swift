@@ -62,7 +62,10 @@ enum BleEvent {
     case status(String)
     case discovered(identifier: UUID, name: String, rssi: Int)
     case scanStopped
-    case connected
+    /// `boxId` is the connected peripheral's stable per-install UUID
+    /// (`CBPeripheral.identifier`), used as the sync-state DB partition key
+    /// — the iOS analogue of the desktop's btleplug peripheral id.
+    case connected(boxId: String)
     case disconnected
     case listEntry(name: String, size: Int64)
     case listDone

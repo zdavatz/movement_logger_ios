@@ -10,6 +10,7 @@
 		A100000000000000000000AA /* MovementLoggerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F0 /* MovementLoggerApp.swift */; };
 		A100000000000000000000AB /* FileSyncProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F1 /* FileSyncProtocol.swift */; };
 		A100000000000000000000AC /* BleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F2 /* BleClient.swift */; };
+		A100000000000000000000B0 /* SyncDb.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F7 /* SyncDb.swift */; };
 		A100000000000000000000AD /* FileSyncViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F3 /* FileSyncViewModel.swift */; };
 		A100000000000000000000AE /* FileSyncScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* FileSyncScreen.swift */; };
 		A100000000000000000000AF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* Assets.xcassets */; };
@@ -34,6 +35,7 @@
 		A100000000000000000000F0 /* MovementLoggerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovementLoggerApp.swift; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* FileSyncProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncProtocol.swift; sourceTree = "<group>"; };
 		A100000000000000000000F2 /* BleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BleClient.swift; sourceTree = "<group>"; };
+		A100000000000000000000F7 /* SyncDb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncDb.swift; sourceTree = "<group>"; };
 		A100000000000000000000F3 /* FileSyncViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncViewModel.swift; sourceTree = "<group>"; };
 		A100000000000000000000F4 /* FileSyncScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncScreen.swift; sourceTree = "<group>"; };
 		A100000000000000000000F5 /* MovementLogger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovementLogger.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -117,6 +119,7 @@
 				A100000000000000000000F1 /* FileSyncProtocol.swift */,
 				A1000000000000000000020E /* LiveSample.swift */,
 				A100000000000000000000F2 /* BleClient.swift */,
+				A100000000000000000000F7 /* SyncDb.swift */,
 			);
 			path = BLE;
 			sourceTree = "<group>";
@@ -214,6 +217,7 @@
 				A100000000000000000000AA /* MovementLoggerApp.swift in Sources */,
 				A100000000000000000000AB /* FileSyncProtocol.swift in Sources */,
 				A100000000000000000000AC /* BleClient.swift in Sources */,
+				A100000000000000000000B0 /* SyncDb.swift in Sources */,
 				A100000000000000000000AD /* FileSyncViewModel.swift in Sources */,
 				A100000000000000000000AE /* FileSyncScreen.swift in Sources */,
 				A10000000000000000000101 /* CsvParsers.swift in Sources */,

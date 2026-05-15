@@ -443,7 +443,7 @@ final class BleClient: NSObject {
                 // Paired with the `bluetooth-central` UIBackgroundMode so that
                 // long READs continue when the user switches apps.
                 beginBackgroundAssertion()
-                emit(.connected)
+                emit(.connected(boxId: peripheral?.identifier.uuidString ?? ""))
             }
         case FileSyncProtocol.streamUUID:
             if let error = error {

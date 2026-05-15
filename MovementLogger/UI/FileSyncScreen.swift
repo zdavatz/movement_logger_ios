@@ -62,6 +62,11 @@ private struct ConnectionBar: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(vm.listing)
+                    Button(action: vm.syncNow) {
+                        Text(vm.syncing ? "Syncing…" : "Sync now")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(vm.listing || vm.syncing)
                     Button("STOP_LOG", action: vm.stopLog)
                         .buttonStyle(.bordered)
                     Button("Disconnect", action: vm.disconnect)
@@ -70,6 +75,11 @@ private struct ConnectionBar: View {
                 Spacer()
             }
             if vm.connection == .connected {
+                if let status = vm.syncStatus {
+                    Text(status)
+                        .font(.footnote)
+                        .foregroundStyle(vm.syncing ? Color.accentColor : .secondary)
+                }
                 SessionStarter(vm: vm)
             }
         }

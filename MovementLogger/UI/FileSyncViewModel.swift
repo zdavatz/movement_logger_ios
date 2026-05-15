@@ -70,6 +70,11 @@ final class FileSyncViewModel {
     var downloads: [String: DownloadProgress] = [:]
     var savedPaths: [String: String] = [:]
     var listing: Bool = false
+    /// "Sync now" in progress (LIST → diff → serial pull of new files).
+    var syncing: Bool = false
+    /// One-line sync result, mirrors the desktop status line
+    /// ("Sync: 3 new, 12 already synced — downloading…" / "up to date").
+    var syncStatus: String? = nil
     var log: [String] = []
     var sessionDurationSeconds: Int = 1800  // 30-min default, matches desktop
     var sessionRunning: SessionRunning? = nil
@@ -79,6 +84,28 @@ final class FileSyncViewModel {
     /// `(s.timestampMs - liveT0Ms) / 1000`. Tracked outside `LiveState` so
     /// SwiftUI doesn't re-render when only this internal anchor changes.
     private var liveT0Ms: UInt32? = nil
+
+    // ---- Sync-state (port of desktop sync_db.rs + issues #3/#4) ----
+    /// Stable per-install id of the connected box (`CBPeripheral.identifier`).
+    /// The DB partition key — sync history is per-box.
+    private var connectedBoxId: String? = nil
+    /// Opened once; nil only if SQLite itself failed (then sync degrades to
+    /// "nothing is synced" rather than crashing the tab).
+    private let syncDb: SyncDb? = SyncDb()
+    /// Set by `syncNow()`, consumed by the next `.listDone` so the auto-LIST
+    /// on connect never triggers a sync (mirrors the desktop's sync flag).
+    private var syncPending: Bool = false
+    /// Files this sync still has to pull, oldest-first; drained serially
+    /// because the BLE worker is single-op (one READ at a time).
+    private var syncQueue: [RemoteFile] = []
+    /// Name of the file the *sync* is currently pulling (nil for a manual
+    /// download), so `.readDone` knows whether to advance the queue.
+    private var syncInFlight: String? = nil
+    /// LIST-reported size per in-flight download. The sync DB key is
+    /// `(box, name, size)` and `size` must be the LIST size (matches what a
+    /// later `isSynced` check compares against), not the received byte
+    /// count — so we stash it at download-issue time.
+    private var pendingSizes: [String: Int64] = [:]
 
     private let ble: BleClient
     private var eventTask: Task<Void, Never>?
@@ -134,8 +161,44 @@ final class FileSyncViewModel {
 
     func download(_ file: RemoteFile) {
         downloads[file.name] = DownloadProgress(bytesDone: 0, total: file.size)
+        pendingSizes[file.name] = file.size
         logLine("READ \(file.name) (\(file.size) B)")
         ble.send(.read(name: file.name, size: file.size))
+    }
+
+    /// "Sync now" — pull every session file on the box that isn't already
+    /// recorded locally, and remember what was pulled. Port of the desktop
+    /// Sync tab's distinct-from-manual-transfer button (issue #3).
+    /// Additive only: never issues DELETE.
+    func syncNow() {
+        guard connection == .connected else { return }
+        guard connectedBoxId != nil, syncDb != nil else {
+            logLine("ERROR: sync DB unavailable — sync disabled")
+            syncStatus = "Sync unavailable (no local DB)"
+            return
+        }
+        syncing = true
+        syncPending = true
+        syncQueue = []
+        syncInFlight = nil
+        syncStatus = "Sync: listing…"
+        files = []
+        listing = true
+        logLine("Sync now — LIST")
+        ble.send(.list)
+    }
+
+    /// Session-data filter — same predicate as the Sync tab's grouping and
+    /// the desktop's auto-sync set (Sens/Gps/Bat/Mic; AppleDouble excluded).
+    /// Only these are auto-pulled by `syncNow`; FW_INFO / CHK / error logs
+    /// stay manual-only.
+    static func isSensorData(_ name: String) -> Bool {
+        let n = name.lowercased()
+        if n.hasPrefix("._") { return false }
+        return (n.hasPrefix("sens") && n.hasSuffix(".csv")) ||
+               (n.hasPrefix("gps")  && n.hasSuffix(".csv")) ||
+               (n.hasPrefix("bat")  && n.hasSuffix(".csv")) ||
+               (n.hasPrefix("mic")  && n.hasSuffix(".wav"))
     }
 
     func delete(_ file: RemoteFile) {
@@ -180,7 +243,19 @@ final class FileSyncViewModel {
     private func onEvent(_ e: BleEvent) {
         switch e {
         case .status(let msg): logLine(msg)
-        case .error(let msg): logLine("ERROR: \(msg)")
+        case .error(let msg):
+            logLine("ERROR: \(msg)")
+            // A BLE error mid-sync would otherwise strand the queue
+            // (syncInFlight never clears). Abort cleanly so the next
+            // "Sync now" starts fresh; the size key means a partial
+            // file is just re-pulled next time (desktop-equivalent).
+            if syncing {
+                syncing = false
+                syncPending = false
+                syncQueue = []
+                syncInFlight = nil
+                syncStatus = "Sync aborted (BLE error) — try again"
+            }
         case .discovered(let id, let name, let rssi):
             if !discovered.contains(where: { $0.identifier == id }) {
                 discovered.append(DiscoveredDevice(identifier: id, name: name, rssi: rssi))
@@ -188,11 +263,18 @@ final class FileSyncViewModel {
         case .scanStopped:
             scanning = false
             logLine("scan stopped (\(discovered.count) found)")
-        case .connected:
+        case .connected(let boxId):
             connection = .connected
+            connectedBoxId = boxId.isEmpty ? nil : boxId
             logLine("connected")
         case .disconnected:
             connection = .disconnected
+            connectedBoxId = nil
+            syncing = false
+            syncPending = false
+            syncQueue = []
+            syncInFlight = nil
+            pendingSizes = [:]
             files = []
             listing = false
             downloads = [:]
@@ -207,6 +289,10 @@ final class FileSyncViewModel {
         case .listDone:
             listing = false
             logLine("LIST done (\(files.count) files)")
+            if syncPending {
+                syncPending = false
+                runSyncDiff()
+            }
         case .readStarted:
             break
         case .readProgress(let name, let bytesDone):
@@ -218,6 +304,20 @@ final class FileSyncViewModel {
             downloads.removeValue(forKey: name)
             savedPaths[name] = path
             logLine("saved \(name) → \(path)")
+            // Register every successful save — manual *and* sync-driven —
+            // so a later "Sync now" skips it regardless of how it landed
+            // (desktop: "Manual downloads also register in the DB").
+            let size = pendingSizes.removeValue(forKey: name)
+                ?? Int64(content.count)
+            if path != "<save failed>", let box = connectedBoxId {
+                syncDb?.markSynced(boxId: box, name: name, size: size,
+                                   localPath: path)
+            }
+            // If this file was pulled by the sync queue, advance it.
+            if syncInFlight == name {
+                syncInFlight = nil
+                pumpSyncQueue()
+            }
         case .deleteDone(let name):
             files.removeAll { $0.name == name }
             logLine("deleted \(name)")
@@ -244,6 +344,50 @@ final class FileSyncViewModel {
             pressureHistory: pres,
             streamCapable: true
         )
+    }
+
+    /// Diff the just-LISTed files against the sync DB and enqueue the
+    /// session files we haven't pulled. Mirrors the desktop's `ListDone`
+    /// sync handler: filter to session data, skip anything `isSynced`,
+    /// enqueue the rest onto the existing serial download path.
+    @MainActor
+    private func runSyncDiff() {
+        guard let box = connectedBoxId, let db = syncDb else {
+            syncing = false
+            syncStatus = "Sync unavailable (no local DB)"
+            return
+        }
+        let candidates = files.filter { Self.isSensorData($0.name) }
+        let fresh = candidates.filter { !db.isSynced(boxId: box, name: $0.name, size: $0.size) }
+        let already = candidates.count - fresh.count
+        if fresh.isEmpty {
+            syncing = false
+            syncStatus = "Sync: up to date (\(already) already synced)"
+            logLine("Sync: up to date — \(already) already synced, 0 new")
+            return
+        }
+        syncQueue = fresh
+        syncStatus = "Sync: \(fresh.count) new, \(already) already synced — downloading…"
+        logLine("Sync: \(fresh.count) new, \(already) already synced — downloading")
+        pumpSyncQueue()
+    }
+
+    /// Pull the next queued file. The BLE worker is single-op, so sync
+    /// downloads must be strictly serial — the next READ is only issued
+    /// from `.readDone` of the previous one.
+    @MainActor
+    private func pumpSyncQueue() {
+        guard !syncQueue.isEmpty else {
+            if syncing {
+                syncing = false
+                syncStatus = "Sync: complete"
+                logLine("Sync: complete")
+            }
+            return
+        }
+        let next = syncQueue.removeFirst()
+        syncInFlight = next.name
+        download(next)
     }
 
     private func saveFile(name: String, bytes: Data) -> String {
