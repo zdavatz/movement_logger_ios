@@ -75,6 +75,10 @@ final class FileSyncViewModel {
     /// One-line sync result, mirrors the desktop status line
     /// ("Sync: 3 new, 12 already synced — downloading…" / "up to date").
     var syncStatus: String? = nil
+    /// A DELETE the box rejected (BUSY / NOT_FOUND / IO_ERROR /
+    /// BAD_REQUEST). Surfaced as a dismissable banner; cleared on a
+    /// successful delete, a fresh attempt, or disconnect (desktop #7).
+    var deleteError: String? = nil
     var log: [String] = []
     var sessionDurationSeconds: Int = 1800  // 30-min default, matches desktop
     var sessionRunning: SessionRunning? = nil
@@ -202,6 +206,7 @@ final class FileSyncViewModel {
     }
 
     func delete(_ file: RemoteFile) {
+        deleteError = nil  // clear a stale rejection on a fresh attempt
         logLine("DELETE \(file.name)")
         ble.send(.delete(name: file.name))
     }
@@ -245,6 +250,13 @@ final class FileSyncViewModel {
         case .status(let msg): logLine(msg)
         case .error(let msg):
             logLine("ERROR: \(msg)")
+            // Surface DELETE rejections prominently — the box refuses
+            // some Debug rows (8.3-name miss → NOT_FOUND, >15 chars →
+            // BAD_REQUEST, logging active → BUSY). Without this it only
+            // hits the log and looks like the tap did nothing (#7).
+            if msg.hasPrefix("DELETE ") {
+                deleteError = msg
+            }
             // A BLE error mid-sync would otherwise strand the queue
             // (syncInFlight never clears). Abort cleanly so the next
             // "Sync now" starts fresh; the size key means a partial
@@ -270,6 +282,7 @@ final class FileSyncViewModel {
         case .disconnected:
             connection = .disconnected
             connectedBoxId = nil
+            deleteError = nil
             syncing = false
             syncPending = false
             syncQueue = []
@@ -320,6 +333,7 @@ final class FileSyncViewModel {
             }
         case .deleteDone(let name):
             files.removeAll { $0.name == name }
+            deleteError = nil
             logLine("deleted \(name)")
         case .sample(let s):
             onSample(s)

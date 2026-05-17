@@ -184,15 +184,18 @@ private struct FilesPanel: View {
     @Bindable var vm: FileSyncViewModel
 
     var body: some View {
-        if vm.files.isEmpty && !vm.listing {
-            Text("Connected. Tap List files to see SD-card contents.")
-                .foregroundStyle(.secondary)
-        } else if vm.listing && vm.files.isEmpty {
-            CenteredSpinner(label: "listing files…")
-        } else {
-            let sensor = vm.files.filter { isSensorData($0.name) }
-            let debug = vm.files.filter { !isSensorData($0.name) }
-            VStack(spacing: 8) {
+        VStack(spacing: 8) {
+            if let err = vm.deleteError {
+                DeleteErrorBanner(message: err) { vm.deleteError = nil }
+            }
+            if vm.files.isEmpty && !vm.listing {
+                Text("Connected. Tap List files to see SD-card contents.")
+                    .foregroundStyle(.secondary)
+            } else if vm.listing && vm.files.isEmpty {
+                CenteredSpinner(label: "listing files…")
+            } else {
+                let sensor = vm.files.filter { isSensorData($0.name) }
+                let debug = vm.files.filter { !isSensorData($0.name) }
                 if !sensor.isEmpty {
                     GroupHeader(title: "Sensor", count: sensor.count)
                     ForEach(sensor) { FileRow(file: $0, vm: vm) }
@@ -203,6 +206,32 @@ private struct FilesPanel: View {
                 }
             }
         }
+    }
+}
+
+/// Prominent dismissable banner for a DELETE the box rejected (BUSY /
+/// NOT_FOUND / IO_ERROR / BAD_REQUEST). Port of the desktop's
+/// `ble_delete_err` frame (v0.0.10) — without it a rejected delete only
+/// shows in the log and looks like the tap did nothing.
+private struct DeleteErrorBanner: View {
+    let message: String
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text("⚠ \(message)")
+                .font(.footnote)
+                .foregroundStyle(Color(red: 0.67, green: 0.12, blue: 0.12))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button("Dismiss", action: onDismiss)
+                .font(.footnote)
+                .buttonStyle(.borderless)
+        }
+        .padding(10)
+        .background(Color(red: 1.0, green: 0.90, blue: 0.90),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(Color(red: 0.78, green: 0.31, blue: 0.31), lineWidth: 1))
     }
 }
 
@@ -226,6 +255,7 @@ private struct FileRow: View {
     var body: some View {
         let progress = vm.downloads[file.name]
         let savedPath = vm.savedPaths[file.name]
+        let deleteReason = deleteUnsupported(file.name)
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading) {
@@ -244,6 +274,12 @@ private struct FileRow: View {
                     .disabled(progress != nil)
                 Button("Delete") { vm.delete(file) }
                     .buttonStyle(.bordered)
+                    .disabled(progress != nil || deleteReason != nil)
+            }
+            if let reason = deleteReason {
+                Text("Can't delete: \(reason)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             if let p = progress {
                 ProgressView(value: p.fraction)
@@ -318,6 +354,24 @@ private func isSensorData(_ name: String) -> Bool {
            (n.hasPrefix("gps")  && n.hasSuffix(".csv")) ||
            (n.hasPrefix("bat")  && n.hasSuffix(".csv")) ||
            (n.hasPrefix("mic")  && n.hasSuffix(".wav"))
+}
+
+/// Rows the box firmware can *never* delete — return the reason so the
+/// trash button can be disabled with an explanation instead of looking
+/// like a silent no-op. Port of the desktop's `delete_unsupported`
+/// (movement_logger_desktop v0.0.10 / issue #7): `ble.c` caps DELETE
+/// names at 15 bytes (longer ⇒ BAD_REQUEST) and `SDFat_Delete` only
+/// matches a real FAT 8.3 short name, so `._*` AppleDouble sidecars and
+/// the virtual `PUMPTSUE.RI` placeholder always come back NOT_FOUND.
+private func deleteUnsupported(_ name: String) -> String? {
+    if name.hasPrefix("._") {
+        return "macOS metadata sidecar — not a real file on the box's SD card"
+    } else if name.caseInsensitiveCompare("PUMPTSUE.RI") == .orderedSame {
+        return "virtual placeholder entry — nothing to delete"
+    } else if name.utf8.count > 15 {
+        return "filename too long for the box's delete command (15-char firmware cap)"
+    }
+    return nil
 }
 
 private func humanBytes(_ b: Int64) -> String {
