@@ -61,6 +61,20 @@ final class BleClient: NSObject {
     private var streamSubscribeKicked: Bool = false
     private var op: CurrentOp = .idle
     private var scanning: Bool = false
+    /// Identifier of the box we last successfully subscribed to — the
+    /// reconnect target after an unexpected mid-transfer drop.
+    private var lastConnectedId: UUID?
+    /// Bounded auto-reconnect state machine (desktop v0.0.11–13). Driven
+    /// by the 200 ms watchdog tick so it composes with the single-worker
+    /// model without new concurrency. nil = not reconnecting.
+    private var reconnect: ReconnectState?
+    private struct ReconnectState {
+        let id: UUID
+        var attempt: Int
+        var phase: Phase
+        var nextAtMs: Int64
+        enum Phase { case waiting, scanning, connecting }
+    }
     private var scanStopTask: Task<Void, Never>?
     private var centralReady: Bool = false
 
@@ -189,7 +203,12 @@ final class BleClient: NSObject {
         switch cmd {
         case .scan: startScan()
         case .connect(let id): connect(identifier: id)
-        case .disconnect: disconnectInner(emitEvent: true)
+        case .disconnect:
+            // User-initiated: cancel any auto-reconnect and forget the
+            // box so a deliberate disconnect doesn't bounce back.
+            reconnect = nil
+            lastConnectedId = nil
+            disconnectInner(emitEvent: true)
         case .list: sendList()
         case .read(let name, let size, let offset):
             sendRead(name: name, size: size, offset: offset)
@@ -359,7 +378,17 @@ final class BleClient: NSObject {
             peripheral?.discoverServices(nil)
         case .disconnected(let err):
             if let err = err { emitErr("disconnected: \(err.localizedDescription)") }
-            disconnectInner(emitEvent: true)
+            let wasTransfer: Bool = { if case .reading = op { return true } else { return false } }()
+            if wasTransfer, lastConnectedId != nil, reconnect == nil {
+                // Mid-READ remote drop: keep the partial (disconnectInner
+                // emits .readAborted) and auto-reconnect instead of
+                // surfacing a hard .disconnected (desktop v0.0.11/12).
+                armReconnect()
+            } else if reconnect == nil {
+                disconnectInner(emitEvent: true)
+            }
+            // else: a stray disconnect callback while already reconnecting
+            // — tickReconnect owns the lifecycle, ignore.
         case .servicesDiscovered(let err):
             onServicesDiscovered(error: err)
         case .characteristicsDiscovered(let err):
@@ -451,6 +480,15 @@ final class BleClient: NSObject {
                 disconnectInner(emitEvent: true)
             } else {
                 op = .idle
+                // Subscribe confirmed = we're back. Remember the box for
+                // any future reconnect, and if a reconnect was running
+                // clear it (success) — the `.connected` below drives the
+                // VM's mirror-resume (desktop auto_reconnect success).
+                lastConnectedId = peripheral?.identifier
+                if reconnect != nil {
+                    reconnect = nil
+                    emitStatus("auto-reconnected — resuming transfer")
+                }
                 // Keep the app alive in the background for the whole session.
                 // Paired with the `bluetooth-central` UIBackgroundMode so that
                 // long READs continue when the user switches apps.
@@ -615,7 +653,72 @@ final class BleClient: NSObject {
     //  Watchdog
     // -------------------------------------------------------------------------
 
+    /// Begin a bounded auto-reconnect after an unexpected mid-transfer
+    /// drop/stall (desktop `auto_reconnect`). Tears the half-dead link
+    /// down *without* a public `.disconnected` (we intend to come back),
+    /// then lets `tickReconnect` drive rescan→connect rounds. No-op if
+    /// we never had a connected box or a reconnect is already running.
+    private func armReconnect() {
+        guard let id = lastConnectedId, reconnect == nil else { return }
+        disconnectInner(emitEvent: false)
+        reconnect = ReconnectState(id: id, attempt: 1, phase: .waiting,
+                                   nextAtMs: now() + Self.reconnectWaitMs)
+        emitStatus("link lost — auto-reconnecting (attempt 1/\(Self.reconnectAttempts))…")
+    }
+
+    /// One step of the reconnect state machine, called from the 200 ms
+    /// tick. waiting → kick a refresh scan; scanning → stop scan + start
+    /// a connect; connecting → time out and retry. Success is detected
+    /// elsewhere (subscribe-confirmed clears `reconnect`).
+    private func tickReconnect() {
+        guard var rc = reconnect, now() >= rc.nextAtMs else { return }
+        let n = now()
+        switch rc.phase {
+        case .waiting:
+            central.scanForPeripherals(withServices: nil, options: nil)
+            scanning = true
+            rc.phase = .scanning
+            rc.nextAtMs = n + Self.reconnectScanMs
+            reconnect = rc
+        case .scanning:
+            if scanning { central.stopScan(); scanning = false }
+            if let p = discovered[rc.id]
+                ?? central.retrievePeripherals(withIdentifiers: [rc.id]).first {
+                peripheral = p
+                p.delegate = self
+                central.connect(p, options: nil)
+                rc.phase = .connecting
+                rc.nextAtMs = n + Self.reconnectConnectMs
+                reconnect = rc
+            } else {
+                failReconnectAttempt(&rc, n)
+            }
+        case .connecting:
+            // Subscribe-confirmed would have cleared `reconnect`; we're
+            // here so the attempt timed out. Drop and retry.
+            if let p = peripheral { central.cancelPeripheralConnection(p) }
+            peripheral = nil
+            failReconnectAttempt(&rc, n)
+        }
+    }
+
+    private func failReconnectAttempt(_ rc: inout ReconnectState, _ n: Int64) {
+        rc.attempt += 1
+        if rc.attempt > Self.reconnectAttempts {
+            reconnect = nil
+            emitStatus("auto-reconnect exhausted — reconnect manually")
+            emit(.disconnected)
+            return
+        }
+        rc.phase = .waiting
+        rc.nextAtMs = n + Self.reconnectWaitMs
+        reconnect = rc
+        emitStatus("auto-reconnecting (attempt \(rc.attempt)/\(Self.reconnectAttempts))…")
+    }
+
     private func tickWatchdog() {
+        tickReconnect()
+        if reconnect != nil { return }
         let n = now()
         // LIST inactivity-done fallback: ≥1 row received and no new bytes for
         // LIST_INACTIVITY_DONE → assume we missed the terminator and finish.
@@ -633,6 +736,7 @@ final class BleClient: NSObject {
         case .idle: stale = false
         }
         guard stale else { return }
+        var stalledRead = false
         switch op {
         case .listing: emitErr("LIST timed out — no notifies for 20 s")
         case .reading(let name, let expected, let base, let content, _, _, _):
@@ -641,10 +745,18 @@ final class BleClient: NSObject {
             // completed segment (desktop v0.0.12 tick_watchdog).
             emit(.readAborted(name: name, content: content, base: base))
             emitErr("READ \(name) timed out at \(base + Int64(content.count))/\(expected) B — no notifies for 20 s")
+            stalledRead = true
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
         case .idle: break
         }
         op = .idle
+        // Stalled READ with the box still nominally connected (the case
+        // Peter hit — no formal disconnect). Tear the half-dead link
+        // down ourselves and auto-reconnect so the mirror resume can
+        // continue (desktop v0.0.12). Partial is already handed back.
+        if stalledRead, lastConnectedId != nil, reconnect == nil {
+            armReconnect()
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -671,6 +783,11 @@ final class BleClient: NSObject {
     private static let watchdogTickMs: Int = 200
     private static let opIdleTimeoutMs: Int64 = 20_000
     private static let listInactivityDoneMs: Int64 = 500
+    // Bounded auto-reconnect (desktop RECONNECT_ATTEMPTS / INTERVAL).
+    private static let reconnectAttempts = 10
+    private static let reconnectWaitMs: Int64 = 2_000
+    private static let reconnectScanMs: Int64 = 3_000
+    private static let reconnectConnectMs: Int64 = 10_000
     private static let progressChunkBytes: Int64 = 4 * 1024
 }
 
