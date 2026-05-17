@@ -79,6 +79,11 @@ final class FileSyncViewModel {
     /// BAD_REQUEST). Surfaced as a dismissable banner; cleared on a
     /// successful delete, a fresh attempt, or disconnect (desktop #7).
     var deleteError: String? = nil
+    /// A transfer was cut by a link drop / stall; the partial is safe in
+    /// the mirror. Drives the reconnect banner and the auto-resume on
+    /// the next `.connected` (desktop v0.0.9). Persists across the
+    /// disconnect on purpose.
+    var transferInterrupted: Bool = false
     var log: [String] = []
     var sessionDurationSeconds: Int = 1800  // 30-min default, matches desktop
     var sessionRunning: SessionRunning? = nil
@@ -304,7 +309,12 @@ final class FileSyncViewModel {
                 syncPending = false
                 syncQueue = []
                 syncInFlight = nil
-                syncStatus = "Sync aborted (BLE error) — try again"
+                // A resumable interruption (readAborted already fired)
+                // keeps its own resume message + banner — don't stomp
+                // it with "try again".
+                if !transferInterrupted {
+                    syncStatus = "Sync aborted (BLE error) — try again"
+                }
             }
         case .discovered(let id, let name, let rssi):
             if !discovered.contains(where: { $0.identifier == id }) {
@@ -317,6 +327,16 @@ final class FileSyncViewModel {
             connection = .connected
             connectedBoxId = boxId.isEmpty ? nil : boxId
             logLine("connected")
+            // Resume after an interrupted transfer (desktop v0.0.9): the
+            // aborted partial is already in the mirror, so a fresh sync
+            // pass skips every complete file and re-pulls only the
+            // unfinished one from its mirror offset. Also resume if
+            // "Keep synced" is on. A plain first connect does neither.
+            if transferInterrupted || keepSynced {
+                let why = transferInterrupted ? "Resume" : "Keep synced"
+                transferInterrupted = false
+                startSyncPass(reason: why)
+            }
         case .disconnected:
             connection = .disconnected
             connectedBoxId = nil
@@ -371,6 +391,19 @@ final class FileSyncViewModel {
                 syncInFlight = nil
                 pumpSyncQueue()
             }
+        case .readAborted(let name, let content, let base):
+            // Link dropped / stalled mid-file. Persist the partial into
+            // the mirror so the resume continues from the *true* break
+            // point (desktop v0.0.9). NOT markSynced — it's incomplete;
+            // the next sync pass re-pulls only the remaining tail via
+            // mirrorOffset. The `.error` that follows clears the queue.
+            let (_, have) = appendMirror(name: name, base: base, bytes: content)
+            downloads.removeValue(forKey: name)
+            syncInFlight = nil
+            transferInterrupted = true
+            syncStatus = "Transfer interrupted — reconnect to resume " +
+                "(\(have) B of \(name) kept)"
+            logLine("kept \(have) B of \(name) for resume")
         case .deleteDone(let name):
             files.removeAll { $0.name == name }
             deleteError = nil

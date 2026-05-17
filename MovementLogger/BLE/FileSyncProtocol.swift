@@ -81,6 +81,11 @@ enum BleEvent {
     /// resume offset we requested). The consumer appends `content` to
     /// the local mirror at `base` (desktop v0.0.14 live-mirror model).
     case readDone(name: String, content: Data, base: Int64)
+    /// A READ was cut short by a link drop / 20 s stall. Carries the
+    /// partial segment so the consumer appends it to the mirror — the
+    /// resume then continues from the *true* break point, not the last
+    /// completed segment (desktop v0.0.9/#6). Followed by an `error`.
+    case readAborted(name: String, content: Data, base: Int64)
     case deleteDone(name: String)
     case error(String)
     /// One decoded SensorStream snapshot (0.5 Hz). Only emitted while

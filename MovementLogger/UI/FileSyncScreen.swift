@@ -16,6 +16,9 @@ struct FileSyncScreen: View {
                         SessionBanner(running: s, onCleared: vm.clearSession)
                     }
                     ConnectionBar(vm: vm)
+                    if vm.transferInterrupted && vm.connection != .connected {
+                        TransferInterruptedBanner()
+                    }
                     Divider()
                     content
                     Divider()
@@ -217,6 +220,26 @@ private struct FilesPanel: View {
                 }
             }
         }
+    }
+}
+
+/// Amber banner shown while disconnected after a transfer was cut by a
+/// link drop / stall. Port of the desktop v0.0.9 resume banner — the
+/// partial is already safe in the mirror, so reconnecting resumes
+/// automatically and skips every file already complete.
+private struct TransferInterruptedBanner: View {
+    var body: some View {
+        Text("⚠ Transfer interrupted (BLE link lost). Scan and reconnect "
+             + "to the same box — the sync resumes automatically and "
+             + "skips files already saved.")
+            .font(.footnote)
+            .foregroundStyle(Color(red: 0.55, green: 0.35, blue: 0.0))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(Color(red: 1.0, green: 0.95, blue: 0.80),
+                        in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10)
+                .stroke(Color(red: 0.85, green: 0.65, blue: 0.20), lineWidth: 1))
     }
 }
 

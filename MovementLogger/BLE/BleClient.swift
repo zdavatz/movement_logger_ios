@@ -251,6 +251,10 @@ final class BleClient: NSObject {
     private func disconnectInner(emitEvent: Bool) {
         switch op {
         case .reading(let name, let expected, let base, let content, _, _, _):
+            // Hand back the partial so the resume continues from the
+            // true break point (appended to the mirror), then surface
+            // the abort (desktop v0.0.9 disconnect_inner).
+            emit(.readAborted(name: name, content: content, base: base))
             emitErr("READ \(name) aborted by disconnect at \(base + Int64(content.count))/\(expected) B")
         case .listing:
             emitErr("LIST aborted by disconnect")
@@ -632,6 +636,10 @@ final class BleClient: NSObject {
         switch op {
         case .listing: emitErr("LIST timed out — no notifies for 20 s")
         case .reading(let name, let expected, let base, let content, _, _, _):
+            // Stalled (CB still thinks it's connected). Hand back the
+            // partial so the resume continues from here, not the last
+            // completed segment (desktop v0.0.12 tick_watchdog).
+            emit(.readAborted(name: name, content: content, base: base))
             emitErr("READ \(name) timed out at \(base + Int64(content.count))/\(expected) B — no notifies for 20 s")
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
         case .idle: break
