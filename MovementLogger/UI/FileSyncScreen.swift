@@ -75,6 +75,17 @@ private struct ConnectionBar: View {
                 Spacer()
             }
             if vm.connection == .connected {
+                HStack {
+                    Toggle(isOn: Binding(
+                        get: { vm.keepSynced },
+                        set: { vm.setKeepSynced($0) }
+                    )) {
+                        Text("Keep synced").font(.footnote)
+                    }
+                    .toggleStyle(.switch)
+                    .fixedSize()
+                    Spacer()
+                }
                 if let status = vm.syncStatus {
                     Text(status)
                         .font(.footnote)

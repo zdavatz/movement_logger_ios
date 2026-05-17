@@ -1,16 +1,17 @@
 import Foundation
 import SQLite3
 
-/// Local SQLite sync-state DB. iOS port of the desktop
-/// `stbox-viz-gui/src/sync_db.rs` (movement_logger_desktop issues #3/#4).
+/// Local SQLite sync-state DB — an **audit log** of completed pulls.
+/// iOS port of the desktop `stbox-viz-gui/src/sync_db.rs`
+/// (movement_logger_desktop issues #3/#4, audit-only as of #14).
 ///
-/// Tracks, per box, which SD-card files have already been pulled to disk so
-/// a "Sync now" only fetches the sessions it hasn't seen yet. This layer is
-/// deliberately *not* the file-transfer path — transfer (LIST → READ →
-/// save) already lives in `BleClient`/`FileSyncViewModel`. Sync is the
-/// client-side bookkeeping on top of it: the box firmware has no sync
-/// concept (LIST/READ/DELETE only), so "what's already mirrored" lives
-/// entirely here.
+/// As of the v0.0.14 live-mirror model the sync *decision* is made by
+/// comparing the local mirror file's size to the box's reported size
+/// (see `mirrorOffset` / `runSyncDiff` in `FileSyncViewModel`), which is
+/// what makes a continuously-growing log fetch only its new tail. This
+/// table is no longer consulted to decide what to fetch; it's kept as a
+/// per-box record of "this file reached this size at this time, saved
+/// here" for history/debugging.
 ///
 /// Policy (user decision, desktop v0.0.6, locked): sync is **purely
 /// additive** — it never issues DELETE. Nothing on the box is ever removed
@@ -73,18 +74,6 @@ final class SyncDb {
     }
 
     deinit { sqlite3_close(db) }
-
-    /// True iff this exact (box, name, size) triple was already pulled.
-    func isSynced(boxId: String, name: String, size: Int64) -> Bool {
-        let sql = "SELECT 1 FROM synced_files WHERE box_id = ?1 AND name = ?2 AND size = ?3"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, boxId, -1, SQLiteDb.transient)
-        sqlite3_bind_text(stmt, 2, name, -1, SQLiteDb.transient)
-        sqlite3_bind_int64(stmt, 3, size)
-        return sqlite3_step(stmt) == SQLITE_ROW
-    }
 
     /// Record a successfully-saved file. INSERT OR REPLACE so a re-download
     /// of the same triple just refreshes the timestamp / path instead of

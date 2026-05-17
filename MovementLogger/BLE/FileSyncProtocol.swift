@@ -52,7 +52,13 @@ enum BleCmd {
     case connect(identifier: UUID)
     case disconnect
     case list
-    case read(name: String, size: Int64)
+    /// `size` is the full file length from the prior LIST (EOF marker).
+    /// `offset` is the byte position to resume/grow from (0 = whole
+    /// file) — the firmware seeks there before streaming, so an
+    /// interrupted or grown file continues instead of restarting.
+    /// Wire: `0x02 + name + 0x00 + offset(u32-LE)` (firmware `ble.c`
+    /// READ handler; port of desktop v0.0.11/#8).
+    case read(name: String, size: Int64, offset: Int64)
     case stopLog
     case startLog(durationSeconds: Int)
     case delete(name: String)
@@ -71,7 +77,10 @@ enum BleEvent {
     case listDone
     case readStarted(name: String, size: Int64)
     case readProgress(name: String, bytesDone: Int64)
-    case readDone(name: String, content: Data)
+    /// `base` is the offset the streamed segment started at (= the
+    /// resume offset we requested). The consumer appends `content` to
+    /// the local mirror at `base` (desktop v0.0.14 live-mirror model).
+    case readDone(name: String, content: Data, base: Int64)
     case deleteDone(name: String)
     case error(String)
     /// One decoded SensorStream snapshot (0.5 Hz). Only emitted while

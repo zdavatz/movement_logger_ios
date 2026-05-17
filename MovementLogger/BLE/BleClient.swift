@@ -191,7 +191,8 @@ final class BleClient: NSObject {
         case .connect(let id): connect(identifier: id)
         case .disconnect: disconnectInner(emitEvent: true)
         case .list: sendList()
-        case .read(let name, let size): sendRead(name: name, size: size)
+        case .read(let name, let size, let offset):
+            sendRead(name: name, size: size, offset: offset)
         case .stopLog: sendStopLog()
         case .startLog(let dur): await sendStartLog(durationSeconds: dur)
         case .delete(let name): sendDelete(name: name)
@@ -249,8 +250,8 @@ final class BleClient: NSObject {
 
     private func disconnectInner(emitEvent: Bool) {
         switch op {
-        case .reading(let name, let expected, let content, _, _, _):
-            emitErr("READ \(name) aborted by disconnect at \(content.count)/\(expected) B")
+        case .reading(let name, let expected, let base, let content, _, _, _):
+            emitErr("READ \(name) aborted by disconnect at \(base + Int64(content.count))/\(expected) B")
         case .listing:
             emitErr("LIST aborted by disconnect")
         case .deleting(let name, _):
@@ -287,15 +288,22 @@ final class BleClient: NSObject {
         emitStatus("LIST sent")
     }
 
-    private func sendRead(name: String, size: Int64) {
+    private func sendRead(name: String, size: Int64, offset: Int64) {
         guard case .idle = op else {
             emitErr("another op is in flight — wait or Disconnect"); return
         }
+        // Opcode payload: 0x02 + name + NUL + 4-byte LE start offset.
+        // The firmware seeks to `offset` before streaming, so a resumed
+        // or grown file continues mid-file. offset is u32 on the wire —
+        // SD files are well under 4 GiB.
         var payload = Data([FileSyncProtocol.opRead])
         payload.append(Data(name.utf8))
+        payload.append(0x00)
+        var le = UInt32(clamping: offset).littleEndian
+        withUnsafeBytes(of: &le) { payload.append(contentsOf: $0) }
         if !writeCmdBytes(payload) { return }
-        op = .reading(name: name, expected: size, content: Data(), lastEmit: 0,
-                      lastProgress: now(), firstPacket: true)
+        op = .reading(name: name, expected: size, base: offset, content: Data(),
+                      lastEmit: offset, lastProgress: now(), firstPacket: true)
         emit(.readStarted(name: name, size: size))
     }
 
@@ -542,7 +550,7 @@ final class BleClient: NSObject {
     }
 
     private func handleReadNotify(_ value: Data) {
-        guard case .reading(let name, let expected, var content, var lastEmit, _, let firstPacket) = op else { return }
+        guard case .reading(let name, let expected, let base, var content, var lastEmit, _, let firstPacket) = op else { return }
 
         // Status-byte detection: only the first packet, exactly 1 byte, and that
         // byte must be a recognised error code. Avoids false positives on tiny
@@ -556,7 +564,10 @@ final class BleClient: NSObject {
         }
 
         content.append(value)
-        let done = Int64(content.count)
+        // `done` is the absolute byte position in the file: the resume
+        // base plus what this segment has received. EOF is the box's
+        // full size, not the segment length.
+        let done = base + Int64(content.count)
 
         // Progress throttling: every ~4 KB or at EOF. BLE FileSync runs
         // ~1-3 KB/s so this updates the bar every 1-4 s.
@@ -566,11 +577,12 @@ final class BleClient: NSObject {
         }
 
         if done >= expected {
-            let bytes = content.prefix(Int(expected))
-            emit(.readDone(name: name, content: Data(bytes)))
+            let take = Int(expected - base)
+            let bytes = take >= 0 ? content.prefix(take) : content.prefix(0)
+            emit(.readDone(name: name, content: Data(bytes), base: base))
             op = .idle
         } else {
-            op = .reading(name: name, expected: expected, content: content,
+            op = .reading(name: name, expected: expected, base: base, content: content,
                           lastEmit: lastEmit, lastProgress: now(), firstPacket: false)
         }
     }
@@ -612,15 +624,15 @@ final class BleClient: NSObject {
         let stale: Bool
         switch op {
         case .listing(_, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
-        case .reading(_, _, _, _, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
+        case .reading(_, _, _, _, _, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .deleting(_, let lp): stale = n - lp > Self.opIdleTimeoutMs
         case .idle: stale = false
         }
         guard stale else { return }
         switch op {
         case .listing: emitErr("LIST timed out — no notifies for 20 s")
-        case .reading(let name, let expected, let content, _, _, _):
-            emitErr("READ \(name) timed out at \(content.count)/\(expected) B — no notifies for 20 s")
+        case .reading(let name, let expected, let base, let content, _, _, _):
+            emitErr("READ \(name) timed out at \(base + Int64(content.count))/\(expected) B — no notifies for 20 s")
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
         case .idle: break
         }
@@ -634,7 +646,7 @@ final class BleClient: NSObject {
     private enum CurrentOp {
         case idle
         case listing(line: String, lastProgress: Int64, rowsSeen: Int)
-        case reading(name: String, expected: Int64, content: Data,
+        case reading(name: String, expected: Int64, base: Int64, content: Data,
                      lastEmit: Int64, lastProgress: Int64, firstPacket: Bool)
         case deleting(name: String, lastProgress: Int64)
     }

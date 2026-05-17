@@ -105,11 +105,11 @@ final class FileSyncViewModel {
     /// Name of the file the *sync* is currently pulling (nil for a manual
     /// download), so `.readDone` knows whether to advance the queue.
     private var syncInFlight: String? = nil
-    /// LIST-reported size per in-flight download. The sync DB key is
-    /// `(box, name, size)` and `size` must be the LIST size (matches what a
-    /// later `isSynced` check compares against), not the received byte
-    /// count — so we stash it at download-issue time.
-    private var pendingSizes: [String: Int64] = [:]
+    /// "Keep synced" continuous-mirror toggle + its 30 s poll loop
+    /// (desktop v0.0.14). The pass only fetches each file's new tail.
+    private(set) var keepSynced: Bool = false
+    private var syncPollTask: Task<Void, Never>?
+    private static let syncPollSeconds: UInt64 = 30
 
     private let ble: BleClient
     private var eventTask: Task<Void, Never>?
@@ -133,6 +133,7 @@ final class FileSyncViewModel {
 
     deinit {
         eventTask?.cancel()
+        syncPollTask?.cancel()
         ble.close()
     }
 
@@ -164,31 +165,68 @@ final class FileSyncViewModel {
     }
 
     func download(_ file: RemoteFile) {
-        downloads[file.name] = DownloadProgress(bytesDone: 0, total: file.size)
-        pendingSizes[file.name] = file.size
-        logLine("READ \(file.name) (\(file.size) B)")
-        ble.send(.read(name: file.name, size: file.size))
+        // Live-mirror: resume/grow from whatever is already on disk. The
+        // firmware seeks to `offset`, so an interrupted file continues
+        // and a grown log only fetches its new tail (desktop v0.0.14).
+        let offset = mirrorOffset(name: file.name, boxSize: file.size)
+        if file.size > 0, offset >= file.size {
+            logLine("\(file.name) already mirrored (\(file.size) B)")
+            return
+        }
+        downloads[file.name] = DownloadProgress(bytesDone: offset, total: file.size)
+        logLine("READ \(file.name) @\(offset)/\(file.size) B")
+        ble.send(.read(name: file.name, size: file.size, offset: offset))
     }
 
-    /// "Sync now" — pull every session file on the box that isn't already
-    /// recorded locally, and remember what was pulled. Port of the desktop
-    /// Sync tab's distinct-from-manual-transfer button (issue #3).
-    /// Additive only: never issues DELETE.
-    func syncNow() {
+    /// "Sync now" — pull every session file whose local mirror is behind
+    /// the box. Port of the desktop Sync tab's distinct-from-manual
+    /// transfer (issues #3, #14). Additive only: never issues DELETE.
+    func syncNow() { startSyncPass(reason: "Sync now") }
+
+    /// "Keep synced" — while connected and idle, re-run a sync pass every
+    /// 30 s so a continuously-growing log keeps mirrored (desktop
+    /// v0.0.14). The pass itself only fetches each file's new tail.
+    func setKeepSynced(_ on: Bool) {
+        keepSynced = on
+        logLine("Keep synced \(on ? "on" : "off")")
+        syncPollTask?.cancel()
+        syncPollTask = nil
+        guard on else { return }
+        syncPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.syncPollSeconds))
+                guard let self, !Task.isCancelled else { return }
+                await self.keepSyncedTick()
+            }
+        }
+    }
+
+    @MainActor
+    private func keepSyncedTick() {
+        guard keepSynced, connection == .connected,
+              !listing, !syncing, downloads.isEmpty, syncInFlight == nil
+        else { return }
+        startSyncPass(reason: "Keep synced")
+    }
+
+    /// Begin one sync pass: fresh LIST, then the diff runs in the
+    /// `.listDone` handler (gated on `syncPending` so the auto-LIST on
+    /// connect never starts a sync by itself). Shared by the button and
+    /// the continuous loop (desktop `start_sync_pass`).
+    private func startSyncPass(reason: String) {
         guard connection == .connected else { return }
-        guard connectedBoxId != nil, syncDb != nil else {
-            logLine("ERROR: sync DB unavailable — sync disabled")
-            syncStatus = "Sync unavailable (no local DB)"
+        guard connectedBoxId != nil else {
+            syncStatus = "Sync: no box id (reconnect and retry)"
             return
         }
         syncing = true
         syncPending = true
         syncQueue = []
         syncInFlight = nil
-        syncStatus = "Sync: listing…"
+        syncStatus = "Sync: listing SD card…"
         files = []
         listing = true
-        logLine("Sync now — LIST")
+        logLine("\(reason) — LIST")
         ble.send(.list)
     }
 
@@ -287,7 +325,9 @@ final class FileSyncViewModel {
             syncPending = false
             syncQueue = []
             syncInFlight = nil
-            pendingSizes = [:]
+            // Keep the "Keep synced" toggle + poll task alive across a
+            // disconnect — its tick guards on `.connected`, so it simply
+            // resumes after a reconnect (sets up Stage 3 auto-resume).
             files = []
             listing = false
             downloads = [:]
@@ -312,19 +352,19 @@ final class FileSyncViewModel {
             if let cur = downloads[name] {
                 downloads[name] = DownloadProgress(bytesDone: bytesDone, total: cur.total)
             }
-        case .readDone(let name, let content):
-            let path = saveFile(name: name, bytes: content)
+        case .readDone(let name, let content, let base):
+            // Append the streamed segment into the local mirror at the
+            // resume offset (desktop v0.0.14). The mirror file *is* the
+            // saved download — always a valid prefix of the box file.
+            let (path, localSize) = appendMirror(name: name, base: base, bytes: content)
             downloads.removeValue(forKey: name)
             savedPaths[name] = path
-            logLine("saved \(name) → \(path)")
-            // Register every successful save — manual *and* sync-driven —
-            // so a later "Sync now" skips it regardless of how it landed
-            // (desktop: "Manual downloads also register in the DB").
-            let size = pendingSizes.removeValue(forKey: name)
-                ?? Int64(content.count)
+            logLine("saved \(name) → \(path) (\(localSize) B)")
+            // DB is an audit log now (not the fetch decision): record
+            // that this file reached this size, saved here.
             if path != "<save failed>", let box = connectedBoxId {
-                syncDb?.markSynced(boxId: box, name: name, size: size,
-                                   localPath: path)
+                syncDb?.markSynced(boxId: box, name: name,
+                                   size: localSize, localPath: path)
             }
             // If this file was pulled by the sync queue, advance it.
             if syncInFlight == name {
@@ -360,29 +400,35 @@ final class FileSyncViewModel {
         )
     }
 
-    /// Diff the just-LISTed files against the sync DB and enqueue the
-    /// session files we haven't pulled. Mirrors the desktop's `ListDone`
-    /// sync handler: filter to session data, skip anything `isSynced`,
-    /// enqueue the rest onto the existing serial download path.
+    /// Decide what to fetch by **local mirror size vs box size**, not a
+    /// DB lookup (desktop v0.0.14). That's what makes a continuously-
+    /// growing log work: each pass fetches only the new tail (offset =
+    /// local size) instead of re-pulling the whole file, so no single
+    /// big file can starve GPS/BAT in the serial queue either. The
+    /// SQLite DB is now an audit log, not the fetch decision.
     @MainActor
     private func runSyncDiff() {
-        guard let box = connectedBoxId, let db = syncDb else {
-            syncing = false
-            syncStatus = "Sync unavailable (no local DB)"
-            return
-        }
         let candidates = files.filter { Self.isSensorData($0.name) }
-        let fresh = candidates.filter { !db.isSynced(boxId: box, name: $0.name, size: $0.size) }
-        let already = candidates.count - fresh.count
-        if fresh.isEmpty {
+        var fetch: [RemoteFile] = []
+        var upToDate = 0
+        for f in candidates {
+            // local < box → grow/resume; local > box → rotated
+            // (mirrorOffset resets it). Either way, fetch.
+            if mirrorLocalSize(name: f.name) == f.size {
+                upToDate += 1
+            } else {
+                fetch.append(f)
+            }
+        }
+        if fetch.isEmpty {
             syncing = false
-            syncStatus = "Sync: up to date (\(already) already synced)"
-            logLine("Sync: up to date — \(already) already synced, 0 new")
+            syncStatus = "Sync: up to date (\(upToDate) files)"
+            logLine("Sync: up to date — \(upToDate) files")
             return
         }
-        syncQueue = fresh
-        syncStatus = "Sync: \(fresh.count) new, \(already) already synced — downloading…"
-        logLine("Sync: \(fresh.count) new, \(already) already synced — downloading")
+        syncQueue = fetch
+        syncStatus = "Sync: fetching \(fetch.count) (\(upToDate) up to date)…"
+        logLine("Sync: fetching \(fetch.count), \(upToDate) up to date")
         pumpSyncQueue()
     }
 
@@ -404,16 +450,64 @@ final class FileSyncViewModel {
         download(next)
     }
 
-    private func saveFile(name: String, bytes: Data) -> String {
+    // ---------------- Live mirror (desktop v0.0.14) ---------------------------
+    //
+    // The local file `Documents/<name>` *is* the running mirror — we
+    // accumulate straight into it (no `.part`/rename). The box's logs grow
+    // continuously, so "done" is a moving target; what matters is the local
+    // file is always a valid prefix and we only fetch bytes we don't have.
+    // Local size is the single source of truth for the resume/grow offset —
+    // survives an app restart, a dropped link, and "grew since last sync"
+    // identically. The DB is a separate audit log.
+
+    private func mirrorURL(_ name: String) -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let url = docs.appendingPathComponent(name)
+        return docs.appendingPathComponent(name)
+    }
+
+    /// Current local mirror length, 0 if absent.
+    private func mirrorLocalSize(name: String) -> Int64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: mirrorURL(name).path)
+        return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
+    /// Resume offset given the box's current size:
+    /// missing → 0; local ≤ box → local (resume/grow); local > box → the
+    /// file rotated (name reused, box file shorter) → drop local, 0.
+    private func mirrorOffset(name: String, boxSize: Int64) -> Int64 {
+        let url = mirrorURL(name)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let len = (attrs[.size] as? NSNumber)?.int64Value else { return 0 }
+        if len <= boxSize { return len }
+        try? FileManager.default.removeItem(at: url)   // rotated/stale
+        return 0
+    }
+
+    /// Append a streamed segment at `base` (creating the file). If the
+    /// file length doesn't match `base` the resume is misaligned —
+    /// realign to `base` so we never interleave a corrupt prefix.
+    /// Returns (path, new local size).
+    private func appendMirror(name: String, base: Int64, bytes: Data) -> (String, Int64) {
+        let url = mirrorURL(name)
+        let fm = FileManager.default
         do {
-            try bytes.write(to: url, options: .atomic)
-            return url.path
+            if !fm.fileExists(atPath: url.path) {
+                try Data().write(to: url)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            let cur = Int64((try? handle.seekToEnd()) ?? 0)
+            if cur != base {
+                try handle.truncate(atOffset: UInt64(max(0, min(base, cur))))
+            }
+            try handle.seekToEnd()
+            handle.write(bytes)
+            let newSize = Int64((try? handle.offset()) ?? UInt64(base) + UInt64(bytes.count))
+            return (url.path, newSize)
         } catch {
-            logLine("ERROR: save \(name): \(error.localizedDescription)")
-            return "<save failed>"
+            logLine("ERROR: mirror \(name): \(error.localizedDescription)")
+            return ("<save failed>", base + Int64(bytes.count))
         }
     }
 
