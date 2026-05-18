@@ -126,6 +126,23 @@ final class FileSyncViewModel {
         return f
     }()
 
+    /// File log keeps the date too — one file spans many sessions/days.
+    private let fileTsFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+
+    /// On-disk log in the same Documents folder as the downloaded
+    /// recordings (visible in the Files app under On My iPhone →
+    /// Movement Logger, survives app restarts).
+    var logFileURL: URL {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return docs.appendingPathComponent("movement_logger.log")
+    }
+
     init(ble: BleClient = BleClient()) {
         self.ble = ble
         self.eventTask = Task { [weak self] in
@@ -545,16 +562,45 @@ final class FileSyncViewModel {
     }
 
     private func logLine(_ msg: String) {
-        let stamp = tsFormatter.string(from: Date())
+        let now = Date()
+        let stamp = tsFormatter.string(from: now)
         var next = log
         next.append("\(stamp)  \(msg)")
         if next.count > Self.maxLogLines {
             next.removeFirst(next.count - Self.maxLogLines)
         }
         log = next
+        appendLogFile(stamp: fileTsFormatter.string(from: now), msg: msg)
+    }
+
+    /// Persist every log line to `movement_logger.log`. Append-only with a
+    /// soft size cap: past `maxLogFileBytes` it's rotated to `.1` so it
+    /// can't grow forever. Logging must never crash the app, so all IO
+    /// errors are swallowed (a full disk just means no on-disk copy).
+    private func appendLogFile(stamp: String, msg: String) {
+        let url = logFileURL
+        let fm = FileManager.default
+        if let attrs = try? fm.attributesOfItem(atPath: url.path),
+           let size = (attrs[.size] as? NSNumber)?.int64Value,
+           size > Self.maxLogFileBytes {
+            let bak = url.deletingLastPathComponent()
+                .appendingPathComponent(url.lastPathComponent + ".1")
+            try? fm.removeItem(at: bak)
+            try? fm.moveItem(at: url, to: bak)
+        }
+        guard let data = "\(stamp)  \(msg)\n".data(using: .utf8) else { return }
+        if let h = try? FileHandle(forWritingTo: url) {
+            defer { try? h.close() }
+            _ = try? h.seekToEnd()
+            try? h.write(contentsOf: data)
+        } else {
+            try? data.write(to: url)
+        }
     }
 
     private static let maxLogLines = 200
+    /// Rotate the on-disk log past this size (1 MiB ≈ tens of sessions).
+    private static let maxLogFileBytes: Int64 = 1 * 1024 * 1024
     /// Bounded rolling buffer for the Live tab sparklines. 120 × 2 s = 4 min. */
     private static let liveHistoryLen = 120
 }

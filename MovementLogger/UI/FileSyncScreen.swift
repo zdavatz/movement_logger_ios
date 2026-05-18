@@ -22,7 +22,7 @@ struct FileSyncScreen: View {
                     Divider()
                     content
                     Divider()
-                    LogPanel(lines: vm.log)
+                    LogSection(logFileURL: vm.logFileURL)
                 }
                 .padding(16)
             }
@@ -70,10 +70,13 @@ private struct ConnectionBar: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(vm.listing || vm.syncing)
-                    Button("STOP_LOG", action: vm.stopLog)
-                        .buttonStyle(.bordered)
-                    Button("Disconnect", action: vm.disconnect)
-                        .buttonStyle(.bordered)
+                    // STOP_LOG and Disconnect buttons removed (matches
+                    // Android): the current firmware auto-starts logging at
+                    // boot and has no START_LOG opcode, so STOP_LOG would
+                    // silently kill recording until a power-cycle. Disconnect
+                    // isn't needed — the link drops on its own when out of
+                    // range / the box reboots. vm.stopLog()/vm.disconnect()
+                    // plumbing is kept for now.
                 }
                 Spacer()
             }
@@ -327,36 +330,75 @@ private struct FileRow: View {
     }
 }
 
-// MARK: - Log panel
+// MARK: - Log
 
-private struct LogPanel: View {
-    let lines: [String]
+/// Replaces the always-on 180 pt panel with a single "Log" button. The
+/// full transcript is written to `movement_logger.log` regardless;
+/// tapping the button opens that file in a viewer sheet (with a Share
+/// button to export it to Files / Mail / AirDrop).
+private struct LogSection: View {
+    let logFileURL: URL
+    @State private var showing = false
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 1) {
-                    if lines.isEmpty {
-                        Text("log").foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
-                            Text(line)
-                                .font(.system(size: 11, design: .monospaced))
-                                .id(idx)
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
+        HStack {
+            Button {
+                showing = true
+            } label: {
+                Label("Log", systemImage: "doc.text")
             }
-            .frame(height: 180)
-            .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 8))
-            .onChange(of: lines.count) { _, newCount in
-                if newCount > 0 {
-                    withAnimation { proxy.scrollTo(newCount - 1, anchor: .bottom) }
+            .buttonStyle(.bordered)
+            Spacer()
+            Text("→ movement_logger.log")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .sheet(isPresented: $showing) {
+            LogFileViewer(url: logFileURL)
+        }
+    }
+}
+
+/// Reads the on-disk log file and shows it scrollable + monospaced.
+/// Re-reads on each appearance so it reflects the latest lines. A
+/// ShareLink exports the actual file.
+private struct LogFileViewer: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String = ""
+
+    var body: some View {
+        NavigationStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(text.isEmpty ? "(log file is empty — connect to a box to generate entries)" : text)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(12)
+                        .id("end")
+                }
+                .onAppear { reload(); proxy.scrollTo("end", anchor: .bottom) }
+            }
+            .navigationTitle("movement_logger.log")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        ShareLink(item: url)
+                    }
                 }
             }
         }
+    }
+
+    private func reload() {
+        text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
     }
 }
 
