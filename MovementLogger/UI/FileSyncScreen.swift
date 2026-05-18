@@ -26,7 +26,7 @@ struct FileSyncScreen: View {
                 }
                 .padding(16)
             }
-            .navigationTitle("Movement Logger")
+            .navigationTitle("Movement Logger \(appVersionString())")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
@@ -254,8 +254,12 @@ private struct FilesPanel: View {
             } else if vm.listing && vm.files.isEmpty {
                 CenteredSpinner(label: "listing files…")
             } else {
+                // Newest first: the per-session counter in the name
+                // (SensNNN.csv) is the recency proxy — higher = later.
                 let sensor = vm.files.filter { isSensorData($0.name) }
+                    .sorted { recencyKey($0.name) > recencyKey($1.name) }
                 let debug = vm.files.filter { !isSensorData($0.name) }
+                    .sorted { recencyKey($0.name) > recencyKey($1.name) }
                 if !sensor.isEmpty {
                     GroupHeader(title: "Sensor", count: sensor.count)
                     ForEach(sensor) { FileRow(file: $0, vm: vm) }
@@ -460,6 +464,19 @@ private struct CenteredSpinner: View {
     }
 }
 
+/// Recency rank for the file list: the trailing per-session counter in
+/// `SensNNN.csv` / `GpsNNN.csv` / … — higher = later session = shown
+/// first. Names without a number sort last (-1).
+private func recencyKey(_ name: String) -> Int {
+    var cur = "", last = ""
+    for ch in name {
+        if ch.isNumber { cur.append(ch) }
+        else { if !cur.isEmpty { last = cur; cur = "" } }
+    }
+    if !cur.isEmpty { last = cur }
+    return Int(last) ?? -1
+}
+
 /// Per-session sensor-data files the firmware writes: Sens*.csv, Gps*.csv,
 /// Bat*.csv, Mic*.wav. Everything else (notably DebugX.csv) lands in the
 /// Debug group. Matches `is_sensor_data_name` in stbox-viz-gui/src/main.rs.
@@ -491,6 +508,15 @@ private func deleteUnsupported(_ name: String) -> String? {
         return "filename too long for the box's delete command (15-char firmware cap)"
     }
     return nil
+}
+
+/// "v<short> (<build>)" from the bundle so the header shows exactly
+/// which build is installed — mirrors Android's title suffix.
+private func appVersionString() -> String {
+    let info = Bundle.main.infoDictionary
+    let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+    let build = info?["CFBundleVersion"] as? String ?? "?"
+    return "v\(short) (\(build))"
 }
 
 private func humanBytes(_ b: Int64) -> String {
