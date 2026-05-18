@@ -69,6 +69,10 @@ final class FileSyncViewModel {
     var files: [RemoteFile] = []
     var downloads: [String: DownloadProgress] = [:]
     var savedPaths: [String: String] = [:]
+    /// Bytes already in the local mirror per file, refreshed on LIST and
+    /// after each download. A file counts as fully downloaded (no more
+    /// "Download" button) when its mirror size >= the box's size.
+    var localBytes: [String: Int64] = [:]
     var listing: Bool = false
     /// "Sync now" in progress (LIST → diff → serial pull of new files).
     var syncing: Bool = false
@@ -388,6 +392,10 @@ final class FileSyncViewModel {
             files.append(RemoteFile(name: name, size: size))
         case .listDone:
             listing = false
+            // Refresh per-file mirror sizes so the UI knows which files
+            // are already fully downloaded (survives app restart).
+            localBytes = Dictionary(
+                uniqueKeysWithValues: files.map { ($0.name, mirrorLocalSize(name: $0.name)) })
             logLine("LIST done (\(files.count) files)")
             if syncPending {
                 syncPending = false
@@ -406,6 +414,7 @@ final class FileSyncViewModel {
             let (path, localSize) = appendMirror(name: name, base: base, bytes: content)
             downloads.removeValue(forKey: name)
             savedPaths[name] = path
+            localBytes[name] = localSize
             logLine("saved \(name) → \(path) (\(localSize) B)")
             // DB is an audit log now (not the fetch decision): record
             // that this file reached this size, saved here.

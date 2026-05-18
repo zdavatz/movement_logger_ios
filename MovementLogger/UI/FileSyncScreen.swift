@@ -70,13 +70,12 @@ private struct ConnectionBar: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(vm.listing || vm.syncing)
-                    // STOP_LOG and Disconnect buttons removed (matches
-                    // Android): the current firmware auto-starts logging at
-                    // boot and has no START_LOG opcode, so STOP_LOG would
-                    // silently kill recording until a power-cycle. Disconnect
-                    // isn't needed — the link drops on its own when out of
-                    // range / the box reboots. vm.stopLog()/vm.disconnect()
-                    // plumbing is kept for now.
+                    // Disconnect is back so one person can sync, drop the
+                    // link, and hand the box to the next person to sync.
+                    // STOP_LOG stays removed: with the always-on firmware
+                    // it would silently kill recording until a power-cycle.
+                    Button("Disconnect", action: vm.disconnect)
+                        .buttonStyle(.bordered)
                 }
                 Spacer()
             }
@@ -340,6 +339,8 @@ private struct FileRow: View {
         let progress = vm.downloads[file.name]
         let savedPath = vm.savedPaths[file.name]
         let deleteReason = deleteUnsupported(file.name)
+        // Fully downloaded = local mirror has at least the box's size.
+        let downloaded = file.size > 0 && (vm.localBytes[file.name] ?? 0) >= file.size
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading) {
@@ -353,9 +354,15 @@ private struct FileRow: View {
                     }
                 }
                 Spacer()
-                Button(progress == nil ? "Download" : "…") { vm.download(file) }
-                    .buttonStyle(.bordered)
-                    .disabled(progress != nil)
+                if downloaded && progress == nil {
+                    Text("✓ Downloaded")
+                        .font(.footnote).fontWeight(.semibold)
+                        .foregroundStyle(.tint)
+                } else {
+                    Button(progress == nil ? "Download" : "…") { vm.download(file) }
+                        .buttonStyle(.bordered)
+                        .disabled(progress != nil)
+                }
                 Button("Delete") { vm.delete(file) }
                     .buttonStyle(.bordered)
                     .disabled(progress != nil || deleteReason != nil)
