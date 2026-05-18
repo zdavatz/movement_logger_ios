@@ -2,6 +2,15 @@ name: Release to App Store
 
 # Triggered when a tag like v0.0.6 is pushed. The tag name drives the version
 # stamped into the built IPA — bump the patch by +0.0.1 each release.
+#
+# Signing is MANUAL on purpose. The old automatic flow used
+# `-allowProvisioningUpdates` + the App Store Connect API key, which makes
+# Xcode mint a brand-new managed certificate on every clean runner. Apple
+# caps certificates per account, so after enough releases the cap is hit and
+# Archive fails with "Your account has reached the maximum number of
+# certificates". Manual signing pins one fixed iOS Distribution cert + one
+# App Store provisioning profile (both GitHub secrets), so CI never creates
+# certificates and the build is reproducible.
 
 on:
   push:
@@ -50,6 +59,11 @@ jobs:
           CERT_PASSWORD:      ${{ secrets.APPLE_CERT_PASSWORD }}
           KEYCHAIN_PASSWORD:  ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
         run: |
+          if [ -z "$CERT_P12_BASE64" ]; then
+            echo "::error::APPLE_CERT_P12_BASE64 is empty. It must hold an iOS"
+            echo "::error::Distribution (.p12) certificate for manual signing."
+            exit 1
+          fi
           CERT_PATH="$RUNNER_TEMP/cert.p12"
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
 
@@ -62,6 +76,50 @@ jobs:
           security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '" ')
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
+          # The signing identity name (e.g. "Apple Distribution: … (TEAMID)")
+          # — derived from the keychain so we don't hard-code a name that
+          # changes when the cert is regenerated.
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" \
+            | grep -m1 -oE '"[^"]*(Distribution|Apple Distribution)[^"]*"' \
+            | tr -d '"')"
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No iOS Distribution identity found in the imported"
+            echo "::error::.p12 — APPLE_CERT_P12_BASE64 is not an iOS"
+            echo "::error::Distribution certificate."
+            security find-identity -v -p codesigning "$KEYCHAIN_PATH" || true
+            exit 1
+          fi
+          echo "SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "Using signing identity: $IDENTITY"
+
+      - name: Install App Store provisioning profile
+        env:
+          PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          if [ -z "$PROFILE_BASE64" ]; then
+            echo "::error::APPLE_PROVISIONING_PROFILE_BASE64 is empty. Create an"
+            echo "::error::App Store provisioning profile for $BUNDLE_ID in the"
+            echo "::error::Apple Developer portal, export the .mobileprovision,"
+            echo "::error::and add it base64-encoded as that GitHub secret."
+            exit 1
+          fi
+          PROFILE_PATH="$RUNNER_TEMP/pp.mobileprovision"
+          echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+
+          # Decode the plist inside the CMS envelope to read UUID + Name.
+          PLIST="$RUNNER_TEMP/pp.plist"
+          security cms -D -i "$PROFILE_PATH" > "$PLIST"
+          UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PLIST")"
+          NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$PLIST")"
+
+          DEST="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$DEST"
+          cp "$PROFILE_PATH" "$DEST/$UUID.mobileprovision"
+
+          echo "PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+          echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "Installed provisioning profile '$NAME' ($UUID)"
+
       - name: Stage App Store Connect API key
         env:
           API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
@@ -73,9 +131,6 @@ jobs:
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
 
       - name: Archive
-        env:
-          API_KEY_ID:     ${{ secrets.APPLE_API_KEY_ID }}
-          API_ISSUER_ID:  ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           xcodebuild \
             -project MovementLogger.xcodeproj \
@@ -83,10 +138,10 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/MovementLogger.xcarchive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8 \
-            -authenticationKeyID    "$API_KEY_ID" \
-            -authenticationKeyIssuerID "$API_ISSUER_ID" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             archive
 
       - name: Write ExportOptions.plist
@@ -98,26 +153,25 @@ jobs:
           <dict>
               <key>method</key><string>app-store-connect</string>
               <key>teamID</key><string>${APPLE_TEAM_ID}</string>
-              <key>signingStyle</key><string>automatic</string>
+              <key>signingStyle</key><string>manual</string>
+              <key>signingCertificate</key><string>${SIGN_IDENTITY}</string>
+              <key>provisioningProfiles</key>
+              <dict>
+                  <key>${BUNDLE_ID}</key><string>${PROFILE_NAME}</string>
+              </dict>
               <key>uploadSymbols</key><true/>
               <key>destination</key><string>export</string>
           </dict>
           </plist>
           EOF
+          cat build/ExportOptions.plist
 
       - name: Export IPA
-        env:
-          API_KEY_ID:     ${{ secrets.APPLE_API_KEY_ID }}
-          API_ISSUER_ID:  ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
           xcodebuild -exportArchive \
             -archivePath build/MovementLogger.xcarchive \
             -exportPath build/export \
-            -exportOptionsPlist build/ExportOptions.plist \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8 \
-            -authenticationKeyID    "$API_KEY_ID" \
-            -authenticationKeyIssuerID "$API_ISSUER_ID"
+            -exportOptionsPlist build/ExportOptions.plist
 
       - name: Upload to App Store Connect
         env:
