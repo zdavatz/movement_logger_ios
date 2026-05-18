@@ -97,8 +97,51 @@ private struct ConnectionBar: View {
                         .font(.footnote)
                         .foregroundStyle(vm.syncing ? Color.accentColor : .secondary)
                 }
-                SessionStarter(vm: vm)
+                LogModeSelector(vm: vm)
+                if vm.logModeManual == true {
+                    SessionStarter(vm: vm)
+                }
             }
+        }
+    }
+}
+
+/// Auto / Manual box log-mode. AUTO = the box opens a session on every
+/// cold boot (data-safe default). MANUAL = it boots idle and only
+/// records after Start session, for the chosen duration — the box can
+/// then be powered yet not recording, so it's opt-in. `nil` = not yet
+/// known (legacy firmware that ignores GET_MODE, or the reply hasn't
+/// arrived); neither button is highlighted until the box answers.
+private struct LogModeSelector: View {
+    @Bindable var vm: FileSyncViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Log mode").font(.footnote)
+                Button {
+                    vm.setLogMode(false)
+                } label: { Text("Auto") }
+                .buttonStyle(.bordered)
+                .tint(vm.logModeManual == false ? .accentColor : .secondary)
+                Button {
+                    vm.setLogMode(true)
+                } label: { Text("Manual") }
+                .buttonStyle(.bordered)
+                .tint(vm.logModeManual == true ? .accentColor : .secondary)
+                Spacer()
+            }
+            Text(logModeHint)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var logModeHint: String {
+        switch vm.logModeManual {
+        case .some(false): return "Box records automatically on power-on."
+        case .some(true):  return "Box stays idle on power-on — start a session below."
+        case .none:        return "Querying box… (legacy firmware can't report this)"
         }
     }
 }

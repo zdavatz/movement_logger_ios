@@ -215,6 +215,8 @@ final class BleClient: NSObject {
         case .stopLog: sendStopLog()
         case .startLog(let dur): await sendStartLog(durationSeconds: dur)
         case .delete(let name): sendDelete(name: name)
+        case .setLogMode(let m): sendSetMode(manual: m)
+        case .getLogMode: sendGetMode()
         }
     }
 
@@ -279,6 +281,8 @@ final class BleClient: NSObject {
             emitErr("LIST aborted by disconnect")
         case .deleting(let name, _):
             emitErr("DELETE \(name) aborted by disconnect")
+        case .modeReq(let isSet, _, _):
+            emitErr("\(isSet ? "SET_MODE" : "GET_MODE") aborted by disconnect")
         case .idle:
             break
         }
@@ -356,11 +360,33 @@ final class BleClient: NSObject {
             UInt8((d >> 24) & 0xFF),
         ])
         if !writeCmdBytes(payload) { return }
-        // Mirror the Rust/Kotlin clients: write-without-response returns once bytes
-        // are queued, not when transmitted. If the caller queues a Disconnect right
-        // behind us, we'd tear down before the opcode hits the air.
+        // write-without-response returns once bytes are queued, not when
+        // transmitted — settle before any follow-up command.
         try? await Task.sleep(for: .milliseconds(500))
-        emitStatus("START_LOG sent (\(durationSeconds)s) — box rebooting to LOG mode")
+        // Current firmware does NOT reboot on START_LOG: it opens a
+        // session and auto-stops after the duration. (Legacy PumpTsueri
+        // rebooted; we no longer rely on that.)
+        emitStatus("START_LOG sent (\(durationSeconds)s)")
+    }
+
+    private func sendSetMode(manual: Bool) {
+        if case .idle = op {} else {
+            emitErr("SET_MODE rejected — another op in flight")
+            return
+        }
+        let payload = Data([FileSyncProtocol.opSetMode, manual ? 1 : 0])
+        if !writeCmdBytes(payload) { return }
+        op = .modeReq(isSet: true, manual: manual, lastProgress: now())
+        emitStatus("SET_MODE \(manual ? "manual" : "auto") sent")
+    }
+
+    private func sendGetMode() {
+        if case .idle = op {} else {
+            emitErr("GET_MODE rejected — another op in flight")
+            return
+        }
+        if !writeCmdBytes(Data([FileSyncProtocol.opGetMode])) { return }
+        op = .modeReq(isSet: false, manual: false, lastProgress: now())
     }
 
     // -------------------------------------------------------------------------
@@ -521,6 +547,8 @@ final class BleClient: NSObject {
             handleReadNotify(data)
         case .deleting:
             handleDeleteNotify(data)
+        case .modeReq:
+            handleModeNotify(data)
         }
     }
 
@@ -641,6 +669,25 @@ final class BleClient: NSObject {
         op = .idle
     }
 
+    private func handleModeNotify(_ value: Data) {
+        guard case .modeReq(let isSet, let manual, _) = op else { return }
+        guard let b = value.first else { return }
+        if isSet {
+            // Reply is a status byte. OK ⇒ the box is now in `manual`.
+            if b == FileSyncProtocol.statusOK {
+                emit(.logMode(manual: manual))
+                emitStatus("log mode set to \(manual ? "manual" : "auto")")
+            } else {
+                emitErr("SET_MODE: \(FileSyncProtocol.statusMessage(b)) " +
+                    "(0x\(String(format: "%02X", b)))")
+            }
+        } else {
+            // GET_MODE reply: 0 = auto, 1 = manual.
+            emit(.logMode(manual: b != 0))
+        }
+        op = .idle
+    }
+
     private func parseListRow(_ line: String) -> (String, Int64)? {
         guard let commaIdx = line.lastIndex(of: ",") else { return nil }
         let name = String(line[..<commaIdx])
@@ -733,6 +780,7 @@ final class BleClient: NSObject {
         case .listing(_, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .reading(_, _, _, _, _, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .deleting(_, let lp): stale = n - lp > Self.opIdleTimeoutMs
+        case .modeReq(_, _, let lp): stale = n - lp > Self.opIdleTimeoutMs
         case .idle: stale = false
         }
         guard stale else { return }
@@ -747,6 +795,8 @@ final class BleClient: NSObject {
             emitErr("READ \(name) timed out at \(base + Int64(content.count))/\(expected) B — no notifies for 20 s")
             stalledRead = true
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
+        case .modeReq(let isSet, _, _):
+            emitErr("\(isSet ? "SET_MODE" : "GET_MODE") timed out — no reply for 20 s")
         case .idle: break
         }
         op = .idle
@@ -769,6 +819,10 @@ final class BleClient: NSObject {
         case reading(name: String, expected: Int64, base: Int64, content: Data,
                      lastEmit: Int64, lastProgress: Int64, firstPacket: Bool)
         case deleting(name: String, lastProgress: Int64)
+        /// SET_MODE / GET_MODE: both get one FileData reply byte.
+        /// `isSet` true = SET (reply is a status byte; on OK the box is
+        /// now in `manual`), false = GET (reply is 0/1 = the mode).
+        case modeReq(isSet: Bool, manual: Bool, lastProgress: Int64)
     }
 
     private func now() -> Int64 {

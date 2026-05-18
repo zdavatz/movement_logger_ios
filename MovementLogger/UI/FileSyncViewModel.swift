@@ -114,6 +114,11 @@ final class FileSyncViewModel {
     /// (desktop v0.0.14). The pass only fetches each file's new tail.
     private(set) var keepSynced: Bool = false
     private var syncPollTask: Task<Void, Never>?
+
+    /// Box log-mode: nil = unknown (not yet queried / legacy firmware
+    /// that ignores GET_MODE), false = auto (logs on boot), true =
+    /// manual (idle until START_LOG).
+    private(set) var logModeManual: Bool? = nil
     private static let syncPollSeconds: UInt64 = 30
 
     private let ble: BleClient
@@ -282,22 +287,23 @@ final class FileSyncViewModel {
 
     func startSession() {
         let dur = sessionDurationSeconds
-        logLine("START_LOG \(dur) s — box rebooting to LOG mode")
+        // Current firmware does not reboot on START_LOG — it opens a
+        // session and auto-stops after `dur` s, the link stays up. Only
+        // meaningful in manual mode (in auto the box already logs).
+        logLine("START_LOG \(dur) s")
         ble.send(.startLog(durationSeconds: dur))
-        // Firmware NVIC_SystemReset's ~50 ms after START_LOG, so the BLE link
-        // dies abruptly without LL_TERMINATE_IND. Send an explicit Disconnect
-        // right after to tear down host state proactively; either way the
-        // worker ends up Idle.
-        ble.send(.disconnect)
         sessionRunning = SessionRunning(startedAt: Date(), durationSeconds: dur)
-        files = []
-        downloads = [:]
-        listing = false
+    }
+
+    /// Persist the box log-mode and remember it locally.
+    func setLogMode(_ manual: Bool) {
+        logLine("SET_MODE \(manual ? "manual" : "auto")")
+        ble.send(.setLogMode(manual: manual))
     }
 
     func clearSession() {
         if sessionRunning != nil {
-            logLine("LOG session deadline reached — box should be advertising again")
+            logLine("LOG session duration reached — box is idle again (manual mode)")
             sessionRunning = nil
         }
     }
@@ -344,6 +350,10 @@ final class FileSyncViewModel {
             connection = .connected
             connectedBoxId = boxId.isEmpty ? nil : boxId
             logLine("connected")
+            // Ask the box which log-mode it's in so the UI toggle
+            // reflects reality. Legacy PumpTsueri ignores 0x07 (no
+            // reply) — the toggle just stays at its last/unknown state.
+            ble.send(.getLogMode)
             // Resume after an interrupted transfer (desktop v0.0.9): the
             // aborted partial is already in the mirror, so a fresh sync
             // pass skips every complete file and re-pulls only the
@@ -425,6 +435,9 @@ final class FileSyncViewModel {
             files.removeAll { $0.name == name }
             deleteError = nil
             logLine("deleted \(name)")
+        case .logMode(let manual):
+            logModeManual = manual
+            logLine("box log mode: \(manual ? "manual" : "auto")")
         case .sample(let s):
             onSample(s)
         }

@@ -24,6 +24,10 @@ enum FileSyncProtocol {
     static let opDelete: UInt8 = 0x03
     static let opStopLog: UInt8 = 0x04
     static let opStartLog: UInt8 = 0x05
+    /// SET_MODE `<u8>`: 0 = auto, 1 = manual. Persisted on the box.
+    static let opSetMode: UInt8 = 0x06
+    /// GET_MODE: box replies one byte 0 = auto, 1 = manual.
+    static let opGetMode: UInt8 = 0x07
 
     // Status bytes returned in single-byte FileData notifies.
     static let statusOK: UInt8 = 0x00
@@ -62,6 +66,10 @@ enum BleCmd {
     case stopLog
     case startLog(durationSeconds: Int)
     case delete(name: String)
+    /// Persist the box log-mode (false = auto, true = manual).
+    case setLogMode(manual: Bool)
+    /// Query the box's current log-mode; reply arrives as `.logMode`.
+    case getLogMode
 }
 
 enum BleEvent {
@@ -87,6 +95,10 @@ enum BleEvent {
     /// completed segment (desktop v0.0.9/#6). Followed by an `error`.
     case readAborted(name: String, content: Data, base: Int64)
     case deleteDone(name: String)
+    /// The box's current log-mode, from a GET_MODE reply or a confirmed
+    /// SET_MODE. `manual == false` → auto (logs on boot), `true` →
+    /// manual (idle until START_LOG).
+    case logMode(manual: Bool)
     case error(String)
     /// One decoded SensorStream snapshot (0.5 Hz). Only emitted while
     /// connected to PumpLogger firmware that exposes the SensorStream
