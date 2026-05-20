@@ -209,6 +209,26 @@ Port of Android's `sync/` (`BackgroundSync.kt`+`SyncWorker.kt`) and the desktop'
 - No `BOOT_COMPLETED` autostart — iOS apps cannot start themselves on device boot. Restoration covers the "user opened the app at least once" case (iOS remembers the registered identifier across reboots), but a *fresh* install only starts mirroring once the user opens the app once. Matches Android's behaviour: a fresh install does nothing until the user goes through the foreground Connect → Keep-synced flow.
 - No headless background scanning. `central.scanForPeripherals(withServices: nil)` returns nothing in BG and `withServices: [...]` needs the parent service UUID (which the firmware doesn't expose under a standard service). We instead rely on `central.retrievePeripherals(withIdentifiers: [savedUUID])` + `central.connect(...)`, which iOS will fulfil when the box appears.
 
+### Sync UI — visible-progress card
+
+While a sync pass is draining, `FileSyncScreen.SyncProgressRow` sits under the keep-synced toggle and shows two layers of progress:
+
+- **Headline**: cumulative bytes (`X MB / Y MB`), overall percent, and "N of M files" — derived from `syncCumulativeBytes / syncPassTotalBytes`. `syncPassTotalBytes` is the sum of every queued file's `size`; `syncCumulativeBytes` is the sum of completed-files' sizes + the in-flight file's `bytesDone`. The bar advances continuously as bytes arrive over BLE.
+- **Current file**: filename + per-file byte progress + per-file bar. Refreshes whenever the queue advances to the next file.
+
+This exists because the file list above the progress card is *deliberately empty* during a sync (the VM clears `files` at `startSyncPass` and only repopulates after `.listDone`), so without a separate progress affordance the user would have no signal that keep-synced was actually doing anything. The card is shown whenever `vm.syncing == true` — both `Sync now` taps AND the 30 s `Keep synced` poll.
+
+**"List files" and "Sync now" are disabled while any worker op is in flight** (`listing || syncing || !downloads.isEmpty`). Without this guard, a tap during a slow READ would surface the BLE worker's `another op is in flight` rejection and look like the tap did nothing.
+
+### Sync race-conditions worth remembering
+
+- **Post-`.connected` sync kick is deferred 500 ms.** When restoration or a reconnect fires `.connected`, the VM sends `getLogMode` *and* (if keep-synced was on) calls `startSyncPass`. Without a defer, the LIST inside `startSyncPass` would collide with the in-flight `modeReq` and be rejected as "another op is in flight". `Task { try? await Task.sleep(for: .milliseconds(500)); startSyncPass(...) }` lets the modeReq reply land first. Idle paths still serialise correctly: the deferred task checks `connection == .connected && !syncing` before kicking.
+- **"another op is in flight" is a benign collision, NOT a sync abort.** The original `.error` handler nuked the queue and surfaced a "Sync aborted (BLE error) — try again" banner on any error. Now: `isCollision = msg.hasPrefix("another op is in flight")` short-circuits before the abort path. If `syncing == true` but the queue is empty AND nothing is in-flight (the just-started case), we additionally reset `syncing = false` so the next 30 s tick retries; an active drain is left alone (the in-flight READ keeps going, the colliding command was the new one, not the running one).
+
+### Throughput (carried over from desktop + Android)
+
+PumpTsueri FileSync delivers ~**1.8–2 KB/s** in practice. Measured from real downloads: SENS001 (91 KB) in 46 s, SENS002 (188 KB) in 102 s — same on iOS, Android, and desktop. The bottleneck is the firmware notify pacing + SD-card read rate, not host-side queueing. iOS already auto-negotiates the maximum MTU (~185 B) and the BLE protocol is **single-op by design** (one FileCmd + one FileData characteristic, no multiplexing — a second READ during one in flight is rejected by the firmware with `BUSY (0xB0)`), so parallel transfers are not possible and would not help if they were. A 2 MB sensor file takes ~17 min. Live-mirror + incremental sync (next pass fetches only the new tail) is what makes day-to-day use bearable: only the *first* sync of an old session is slow.
+
 ### Replay tab — data on top of video
 
 `ReplayViewModel` keeps the parsed sensor/GPS as `fullSensorRows`/`fullGpsRows` (`@ObservationIgnored` backing storage). On any pick (sensor, GPS, video), `applyVideoAndSlice()` runs and:
