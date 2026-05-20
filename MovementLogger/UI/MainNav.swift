@@ -8,7 +8,9 @@ struct MainNav: View {
     /// Store screenshot capture) can flip the initial tab without touching
     /// the segmented bar.
     @State private var selection: Int = Self.initialTab()
-    @State private var vm = FileSyncViewModel()
+    // Singleton — shared with the background sync agent so foreground and
+    // background drive the same `BleClient`. See `FileSyncViewModel.shared`.
+    @State private var vm = FileSyncViewModel.shared
 
     var body: some View {
         TabView(selection: $selection) {

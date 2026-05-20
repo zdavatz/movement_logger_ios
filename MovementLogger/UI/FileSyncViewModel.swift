@@ -63,6 +63,16 @@ struct SessionRunning: Equatable {
 @Observable
 final class FileSyncViewModel {
 
+    /// Process-wide instance. Used by both the SwiftUI views (via `MainNav`)
+    /// and the background sync agent (`SyncTaskHandler`) so they drive the
+    /// **same** `BleClient` — single source of truth, single CoreBluetooth
+    /// central, single sync state machine. Mirrors Android's `FileSyncCore`
+    /// singleton and the desktop's `AppState`. Constructed lazily but
+    /// touched early from `AppDelegate.application(_:didFinishLaunchingWithOptions:)`
+    /// so the `CBCentralManager`'s restoration identifier is registered
+    /// before iOS has a chance to deliver any restored state.
+    static let shared = FileSyncViewModel()
+
     var connection: ConnectionStatus = .disconnected
     var scanning: Bool = false
     var discovered: [DiscoveredDevice] = []
@@ -154,12 +164,41 @@ final class FileSyncViewModel {
 
     init(ble: BleClient = BleClient()) {
         self.ble = ble
+        // Restore the user-visible toggle from AgentConfig so a cold-launch
+        // shows the correct state. The 30 s in-process poll is only armed
+        // by `setKeepSynced(true)`, so we route through that helper if it's
+        // on — fires from the @MainActor init, which is fine.
+        self.keepSynced = AgentConfig.keepSynced
+        self.logModeManual = AgentConfig.logModeManual
         self.eventTask = Task { [weak self] in
             guard let stream = self?.ble.events else { return }
             for await event in stream {
                 await self?.onEvent(event)
             }
         }
+        if self.keepSynced {
+            // Re-arm the in-process poll loop on cold launch.
+            self.setKeepSynced(true)
+        }
+    }
+
+    /// True iff anything is in flight from the foreground UI's perspective.
+    /// The BG handler uses this to honour the "GUI wins, agent yields"
+    /// policy (Android+desktop locked decision): when the user has the
+    /// foreground BLE machine busy, the background task backs off so they
+    /// don't fight for the single CoreBluetooth queue.
+    var isBusy: Bool {
+        connection != .disconnected || listing || syncing || !downloads.isEmpty
+    }
+
+    /// Connect by saved `CBPeripheral.identifier` — the BG handler path,
+    /// which doesn't have a `DiscoveredDevice` because it hasn't scanned.
+    /// `BleClient.connect` falls back to `central.retrievePeripherals` so
+    /// this works after a relaunch without a fresh scan.
+    func connect(identifier: UUID) {
+        connection = .connecting
+        logLine("connect (agent) \(identifier.uuidString)")
+        ble.send(.connect(identifier: identifier))
     }
 
     deinit {
@@ -217,8 +256,13 @@ final class FileSyncViewModel {
     /// "Keep synced" — while connected and idle, re-run a sync pass every
     /// 30 s so a continuously-growing log keeps mirrored (desktop
     /// v0.0.14). The pass itself only fetches each file's new tail.
+    ///
+    /// Also persists the new state to `AgentConfig` and reschedules the
+    /// `BGTaskScheduler` so the out-of-app agent gate flips immediately.
     func setKeepSynced(_ on: Bool) {
         keepSynced = on
+        AgentConfig.keepSynced = on
+        BackgroundSync.refresh()
         logLine("Keep synced \(on ? "on" : "off")")
         syncPollTask?.cancel()
         syncPollTask = nil
@@ -353,6 +397,11 @@ final class FileSyncViewModel {
         case .connected(let boxId):
             connection = .connected
             connectedBoxId = boxId.isEmpty ? nil : boxId
+            // Persist the box id for the background agent so it can
+            // reconnect after the app has been suspended/terminated.
+            // BG schedule may flip live → refresh either way.
+            if let bid = connectedBoxId { AgentConfig.boxId = bid }
+            BackgroundSync.refresh()
             logLine("connected")
             // Ask the box which log-mode it's in so the UI toggle
             // reflects reality. Legacy PumpTsueri ignores 0x07 (no
@@ -446,6 +495,10 @@ final class FileSyncViewModel {
             logLine("deleted \(name)")
         case .logMode(let manual):
             logModeManual = manual
+            // Persist + reschedule — the gating policy is sensitive to
+            // MANUAL (which disables BG sync).
+            AgentConfig.logModeManual = manual
+            BackgroundSync.refresh()
             logLine("box log mode: \(manual ? "manual" : "auto")")
         case .sample(let s):
             onSample(s)

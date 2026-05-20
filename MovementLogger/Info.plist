@@ -29,6 +29,12 @@
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>bluetooth-central</string>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>ch.pumptsueri.movementlogger.sync</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Movement Logger talks to the PumpTsueri SensorTile.box over BLE to download recorded sessions.</string>

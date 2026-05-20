@@ -115,7 +115,20 @@ final class BleClient: NSObject {
         self.workerCont = wc
 
         super.init()
-        self.central = CBCentralManager(delegate: self, queue: bleQueue)
+        // State Preservation & Restoration: iOS will relaunch the app in the
+        // background (or hand state back on cold launch) when the previously-
+        // connected box reconnects in range or fires a notification on a
+        // subscribed characteristic. The identifier must be stable across
+        // launches AND unique per app. See `centralManager(_:willRestoreState:)`
+        // below for the restore hook. Paired with the `bluetooth-central`
+        // UIBackgroundMode and the BG sync agent (`Sync/`).
+        self.central = CBCentralManager(
+            delegate: self,
+            queue: bleQueue,
+            options: [
+                CBCentralManagerOptionRestoreIdentifierKey: Self.restoreIdentifier,
+            ]
+        )
 
         self.workerTask = Task { [weak self] in await self?.workerLoop() }
         // Watchdog ticks are posted into the same worker stream so they're
@@ -833,6 +846,12 @@ final class BleClient: NSObject {
     //  Tunables
     // -------------------------------------------------------------------------
 
+    /// CoreBluetooth restoration identifier. Stable across launches so iOS
+    /// can hand back the same `[CBPeripheral]` set on relaunch. Reverse-DNS
+    /// scoped to the app's bundle id to avoid collisions if a future binary
+    /// adds a second central.
+    private static let restoreIdentifier: String = "ch.pumptsueri.movementlogger.ble"
+
     private static let scanDurationMs: Int = 5_000
     private static let watchdogTickMs: Int = 200
     private static let opIdleTimeoutMs: Int64 = 20_000
@@ -848,6 +867,45 @@ final class BleClient: NSObject {
 // MARK: - CBCentralManagerDelegate
 
 extension BleClient: CBCentralManagerDelegate {
+    /// iOS relaunched us with state for a previously-active peripheral.
+    /// Called BEFORE `centralManagerDidUpdateState`. We adopt the restored
+    /// `CBPeripheral` (re-attach our delegate, rebind characteristic refs)
+    /// so a subsequent `didConnect` / notify lands on the same state
+    /// machine the suspended worker had. If the peripheral is still
+    /// connected, the next characteristic-value callback drives the op
+    /// state machine directly; if disconnected, the foreground UI or BG
+    /// agent can issue `.connect` against the same identifier.
+    ///
+    /// Restoration is best-effort: a missing characteristic just means we
+    /// re-discover at the next connect, no functional change.
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String: Any]) {
+        guard let restored = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral],
+              !restored.isEmpty else { return }
+        // Pick the first restored peripheral — we only ever maintain a
+        // single connection in this app.
+        let p = restored[0]
+        p.delegate = self
+        peripheral = p
+        lastConnectedId = p.identifier
+        discovered[p.identifier] = p
+        for svc in (p.services ?? []) {
+            for ch in (svc.characteristics ?? []) {
+                if ch.uuid == FileSyncProtocol.fileCmdUUID { cmdChar = ch }
+                if ch.uuid == FileSyncProtocol.fileDataUUID { dataChar = ch }
+                if ch.uuid == FileSyncProtocol.streamUUID { streamChar = ch }
+            }
+        }
+        // If we got the link back already connected (the usual case for
+        // a wake-by-notify) re-emit `.connected` so the VM can react.
+        // Otherwise wait for an explicit `.connect`. Keep this minimal —
+        // the VM owns the resume logic via the existing event flow.
+        if p.state == .connected, dataChar != nil {
+            beginBackgroundAssertion()
+            emit(.status("restored connection to \(p.identifier.uuidString)"))
+            emit(.connected(boxId: p.identifier.uuidString))
+        }
+    }
+
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         workerCont.yield(.raw(.centralStateChanged(central.state)))
     }

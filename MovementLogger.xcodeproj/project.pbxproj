@@ -12,6 +12,9 @@
 		A100000000000000000000AC /* BleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F2 /* BleClient.swift */; };
 		A100000000000000000000B0 /* SyncDb.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F7 /* SyncDb.swift */; };
 		A100000000000000000000AD /* FileSyncViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F3 /* FileSyncViewModel.swift */; };
+		A10000000000000000000301 /* AgentConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000311 /* AgentConfig.swift */; };
+		A10000000000000000000302 /* BackgroundSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000312 /* BackgroundSync.swift */; };
+		A10000000000000000000303 /* SyncTaskHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000313 /* SyncTaskHandler.swift */; };
 		A100000000000000000000AE /* FileSyncScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* FileSyncScreen.swift */; };
 		A100000000000000000000AF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* Assets.xcassets */; };
 		A10000000000000000000101 /* CsvParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000201 /* CsvParsers.swift */; };
@@ -37,6 +40,9 @@
 		A100000000000000000000F2 /* BleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BleClient.swift; sourceTree = "<group>"; };
 		A100000000000000000000F7 /* SyncDb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncDb.swift; sourceTree = "<group>"; };
 		A100000000000000000000F3 /* FileSyncViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncViewModel.swift; sourceTree = "<group>"; };
+		A10000000000000000000311 /* AgentConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentConfig.swift; sourceTree = "<group>"; };
+		A10000000000000000000312 /* BackgroundSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundSync.swift; sourceTree = "<group>"; };
+		A10000000000000000000313 /* SyncTaskHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncTaskHandler.swift; sourceTree = "<group>"; };
 		A100000000000000000000F4 /* FileSyncScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncScreen.swift; sourceTree = "<group>"; };
 		A100000000000000000000F5 /* MovementLogger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovementLogger.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000000000000000000F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -82,11 +88,22 @@
 				A100000000000000000000F0 /* MovementLoggerApp.swift */,
 				A100000000000000000000D2 /* BLE */,
 				A100000000000000000000D5 /* Data */,
+				A10000000000000000000310 /* Sync */,
 				A100000000000000000000D3 /* UI */,
 				A100000000000000000000D6 /* Export */,
 				A100000000000000000000F6 /* Assets.xcassets */,
 			);
 			path = MovementLogger;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000310 /* Sync */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000311 /* AgentConfig.swift */,
+				A10000000000000000000312 /* BackgroundSync.swift */,
+				A10000000000000000000313 /* SyncTaskHandler.swift */,
+			);
+			path = Sync;
 			sourceTree = "<group>";
 		};
 		A100000000000000000000D6 /* Export */ = {
@@ -235,6 +252,9 @@
 				A1000000000000000000010D /* CompositeExporter.swift in Sources */,
 				A1000000000000000000010E /* LiveSample.swift in Sources */,
 				A1000000000000000000010F /* LiveScreen.swift in Sources */,
+				A10000000000000000000301 /* AgentConfig.swift in Sources */,
+				A10000000000000000000302 /* BackgroundSync.swift in Sources */,
+				A10000000000000000000303 /* SyncTaskHandler.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
