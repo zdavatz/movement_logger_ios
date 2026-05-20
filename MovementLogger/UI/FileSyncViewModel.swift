@@ -309,8 +309,16 @@ final class FileSyncViewModel {
 
     @MainActor
     private func keepSyncedTick() {
+        // `transferInterrupted` is true between a mid-READ drop and the
+        // auto-reconnect succeeding. During that window BleClient has
+        // silently torn the link down (emitEvent: false) so the VM still
+        // sees `connection == .connected`, but `cmdChar` is nil and any
+        // .list/.read would fail with "FileCmd characteristic missing".
+        // Skip until reconnect clears the flag — the `.connected` handler
+        // re-runs `startSyncPass` itself with reason "Resume".
         guard keepSynced, connection == .connected,
-              !listing, !syncing, downloads.isEmpty, syncInFlight == nil
+              !listing, !syncing, downloads.isEmpty, syncInFlight == nil,
+              !transferInterrupted
         else { return }
         startSyncPass(reason: "Keep synced")
     }
