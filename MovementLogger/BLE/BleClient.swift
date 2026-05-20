@@ -764,7 +764,10 @@ final class BleClient: NSObject {
 
     private func failReconnectAttempt(_ rc: inout ReconnectState, _ n: Int64) {
         rc.attempt += 1
-        if rc.attempt > Self.reconnectAttempts {
+        // Bounded only when Keep-synced is off. With Keep-synced on the
+        // user has opted into mirror-everything-you-can, so we never
+        // surrender — same regime as desktop's Auto Mode (v0.0.19).
+        if !keepSyncedActive && rc.attempt > Self.reconnectAttempts {
             reconnect = nil
             emitStatus("auto-reconnect exhausted — reconnect manually")
             emit(.disconnected)
@@ -773,7 +776,11 @@ final class BleClient: NSObject {
         rc.phase = .waiting
         rc.nextAtMs = n + Self.reconnectWaitMs
         reconnect = rc
-        emitStatus("auto-reconnecting (attempt \(rc.attempt)/\(Self.reconnectAttempts))…")
+        if keepSyncedActive {
+            emitStatus("auto-reconnecting (attempt \(rc.attempt), keep-synced)…")
+        } else {
+            emitStatus("auto-reconnecting (attempt \(rc.attempt)/\(Self.reconnectAttempts))…")
+        }
     }
 
     private func tickWatchdog() {
@@ -856,11 +863,35 @@ final class BleClient: NSObject {
     private static let watchdogTickMs: Int = 200
     private static let opIdleTimeoutMs: Int64 = 20_000
     private static let listInactivityDoneMs: Int64 = 500
-    // Bounded auto-reconnect (desktop RECONNECT_ATTEMPTS / INTERVAL).
-    private static let reconnectAttempts = 10
+    // Auto-reconnect tunables.
+    //
+    // Two regimes (mirrors desktop v0.0.19): bounded when Keep-synced is
+    // OFF (manual sync, give up after RECONNECT_ATTEMPTS so we don't
+    // ratchet forever), *unbounded* when ON — the user explicitly opted
+    // into "keep syncing whenever possible" and the box's firmware self-
+    // heals across 20+ recovery cycles. Decided by `keepSyncedActive` on
+    // `failReconnectAttempt`.
+    //
+    // `reconnectConnectMs` is 60 s on purpose: iOS holds the pending
+    // `central.connect()` even while the app is suspended (lock screen,
+    // background) and only fires `didConnect` when the peripheral
+    // actually advertises again. The previous 10 s budget tripped a
+    // false-timeout every wake — the worker's `Task.sleep` watchdog
+    // doesn't run during suspension but `DispatchTime.now()` keeps
+    // ticking, so by the time the worker resumes, the 10 s "deadline"
+    // had elapsed and we cancelled a perfectly good pending connect.
+    // 60 s + iOS event-driven wake = lock-screen-safe.
+    private static let reconnectAttempts = 30
     private static let reconnectWaitMs: Int64 = 2_000
     private static let reconnectScanMs: Int64 = 3_000
-    private static let reconnectConnectMs: Int64 = 10_000
+    private static let reconnectConnectMs: Int64 = 60_000
+
+    /// `true` when the user has opted into Keep-synced (mirrored from
+    /// `AgentConfig`). Drives the unbounded-vs-bounded reconnect choice.
+    /// Read from `failReconnectAttempt` so a mid-loop toggle is honoured.
+    private var keepSyncedActive: Bool {
+        AgentConfig.keepSynced && AgentConfig.logModeManual != true
+    }
     private static let progressChunkBytes: Int64 = 4 * 1024
 }
 
