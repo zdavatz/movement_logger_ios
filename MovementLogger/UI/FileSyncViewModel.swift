@@ -371,6 +371,15 @@ final class FileSyncViewModel {
             if msg.hasPrefix("DELETE ") {
                 deleteError = msg
             }
+            // "another op is in flight" means the BLE worker rejected
+            // the command BEFORE dispatching — the optimistic UI flags
+            // we set in `listFiles()` / `download()` need to be cleared
+            // by hand. Without this, tapping List Files during a long
+            // running keep-synced READ leaves the spinner spinning
+            // forever and the file list empty until disconnect.
+            if msg.hasPrefix("another op is in flight") {
+                listing = false
+            }
             // A BLE error mid-sync would otherwise strand the queue
             // (syncInFlight never clears). Abort cleanly so the next
             // "Sync now" starts fresh; the size key means a partial
