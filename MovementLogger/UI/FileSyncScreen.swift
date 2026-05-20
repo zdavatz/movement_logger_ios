@@ -64,12 +64,16 @@ private struct ConnectionBar: View {
                         Text(vm.listing ? "Listing…" : "List files")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(vm.listing)
+                    // Disable while ANY worker op is in flight — keep-synced
+                    // READs hold the worker busy for minutes on a big file,
+                    // and tap-while-busy would just collide with the "another
+                    // op is in flight" rejection.
+                    .disabled(vm.listing || vm.syncing || !vm.downloads.isEmpty)
                     Button(action: vm.syncNow) {
                         Text(vm.syncing ? "Syncing…" : "Sync now")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(vm.listing || vm.syncing)
+                    .disabled(vm.listing || vm.syncing || !vm.downloads.isEmpty)
                     // Disconnect is back so one person can sync, drop the
                     // link, and hand the box to the next person to sync.
                     // STOP_LOG stays removed: with the always-on firmware
@@ -96,12 +100,87 @@ private struct ConnectionBar: View {
                         .font(.footnote)
                         .foregroundStyle(vm.syncing ? Color.accentColor : .secondary)
                 }
+                // Show the current sync READ + the pass-position so the user
+                // can tell that keep-synced IS working even while the file
+                // list is empty. Cumulative byte-progress bar is the
+                // headline number — per-file progress is the secondary row
+                // below it.
+                if vm.syncing {
+                    SyncProgressRow(
+                        currentName: vm.syncInFlight,
+                        currentFileProgress: vm.syncInFlight.flatMap { vm.downloads[$0] },
+                        completed: max(0, vm.syncPassTotal - vm.syncQueue.count - (vm.syncInFlight != nil ? 1 : 0)) + (vm.syncInFlight != nil ? 1 : 0),
+                        total: vm.syncPassTotal,
+                        bytesDone: vm.syncCumulativeBytes,
+                        bytesTotal: vm.syncPassTotalBytes,
+                        fraction: vm.syncCumulativeFraction)
+                }
                 LogModeSelector(vm: vm)
                 if vm.logModeManual == true {
                     SessionStarter(vm: vm)
                 }
             }
         }
+    }
+}
+
+/// In-flight sync-pass progress.
+///
+/// Two layers of progress, headline first:
+///   - Overall byte-progress bar (`bytesDone / bytesTotal`) — the
+///     denominator includes every file's full size, the numerator is
+///     completed files + the in-flight file's `bytesDone`. So the bar
+///     tracks data actually pulled, not file-count.
+///   - Current file row underneath: name + per-file %% + per-file
+///     byte progress bar. Disappears between files (brief idle gap
+///     between two queued READs).
+private struct SyncProgressRow: View {
+    let currentName: String?
+    let currentFileProgress: DownloadProgress?
+    let completed: Int
+    let total: Int
+    let bytesDone: Int64
+    let bytesTotal: Int64
+    let fraction: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "arrow.down.circle.fill")
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(total > 0 ? "Syncing — \(completed) of \(total) files"
+                                   : "Syncing — \(completed) files")
+                        .font(.footnote.weight(.semibold))
+                    Text("\(humanBytes(bytesDone)) / \(humanBytes(bytesTotal))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(Int(fraction * 100))%")
+                    .font(.footnote.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.tint)
+            }
+            ProgressView(value: fraction)
+            if let name = currentName, let p = currentFileProgress {
+                Divider().padding(.vertical, 2)
+                HStack(spacing: 8) {
+                    Text(name)
+                        .font(.caption)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Text("\(humanBytes(p.bytesDone)) / \(humanBytes(p.total))")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                ProgressView(value: p.fraction)
+                    .tint(.secondary)
+            }
+        }
+        .padding(10)
+        .background(Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 10))
     }
 }
 

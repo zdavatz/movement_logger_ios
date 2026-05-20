@@ -120,10 +120,41 @@ final class FileSyncViewModel {
     private var syncPending: Bool = false
     /// Files this sync still has to pull, oldest-first; drained serially
     /// because the BLE worker is single-op (one READ at a time).
-    private var syncQueue: [RemoteFile] = []
+    /// Public-read so the UI can show "N files queued" while sync runs.
+    private(set) var syncQueue: [RemoteFile] = []
     /// Name of the file the *sync* is currently pulling (nil for a manual
     /// download), so `.readDone` knows whether to advance the queue.
-    private var syncInFlight: String? = nil
+    /// Public-read so the UI can show progress for the in-flight file.
+    private(set) var syncInFlight: String? = nil
+    /// Total file count of the current sync pass (set at `startSyncPass`,
+    /// reset on completion). Used to render "Syncing X of N".
+    private(set) var syncPassTotal: Int = 0
+    /// Total byte count of the current sync pass (sum of every queued
+    /// file's size). Constant across the pass — drives the cumulative
+    /// progress bar's denominator.
+    private(set) var syncPassTotalBytes: Int64 = 0
+    /// Bytes drained — sum of completed files' full sizes. The in-flight
+    /// file's contribution is folded in via `downloads[name].bytesDone`
+    /// in `syncCumulativeBytes` so the bar moves while the current
+    /// READ streams (`bytesDone` starts at the mirror baseline = resume
+    /// offset, so already-on-disk bytes count once the file becomes
+    /// in-flight). Files still queued contribute 0 until they start.
+    private(set) var syncPassCompletedBytes: Int64 = 0
+
+    /// Live cumulative bytes synced in the current pass — completed
+    /// files' sizes + the in-flight file's `bytesDone`. Use this for
+    /// the overall progress-bar numerator.
+    var syncCumulativeBytes: Int64 {
+        guard let name = syncInFlight,
+              let p = downloads[name] else { return syncPassCompletedBytes }
+        return syncPassCompletedBytes + p.bytesDone
+    }
+
+    /// 0…1 overall progress of the in-flight sync pass.
+    var syncCumulativeFraction: Double {
+        guard syncPassTotalBytes > 0 else { return 0 }
+        return min(1, max(0, Double(syncCumulativeBytes) / Double(syncPassTotalBytes)))
+    }
     /// "Keep synced" continuous-mirror toggle + its 30 s poll loop
     /// (desktop v0.0.14). The pass only fetches each file's new tail.
     private(set) var keepSynced: Bool = false
@@ -372,23 +403,41 @@ final class FileSyncViewModel {
                 deleteError = msg
             }
             // "another op is in flight" means the BLE worker rejected
-            // the command BEFORE dispatching — the optimistic UI flags
-            // we set in `listFiles()` / `download()` need to be cleared
-            // by hand. Without this, tapping List Files during a long
-            // running keep-synced READ leaves the spinner spinning
-            // forever and the file list empty until disconnect.
-            if msg.hasPrefix("another op is in flight") {
+            // the command BEFORE dispatching — the in-flight op (a
+            // keep-synced READ or LIST) is still going. Clear the
+            // optimistic UI flags from `listFiles()` etc. but do NOT
+            // treat it as a real sync abort below: the in-flight op
+            // will complete normally and the next keep-synced tick
+            // re-evaluates. Without this, every collision wiped the
+            // running sync queue and surfaced a misleading "Sync
+            // aborted (BLE error) — try again" banner.
+            let isCollision = msg.hasPrefix("another op is in flight")
+            if isCollision {
                 listing = false
+                // If a sync was JUST starting (queue not built yet, no
+                // in-flight READ) and its LIST got rejected, reset the
+                // sync flag so the next keep-synced tick retries. Common
+                // path on .connected: getLogMode races with startSyncPass.
+                // Don't touch an active sync that's mid-drain — the
+                // rejection there was a different (foreground) command.
+                if syncing, syncQueue.isEmpty, syncInFlight == nil {
+                    syncing = false
+                    syncPending = false
+                    syncStatus = "Sync: deferred (box busy) — retrying"
+                }
             }
-            // A BLE error mid-sync would otherwise strand the queue
+            // A *real* BLE error mid-sync would strand the queue
             // (syncInFlight never clears). Abort cleanly so the next
             // "Sync now" starts fresh; the size key means a partial
             // file is just re-pulled next time (desktop-equivalent).
-            if syncing {
+            if syncing && !isCollision {
                 syncing = false
                 syncPending = false
                 syncQueue = []
                 syncInFlight = nil
+                syncPassTotal = 0
+                syncPassTotalBytes = 0
+                syncPassCompletedBytes = 0
                 // A resumable interruption (readAborted already fired)
                 // keeps its own resume message + banner — don't stomp
                 // it with "try again".
@@ -421,10 +470,21 @@ final class FileSyncViewModel {
             // pass skips every complete file and re-pulls only the
             // unfinished one from its mirror offset. Also resume if
             // "Keep synced" is on. A plain first connect does neither.
+            //
+            // Defer the kick by 500 ms so the in-flight getLogMode
+            // `modeReq` finishes first — otherwise the LIST inside
+            // startSyncPass collides with it and gets rejected as
+            // "another op is in flight".
             if transferInterrupted || keepSynced {
                 let why = transferInterrupted ? "Resume" : "Keep synced"
                 transferInterrupted = false
-                startSyncPass(reason: why)
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    guard let self = self,
+                          self.connection == .connected,
+                          !self.syncing else { return }
+                    self.startSyncPass(reason: why)
+                }
             }
         case .disconnected:
             connection = .disconnected
@@ -434,6 +494,9 @@ final class FileSyncViewModel {
             syncPending = false
             syncQueue = []
             syncInFlight = nil
+            syncPassTotal = 0
+            syncPassTotalBytes = 0
+            syncPassCompletedBytes = 0
             // Keep the "Keep synced" toggle + poll task alive across a
             // disconnect — its tick guards on `.connected`, so it simply
             // resumes after a reconnect (sets up Stage 3 auto-resume).
@@ -480,8 +543,11 @@ final class FileSyncViewModel {
                 syncDb?.markSynced(boxId: box, name: name,
                                    size: localSize, localPath: path)
             }
-            // If this file was pulled by the sync queue, advance it.
+            // If this file was pulled by the sync queue, fold its size
+            // into the cumulative-byte counter so the overall progress
+            // bar snaps forward as each file completes, then advance.
             if syncInFlight == name {
+                syncPassCompletedBytes += localSize
                 syncInFlight = nil
                 pumpSyncQueue()
             }
@@ -556,11 +622,23 @@ final class FileSyncViewModel {
         }
         if fetch.isEmpty {
             syncing = false
+            syncPassTotal = 0
+            syncPassTotalBytes = 0
+            syncPassCompletedBytes = 0
             syncStatus = "Sync: up to date (\(upToDate) files)"
             logLine("Sync: up to date — \(upToDate) files")
             return
         }
         syncQueue = fetch
+        syncPassTotal = fetch.count
+        syncPassTotalBytes = fetch.reduce(0) { $0 + $1.size }
+        // Accounting model: `syncPassCompletedBytes` only counts files
+        // whose READ has fully completed in THIS pass. The in-flight
+        // file's contribution comes from `downloads[name].bytesDone`
+        // (which starts at the mirror baseline = resume offset, so the
+        // bar accounts for already-on-disk bytes the moment the file
+        // becomes in-flight). See `syncCumulativeBytes` in the header.
+        syncPassCompletedBytes = 0
         syncStatus = "Sync: fetching \(fetch.count) (\(upToDate) up to date)…"
         logLine("Sync: fetching \(fetch.count), \(upToDate) up to date")
         pumpSyncQueue()
@@ -574,6 +652,9 @@ final class FileSyncViewModel {
         guard !syncQueue.isEmpty else {
             if syncing {
                 syncing = false
+                syncPassTotal = 0
+                syncPassTotalBytes = 0
+                syncPassCompletedBytes = 0
                 syncStatus = "Sync: complete"
                 logLine("Sync: complete")
             }
