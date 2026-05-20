@@ -413,6 +413,7 @@ private struct GroupHeader: View {
 private struct FileRow: View {
     let file: RemoteFile
     @Bindable var vm: FileSyncViewModel
+    @State private var viewing: Bool = false
 
     var body: some View {
         let progress = vm.downloads[file.name]
@@ -434,9 +435,15 @@ private struct FileRow: View {
                 }
                 Spacer()
                 if downloaded && progress == nil {
-                    Text("✓ Downloaded")
-                        .font(.footnote).fontWeight(.semibold)
-                        .foregroundStyle(.tint)
+                    // Opens the same kind of sheet as the global Log button —
+                    // text preview inline (CSV/log) with a Share button so
+                    // the file can be exported to Files / Mail / AirDrop.
+                    Button {
+                        viewing = true
+                    } label: {
+                        Label("View", systemImage: "doc.text")
+                    }
+                    .buttonStyle(.bordered)
                 } else {
                     Button(progress == nil ? "Download" : "…") { vm.download(file) }
                         .buttonStyle(.bordered)
@@ -460,6 +467,110 @@ private struct FileRow: View {
         .padding(12)
         .background(Color(.secondarySystemBackground),
                     in: RoundedRectangle(cornerRadius: 12))
+        .sheet(isPresented: $viewing) {
+            DownloadedFileViewer(url: documentsURL(file.name))
+        }
+    }
+
+    private func documentsURL(_ name: String) -> URL {
+        let docs = FileManager.default.urls(for: .documentDirectory,
+                                            in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        return docs.appendingPathComponent(name)
+    }
+}
+
+/// Sheet shown when the user taps "View" on a fully-downloaded file in
+/// the Sync tab. Text-shaped files (CSV / WAV header / etc.) get an
+/// inline preview capped at ~256 KB; everything else falls back to a
+/// summary + Share. The ShareLink in the toolbar always exports the
+/// real file so AirDrop / Mail / Files all work regardless of the
+/// content type. Mirrors `LogFileViewer` below.
+private struct DownloadedFileViewer: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var preview: String = ""
+    @State private var isText: Bool = false
+    @State private var fileSize: Int64 = 0
+    @State private var truncated: Bool = false
+    @State private var loading: Bool = true
+
+    /// SwiftUI `Text` lays out the whole string at once and gets
+    /// noticeably laggy past ~50 KB of monospaced content. A megabyte
+    /// CSV stutters for seconds. Cap the preview tight — the Share
+    /// button handles "I want the whole thing" cleanly.
+    private static let previewCap: Int = 48 * 1024
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                if loading {
+                    HStack {
+                        Spacer()
+                        ProgressView()
+                        Spacer()
+                    }
+                    .padding(32)
+                } else if !isText {
+                    Text("(binary file — \(humanBytes(fileSize)). Use the share button to export.)")
+                        .foregroundStyle(.secondary)
+                        .padding(12)
+                } else {
+                    if truncated {
+                        Text("Showing first \(humanBytes(Int64(Self.previewCap))) of \(humanBytes(fileSize)) — use Share for the full file.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 12)
+                            .padding(.top, 12)
+                    }
+                    Text(preview.isEmpty ? "(empty file)" : preview)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(12)
+                }
+            }
+            .navigationTitle(url.lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Done") { dismiss() }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        ShareLink(item: url)
+                    }
+                }
+            }
+            .task { await loadAsync() }
+        }
+    }
+
+    /// Read + decode on a background queue so the sheet opens
+    /// immediately. The `@State` writes flip back onto the main actor
+    /// at the await boundary.
+    private func loadAsync() async {
+        let cap = Self.previewCap
+        let result: (Int64, String, Bool, Bool) = await Task.detached(priority: .userInitiated) {
+            let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            guard let h = try? FileHandle(forReadingFrom: url) else {
+                return (size, "", false, false)
+            }
+            defer { try? h.close() }
+            let bytes = (try? h.read(upToCount: cap)) ?? Data()
+            let didTruncate = Int64(bytes.count) < size
+            if !bytes.contains(0x00), let s = String(data: bytes, encoding: .utf8) {
+                return (size, s, true, didTruncate)
+            }
+            return (size, "", false, false)
+        }.value
+        fileSize = result.0
+        preview = result.1
+        isText = result.2
+        truncated = result.3
+        loading = false
     }
 }
 
