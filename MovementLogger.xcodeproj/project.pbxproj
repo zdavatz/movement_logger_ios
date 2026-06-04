@@ -32,6 +32,8 @@
 		A1000000000000000000010D /* CompositeExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020D /* CompositeExporter.swift */; };
 		A1000000000000000000010E /* LiveSample.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020E /* LiveSample.swift */; };
 		A1000000000000000000010F /* LiveScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020F /* LiveScreen.swift */; };
+		A10000000000000000000401 /* GpsCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000411 /* GpsCore.swift */; };
+		A10000000000000000000402 /* GpsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000412 /* GpsScreen.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -61,6 +63,8 @@
 		A1000000000000000000020D /* CompositeExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositeExporter.swift; sourceTree = "<group>"; };
 		A1000000000000000000020E /* LiveSample.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSample.swift; sourceTree = "<group>"; };
 		A1000000000000000000020F /* LiveScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveScreen.swift; sourceTree = "<group>"; };
+		A10000000000000000000411 /* GpsCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsCore.swift; sourceTree = "<group>"; };
+		A10000000000000000000412 /* GpsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsScreen.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -88,12 +92,21 @@
 				A100000000000000000000F0 /* MovementLoggerApp.swift */,
 				A100000000000000000000D2 /* BLE */,
 				A100000000000000000000D5 /* Data */,
+				A10000000000000000000410 /* Location */,
 				A10000000000000000000310 /* Sync */,
 				A100000000000000000000D3 /* UI */,
 				A100000000000000000000D6 /* Export */,
 				A100000000000000000000F6 /* Assets.xcassets */,
 			);
 			path = MovementLogger;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000410 /* Location */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000411 /* GpsCore.swift */,
+			);
+			path = Location;
 			sourceTree = "<group>";
 		};
 		A10000000000000000000310 /* Sync */ = {
@@ -146,6 +159,7 @@
 			children = (
 				A1000000000000000000020A /* MainNav.swift */,
 				A1000000000000000000020F /* LiveScreen.swift */,
+				A10000000000000000000412 /* GpsScreen.swift */,
 				A100000000000000000000F3 /* FileSyncViewModel.swift */,
 				A100000000000000000000F4 /* FileSyncScreen.swift */,
 				A1000000000000000000020B /* ReplayViewModel.swift */,
@@ -255,6 +269,8 @@
 				A10000000000000000000301 /* AgentConfig.swift in Sources */,
 				A10000000000000000000302 /* BackgroundSync.swift in Sources */,
 				A10000000000000000000303 /* SyncTaskHandler.swift in Sources */,
+				A10000000000000000000401 /* GpsCore.swift in Sources */,
+				A10000000000000000000402 /* GpsScreen.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

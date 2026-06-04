@@ -40,6 +40,8 @@
 	<string>Movement Logger talks to the PumpTsueri SensorTile.box over BLE to download recorded sessions.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Movement Logger saves the composite replay video to your Photos library so you can share it.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Movement Logger uses the iPhone's GPS to record an independent cross-check track alongside the box's GPS over BLE.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIApplicationSceneManifest</key>

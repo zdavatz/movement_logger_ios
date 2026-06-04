@@ -1,0 +1,45 @@
+name: CI build
+
+# Compile-only check on push and PR — no signing, no upload. Used to
+# catch syntax / pbxproj registration errors before a `vX.Y.Z` tag is
+# cut. Mirrors the local `xcodebuild ... CODE_SIGNING_ALLOWED=NO`
+# invocation documented in CLAUDE.md.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Compile (no signing)
+        run: |
+          xcodebuild \
+            -project MovementLogger.xcodeproj \
+            -scheme MovementLogger \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            build \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcbeautify || true
+          # Re-run without the beautifier piped — xcbeautify swallows the
+          # exit code. The first invocation gives a readable log; this
+          # second one fails the job if compile failed.
+          xcodebuild \
+            -project MovementLogger.xcodeproj \
+            -scheme MovementLogger \
+            -destination 'generic/platform=iOS' \
+            -configuration Debug \
+            build \
+            CODE_SIGNING_ALLOWED=NO
