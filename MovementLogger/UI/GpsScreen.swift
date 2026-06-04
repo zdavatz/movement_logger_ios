@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import CoreLocation
 
 /// GPS tab — iPhone's built-in GNSS via `CoreLocation`. The Android peer
@@ -160,13 +161,25 @@ struct GpsScreen: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 Text("CSV log").fontWeight(.semibold)
-                HStack {
+                HStack(spacing: 8) {
                     if !core.isLogging {
                         Button("Start recording") { core.startLogging() }
                             .buttonStyle(.borderedProminent)
                     } else {
                         Button("Stop recording") { core.stopLogging() }
                             .buttonStyle(.borderedProminent)
+                    }
+                    if let url = currentLogURL {
+                        ShareLink(item: url) {
+                            Label("Share", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                        Button {
+                            copyCsvToPasteboard(url)
+                        } label: {
+                            Label(copyButtonLabel, systemImage: "doc.on.doc")
+                        }
+                        .buttonStyle(.bordered)
                     }
                 }
                 if core.isLogging {
@@ -181,6 +194,35 @@ struct GpsScreen: View {
                     Text("Schema matches the box's Gps*.csv — Replay tab will pick it up.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+        }
+    }
+
+    /// File URL of the active or most-recent CSV log, if any. Used to wire
+    /// the Share + Copy buttons to whichever file the user just recorded
+    /// (or is recording right now — Share/Copy work mid-recording too).
+    private var currentLogURL: URL? {
+        guard let p = core.logPath else { return nil }
+        return URL(fileURLWithPath: p)
+    }
+
+    @State private var copyButtonLabel: String = "Copy"
+
+    private func copyCsvToPasteboard(_ url: URL) {
+        do {
+            let text = try String(contentsOf: url, encoding: .utf8)
+            UIPasteboard.general.string = text
+            copyButtonLabel = "Copied"
+            // Revert after a short delay so repeated taps are still visible.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1.5))
+                copyButtonLabel = "Copy"
+            }
+        } catch {
+            copyButtonLabel = "Copy failed"
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(1.5))
+                copyButtonLabel = "Copy"
             }
         }
     }
