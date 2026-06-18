@@ -150,7 +150,7 @@ MovementLogger/
 │   ├── LiveSample.swift             46-byte SensorStream wire-layout decoder
 │   └── BleClient.swift              single-worker CoreBluetooth state machine (FileSync + SensorStream)
 ├── Data/                            Numerics, ported from Android `data/` (which is in turn from `stbox-viz/*.rs`)
-│   ├── CsvParsers.swift             Sens / Gps / Bat CSV → typed rows
+│   ├── CsvParsers.swift             Sens / Gps / Bat CSV → typed rows (dual-schema)
 │   ├── GpsTime.swift                hhmmss.ss → absolute UTC ms
 │   ├── VideoMetadata.swift          AVAsset creationDate / duration
 │   ├── GpsMath.swift                haversine, position-derived speed, rolling-median (sorted-array fast path)
@@ -235,17 +235,24 @@ PumpTsueri FileSync delivers ~**1.8–2 KB/s** in practice. Measured from real d
 
 1. Picks the **alignment date** from the video's `creation_time` if loaded, else today. This replaces the v1 "today's date" assumption — without it, sensor data recorded on a different day from when the user opens the app would land 24h+ off and the cursor would never move.
 2. Re-parses each GPS row's `hhmmss.ss` against that date → `fullGpsAbsTimesMs`.
-3. Computes the **ride window** `[video.creation_time, video.creation_time + video.duration]`. Binary-searches GPS rows to find the slice that overlaps. Slices `gpsRows`, `gpsAbsTimesMs`, `speedSmoothedKmh` to the window.
-4. Slices `sensorRows` by tick range bracketed by the GPS slice (ThreadX ticks are shared between streams, so this stays correct under HSI drift).
-5. Builds `sensorAbsTimesMs` by **piecewise-linear interpolation across GPS (tick → utcMs) anchor pairs** (mirroring `animate_cmd.rs`'s GPS-anchored time-alignment). v1 extrapolated from a single anchor at a fixed 10 ms/tick and accumulated ~7 s of drift over a 21-min session — that's enough to desync the cursor on Pitch/Height panels visibly.
+3. Builds `fullSensorAbsTimesMs` by **piecewise-linear interpolation across the FULL GPS (tick → utcMs) anchor pairs** (mirroring `animate_cmd.rs`'s GPS-anchored time-alignment). v1 extrapolated from a single anchor at a fixed 10 ms/tick and accumulated ~7 s of drift over a 21-min session — that's enough to desync the cursor on Pitch/Height panels visibly. Earlier iOS versions did this on the **already-sliced** gpsRows (often empty when the video falls outside GPS coverage), which produced an all-zero array and broke abs-time slicing entirely. Doing the interpolation pre-slice lets the slice operate on real wall-clock values even when the video's window is past the GPS coverage end.
+4. **Slices sensor + GPS by ABSOLUTE TIME** against `[video.creation_time, +duration]`. Both arrays get sliced independently, so different videos from the same long session pick out different sub-ranges (key for sessions where you record many short videos against one continuous box log).
+5. **Empty-slice fallback** — when the video window falls entirely outside the sensor's covered time (evening video against a morning-only sensor session), show the FULL session instead of nothing. `rideSlicingSummary` includes "video outside sensor coverage" so the user understands why.
+6. **Cursor-sweep fallback** — when (a) there are no usable GPS anchors at all OR (b) we just fell back to the full session in step 5, the abs-time arrays are linearly stretched across the video duration via `linearAbsTimes(...)`. This keeps the red cursor sweeping cleanly 0% → 100% of the panel during playback, instead of parking at the last index because target=`videoCreation+playhead` lies past the last UTC value.
 
-Once both sensor + GPS slices exist, `maybeComputeFusion()` runs the full pipeline on a detached `Task.userInitiated`:
+Once sensor data exists, `maybeComputeFusion()` runs the full pipeline on a detached `Task.userInitiated`:
 
 1. `Fusion.detectDtSeconds` → sample rate
 2. `Fusion.computeQuaternions` (β = 0.1, matches `animate_cmd.rs:78`)
 3. `Fusion.noseAngleSeriesDeg` — 1 s + 60 s rolling-median drift correction. `GpsMath.rollingMedian` dispatches to a sorted-array fast path for windows ≥ 32 / inputs ≥ 64 (the 60 s × 100 Hz = 6000-sample baseline would be unusable on the simple O(n·w·log w) path).
 4. `Baro.heightAboveWaterM` — GPS-anchored water reference, falls back to session-max pressure when no stationary anchors exist
 5. `FusionHeight.fusedHeightM` — α-β complementary baro + body→world-rotated acc
+
+**Sensor-only / GPS-only rendering.** The pipeline runs as long as **sensorRows is non-empty** — `Baro.heightAboveWaterM` already falls back to session-max pressure when GPS is empty, so Pitch + Height panels render from sensor alone. Speed + GPS track panels render from GPS alone (no sensor needed). The Export gate accepts ANY data series — sensor-only produces a 2-panel composite (Pitch + Height), GPS-only produces a 2-panel composite (Speed + GPS track), full sessions produce the 4-panel composite. `CompositeExporter.activePanelKinds(_:)` filters the panel slots and the output height auto-shrinks (`panelHeight × activeCount`) so there are no empty rectangles in the .mov.
+
+**Video → CSV auto-pick.** `pickVideo()` runs `autoPickMatchingCsvs(referenceMs:)` after slicing — scoring every `Sens*.csv` and `Gps*.csv` in `Documents/` by filename token overlap (e.g. video `Ayano_Pump_25.4.2026_Ermioni.MOV` ↔ `Sens_ayano_25.4.2026.csv` share `ayano`, `25`, `4`, `2026`), falling back to mod-date proximity within ±7 days when filenames are generic (`Sens001.csv` vs `IMG_4022.mov` share no tokens). `Self.fileTokens(_:)` lowercases, strips the extension, splits on `_- .,()[]{}/`, drops noise tokens (`sens`, `gps`, `bat`, `iphonegps`, `mov`, `csv`, `mp4`, `m4v`, `img`, `video`, `log`, `data`, `ble`). The picked match is published to `autoPickSummary` ("auto-pick: Sens → SENS002.CSV · GPS → GPS002.CSV") and rendered in `LoadedStatusBar` so the user can immediately see what was wired through. Reference time is `meta.creationTimeMillis ?? fileModMillis(url)` so the picker works even on re-encoded clips that lost their `creation_time` tag.
+
+**LoadedStatusBar (in `ReplayScreen`).** Sits directly under the Pick/Replace video button, ABOVE the long file picker — so the green ✓ on Sensor / GPS / Video is visible at a glance without scrolling. Without it the only feedback after Load was a tinted row in the file list + a row-count line under ExportRow far below, easy to miss.
 
 Video metadata read via `AVAsset.commonMetadata` for `commonKeyCreationDate`, falling back to `loadMetadata(for: .quickTimeMetadata/.iTunesMetadata/...)` for action-cam containers. Displayed dimensions (`displayedSize`) are computed from `naturalSize × preferredTransform` so the SwiftUI `VideoPlayer` can lock the correct aspect ratio — without that, portrait clips collapse to zero height.
 
@@ -291,6 +298,11 @@ After export, a **"Play composite video"** button presents `AVPlayerViewControll
 - READ's first packet may be a 1-byte status error OR file content. Disambiguate: first packet, exactly 1 byte, AND byte ∈ {0xB0, 0xE1, 0xE2, 0xE3} → treat as error. Otherwise treat as content. CSV/log files start with ASCII text (well below 0x80) so the test is unambiguous in practice.
 - LIST may not deliver its terminator `\n` on flaky links. Inactivity fallback: ≥1 row seen and 500 ms with no new bytes → treat as `listDone`. Without this fallback the next op trips the "another op is in flight" guard for 20 s.
 - The ~500 ms settle after START_LOG is kept (write-without-response returns when bytes are queued, not transmitted), but `startSession()` no longer queues a Disconnect — current firmware (v0.0.7+) opens a fixed-duration session and stays connected instead of rebooting. The same 500 ms guard still matters before any *other* follow-up command.
+
+## CSV-schema gotchas
+
+- **Two firmware schemas, accepted side-by-side.** Pre-22.4.2026 firmware writes `Time [10ms]`, `AccX [mg]`, `GyroX [mdps]`, `MagX [mgauss]`, `P [mB]`, `T ['C]`, `UTC`, `Lat`, `Lon`, `Alt [m]`, `Speed [km/h]`, `Course [deg]`, `Fix`, `NumSat`, `HDOP`, `Voltage [mV]`, `SOC [0.1%]`, `Current [100uA]`. Post-22.4.2026 firmware switched to compact names: `ms`, `ax_mg`, `gx_mdps`, `mx_mg`, `p_hPa`, `t_C`, `utc`, `lat`, `lon`, `alt_m`, `speed_kmh`, `course_deg`, `fix_q`, `nsat`, `hdop`, `v_mV`, `soc_x10`, `i_x100uA`. `CsvParsers` accepts BOTH via `HeaderMap.idxAny(...)` taking variadic candidates. The compact `ms` column is in raw milliseconds, so the parser divides by 10 (`tickDiv = 10.0`) to keep `ticks` in the 10ms-unit the interpolator + fusion code expect. Units are otherwise numerically identical (mg ≡ mgauss, mbar ≡ hPa).
+- **Tolerate corrupted rows.** Real SD-card recordings sometimes contain empty fields or jammed values like `-30-123` when the firmware is interrupted mid-write. The earlier parser bailed on the first bad row (throwing "not a float"); this would discard an entire otherwise-good session of ~6000 rows because ~30 were corrupt. Per-row parse errors now `continue` silently instead of throwing. The file loads with the bad rows dropped.
 
 ## Numerics gotchas
 

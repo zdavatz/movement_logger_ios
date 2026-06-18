@@ -30,6 +30,11 @@ struct ReplayScreen: View {
                     }
                     .buttonStyle(.borderedProminent)
 
+                    // Compact at-a-glance status — placed ABOVE the (long)
+                    // file picker so the green ✓ on Sensor / GPS / Video is
+                    // visible without scrolling past the file list.
+                    LoadedStatusBar(vm: vm)
+
                     Divider()
 
                     RecordingPicker(vm: vm) { url in
@@ -153,18 +158,32 @@ private struct RecordingPicker: View {
     /// Invoked when the user taps Load on a video file under Documents.
     /// The parent owns the AVPlayer so it knows how to swap clips.
     let onVideoPick: (URL) -> Void
+    /// Cached file list so a Refresh tap (or `.onAppear` when the user
+    /// switches back from Sync) can repopulate without re-launching the
+    /// app. Sorted newest-first by mod date via `listLocalRecordings()`.
+    @State private var recordings: [URL] = []
 
     var body: some View {
-        let recordings = vm.listLocalRecordings()
         let sensorCandidates = recordings.filter { isSensCsv($0.lastPathComponent) }
         let gpsCandidates = recordings.filter { isGpsCsv($0.lastPathComponent) }
         let videoCandidates = recordings.filter { isVideoFile($0.lastPathComponent) }
 
-        if recordings.isEmpty {
-            Text("No CSVs in this app's storage yet. Use the Sync tab to download some first.")
-                .foregroundStyle(.secondary)
-        } else {
-            VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Downloaded files (newest first)")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    recordings = vm.listLocalRecordings()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+            }
+            if recordings.isEmpty {
+                Text("No CSVs in this app's storage yet. Use the Sync tab to download some first.")
+                    .foregroundStyle(.secondary)
+            } else {
                 if !videoCandidates.isEmpty {
                     Text("Video (in Files)").font(.subheadline.weight(.semibold))
                     FileChooserList(files: videoCandidates, selected: vm.videoUrl) { url in
@@ -180,6 +199,9 @@ private struct RecordingPicker: View {
                     Task { await vm.pickGpsCsv(url) }
                 }
             }
+        }
+        .onAppear {
+            recordings = vm.listLocalRecordings()
         }
     }
 }
@@ -202,7 +224,7 @@ private struct FileChooserList: View {
                         VStack(alignment: .leading) {
                             Text(f.lastPathComponent)
                                 .fontWeight(isSelected ? .bold : .regular)
-                            Text(humanBytesShort(fileSize(f)))
+                            Text("\(humanBytesShort(fileSize(f))) · \(formatModDate(f))")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
@@ -219,6 +241,79 @@ private struct FileChooserList: View {
                     )
                 }
             }
+        }
+    }
+}
+
+// MARK: - Loaded status bar
+
+/// Compact, always-visible "what's loaded right now" line just below the
+/// file picker. Tells the user immediately whether their last Load tap
+/// actually wired data through, without scrolling past the file list to
+/// hunt for the Alignment block.
+private struct LoadedStatusBar: View {
+    @Bindable var vm: ReplayViewModel
+
+    var body: some View {
+        let sensorOK = !vm.sensorRows.isEmpty
+        let gpsOK = !vm.gpsRows.isEmpty
+        let videoOK = vm.videoUrl != nil
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 12) {
+                StatusChip(label: "Sensor",
+                           on: sensorOK,
+                           detail: vm.sensorFile?.lastPathComponent ?? "—")
+                StatusChip(label: "GPS",
+                           on: gpsOK,
+                           detail: vm.gpsFile?.lastPathComponent ?? "—")
+                StatusChip(label: "Video",
+                           on: videoOK,
+                           detail: vm.videoUrl?.lastPathComponent ?? "—")
+            }
+            if videoOK && (sensorOK || gpsOK) && !sensorOK && !gpsOK {
+                EmptyView()
+            }
+            if videoOK && sensorOK && vm.sensorRows.isEmpty == false && vm.gpsRows.count == 0 {
+                Text("Video date may not overlap GPS data — try 'Clear video'.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if let s = vm.autoPickSummary {
+                Text(s)
+                    .font(.caption2)
+                    .foregroundStyle(.tint)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            if !sensorOK && !gpsOK {
+                Text("Pick a Sens*.csv and a Gps*.csv to render panels.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(.systemGray6), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct StatusChip: View {
+    let label: String
+    let on: Bool
+    let detail: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(on ? Color.green : Color.secondary)
+                Text(label).font(.caption.weight(.semibold))
+            }
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
     }
 }
@@ -551,8 +646,11 @@ private struct ExportRow: View {
                     vm.exporting
                     || vm.videoUrl == nil
                     || vm.videoMeta?.creationTimeMillis == nil
-                    || vm.pitchDeg.isEmpty
-                    || vm.fusedHeightM.isEmpty
+                    // Need at least ONE data series — sensor-only (pitch +
+                    // height) or GPS-only (speed + track) both produce a
+                    // useful composite.
+                    || ((vm.pitchDeg.isEmpty || vm.fusedHeightM.isEmpty)
+                        && (vm.speedSmoothedKmh.isEmpty || vm.gpsRows.count <= 1))
                 )
                 if vm.exporting {
                     ProgressView(value: vm.exportProgress)
@@ -711,7 +809,10 @@ private func isSensCsv(_ name: String) -> Bool {
 private func isGpsCsv(_ name: String) -> Bool {
     let n = name.lowercased()
     if n.hasPrefix("._") { return false }
-    return n.hasPrefix("gps") && n.hasSuffix(".csv")
+    // Box-side names start with `Gps`; the iPhone-GPS tab writes
+    // `iPhoneGps_<ts>.csv`. Both share the same column schema (see
+    // `GpsCore.startLogging`) so either can drive Replay.
+    return (n.hasPrefix("gps") || n.hasPrefix("iphonegps")) && n.hasSuffix(".csv")
 }
 
 private func isVideoFile(_ name: String) -> Bool {
@@ -731,4 +832,19 @@ private func humanBytesShort(_ b: Int64) -> String {
     if b < 1024 { return "\(b) B" }
     if b < 1024 * 1024 { return String(format: "%.1f KB", Double(b) / 1024.0) }
     return String(format: "%.2f MB", Double(b) / (1024.0 * 1024.0))
+}
+
+private let _modDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    // Mirrors the user's requested layout `HH.mm.ss-dd.MM.yyyy` — time
+    // (dot-separated) then a hyphen then European date.
+    f.dateFormat = "HH.mm.ss-dd.MM.yyyy"
+    f.locale = Locale(identifier: "en_US_POSIX")
+    return f
+}()
+
+private func formatModDate(_ url: URL) -> String {
+    let d = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+        .contentModificationDate) ?? Date.distantPast
+    return _modDateFormatter.string(from: d)
 }

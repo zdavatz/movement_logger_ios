@@ -48,7 +48,22 @@ struct CompositeExportInputs {
 enum CompositeExporter {
 
     private static let panelHeight: CGFloat = 320
-    private static let panelCount: Int = 4
+    /// Panel slots, indexed by their logical role (matches the in-app
+    /// Replay screen ordering). Each kind tracks the data series it needs;
+    /// `activePanelKinds` filters to only those whose data is present so a
+    /// sensor-only or GPS-only export still produces a useful composite.
+    private enum PanelKind: Int {
+        case speed = 0, pitch = 1, height = 2, gpsTrack = 3
+    }
+
+    private static func activePanelKinds(_ inputs: CompositeExportInputs) -> [PanelKind] {
+        var out: [PanelKind] = []
+        if !inputs.speedSmoothedKmh.isEmpty { out.append(.speed) }
+        if !inputs.pitchDeg.isEmpty { out.append(.pitch) }
+        if !inputs.fusedHeightM.isEmpty { out.append(.height) }
+        if inputs.gpsRows.count >= 2 { out.append(.gpsTrack) }
+        return out
+    }
 
     static func export(
         _ inputs: CompositeExportInputs,
@@ -71,7 +86,9 @@ enum CompositeExporter {
         let videoH = abs(displayed.height).rounded()
 
         let outputW = videoW
-        let panelStackH = panelHeight * CGFloat(panelCount)
+        let activeKinds = activePanelKinds(inputs)
+        let activeCount = activeKinds.count
+        let panelStackH = panelHeight * CGFloat(activeCount)
         let outputH = videoH + panelStackH
         let outputSize = CGSize(width: outputW, height: outputH)
         let panelSize = CGSize(width: outputW, height: panelHeight)
@@ -104,9 +121,9 @@ enum CompositeExporter {
             translationX: -rotated.origin.x, y: -rotated.origin.y
         ))
 
-        // ----- Pre-render static panel content (4 CGImages, scale=1)
-        let panelImages: [CGImage] = (0..<panelCount).compactMap { i in
-            renderPanelImage(index: i, size: panelSize, inputs: inputs)
+        // ----- Pre-render static panel content (one CGImage per active kind, scale=1)
+        let panelImages: [CGImage] = activeKinds.compactMap { kind in
+            renderPanelImage(index: kind.rawValue, size: panelSize, inputs: inputs)
         }
 
         // ----- CALayer hierarchy. AVF uses Y-UP Quartz convention here.
@@ -122,20 +139,21 @@ enum CompositeExporter {
         // (i.e. the lower-Y region) so they appear at the bottom of the
         // displayed (Y-down) screen, just below the video.
         let durationS = CMTimeGetSeconds(duration)
-        for i in 0..<panelImages.count {
+        for (slot, kind) in activeKinds.enumerated() {
             let panel = CALayer()
-            // In Y-up Quartz: panel 0 (top of panel stack) is at the HIGH-Y
-            // side of the panel area, i.e. just below the video.
-            let yQuartz = CGFloat(panelCount - 1 - i) * panelHeight
+            // In Y-up Quartz: slot 0 (top of panel stack) sits at the HIGH-Y
+            // side of the panel area — directly below the video.
+            let yQuartz = CGFloat(activeCount - 1 - slot) * panelHeight
             panel.frame = CGRect(origin: CGPoint(x: 0, y: yQuartz), size: panelSize)
             // The panel images are rendered top-down (UIKit). Without flipping
             // they'd appear upside-down in Y-up Quartz, so set isGeometryFlipped.
             panel.isGeometryFlipped = true
-            panel.contents = panelImages[i]
+            panel.contents = panelImages[slot]
             panel.contentsGravity = .resize
 
-            // Cursor: vertical red line (panels 0..2) or moving dot (panel 3).
-            if i < 3 {
+            // Cursor: vertical red line (line-graph panels) or moving dot
+            // (gps-track panel).
+            if kind != .gpsTrack {
                 let cursor = CAShapeLayer()
                 cursor.frame = CGRect(origin: .zero, size: panelSize)
                 cursor.lineWidth = 4
@@ -146,7 +164,7 @@ enum CompositeExporter {
                 cursor.path = path
 
                 let (values, keyTimes) = sweepCursorValues(
-                    panelIndex: i, durationS: durationS,
+                    panelIndex: kind.rawValue, durationS: durationS,
                     panelWidth: outputW, inputs: inputs
                 )
                 let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
@@ -188,7 +206,7 @@ enum CompositeExporter {
             // output frame so the numbers track the cursor as the video plays.
             // Matches the Android Replay screen's top-left label stack.
             if let live = makeLiveValueLayer(
-                panelIndex: i, panelSize: panelSize,
+                panelIndex: kind.rawValue, panelSize: panelSize,
                 durationS: durationS, inputs: inputs
             ) {
                 panel.addSublayer(live)

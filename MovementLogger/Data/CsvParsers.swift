@@ -80,18 +80,33 @@ enum CsvParsers {
             throw CsvParseError(message: "sensor csv: empty file")
         }
         let cols = try HeaderMap(headerLine: header)
-        let iT  = try cols.idxAny("Time [10ms]", "Time [mS]")
-        let iAx = try cols.idxAny("AccX [mg]")
-        let iAy = try cols.idxAny("AccY [mg]")
-        let iAz = try cols.idxAny("AccZ [mg]")
-        let iGx = try cols.idxAny("GyroX [mdps]")
-        let iGy = try cols.idxAny("GyroY [mdps]")
-        let iGz = try cols.idxAny("GyroZ [mdps]")
-        let iMx = try cols.idxAny("MagX [mgauss]")
-        let iMy = try cols.idxAny("MagY [mgauss]")
-        let iMz = try cols.idxAny("MagZ [mgauss]")
-        let iP  = try cols.idxAny("P [mB]")
-        let iTc = try cols.idxAny("T ['C]")
+        // Post-22.4.2026 firmware switched to compact column names
+        // (`ms`, `ax_mg`, …); pre-22.4 used the spaced `Time [10ms]` /
+        // `AccX [mg]` form. We accept BOTH. The `ms` column is in raw
+        // milliseconds so divide by 10 to keep `ticks` in 10ms units
+        // (the unit the interpolator and fusion code expect).
+        let iT: Int
+        let tickDiv: Double
+        if let i = cols.idxOrNil("ms") {
+            iT = i; tickDiv = 10.0
+        } else {
+            iT = try cols.idxAny("Time [10ms]", "Time [mS]"); tickDiv = 1.0
+        }
+        let iAx = try cols.idxAny("AccX [mg]", "ax_mg")
+        let iAy = try cols.idxAny("AccY [mg]", "ay_mg")
+        let iAz = try cols.idxAny("AccZ [mg]", "az_mg")
+        let iGx = try cols.idxAny("GyroX [mdps]", "gx_mdps")
+        let iGy = try cols.idxAny("GyroY [mdps]", "gy_mdps")
+        let iGz = try cols.idxAny("GyroZ [mdps]", "gz_mdps")
+        // New firmware emits magnetometer in milligauss under `mx_mg`
+        // (still same physical units as `MagX [mgauss]` — 1 mg ≡ 1 mgauss).
+        let iMx = try cols.idxAny("MagX [mgauss]", "mx_mg")
+        let iMy = try cols.idxAny("MagY [mgauss]", "my_mg")
+        let iMz = try cols.idxAny("MagZ [mgauss]", "mz_mg")
+        // Pressure: old `P [mB]` (millibar) and new `p_hPa` (hectopascal)
+        // are numerically identical (1 mbar = 1 hPa).
+        let iP  = try cols.idxAny("P [mB]", "p_hPa")
+        let iTc = try cols.idxAny("T ['C]", "t_C")
 
         var out: [SensorRow] = []
         out.reserveCapacity(8192)
@@ -100,9 +115,14 @@ enum CsvParsers {
             lineNo += 1
             if line.isEmpty || line.allSatisfy({ $0.isWhitespace }) { continue }
             let r = splitTrim(line)
+            // Tolerate occasional corrupted rows — real SD-card recordings
+            // sometimes contain empty fields or jammed values like "-30-123"
+            // when the firmware is interrupted mid-write. Bailing on the
+            // first bad row would discard the entire (otherwise good)
+            // session. Skip the row and keep going.
             do {
                 out.append(SensorRow(
-                    ticks: try parseDouble(r, iT),
+                    ticks: try parseDouble(r, iT) / tickDiv,
                     accX:  try parseDouble(r, iAx),
                     accY:  try parseDouble(r, iAy),
                     accZ:  try parseDouble(r, iAz),
@@ -116,7 +136,7 @@ enum CsvParsers {
                     temperatureC: try parseDouble(r, iTc),
                 ))
             } catch {
-                throw CsvParseError(message: "sensor csv row \(lineNo): \(error.localizedDescription)")
+                continue
             }
         }
         return out
@@ -130,16 +150,24 @@ enum CsvParsers {
             throw CsvParseError(message: "gps csv: empty file")
         }
         let cols = try HeaderMap(headerLine: header)
-        let iT   = try cols.idxAny("Time [10ms]", "Time [mS]")
-        let iUtc = try cols.idxAny("UTC")
-        let iLat = try cols.idxAny("Lat")
-        let iLon = try cols.idxAny("Lon")
-        let iAlt = try cols.idxAny("Alt [m]")
-        let iSpd = try cols.idxAny("Speed [km/h]")
-        let iCrs = try cols.idxAny("Course [deg]")
-        let iFix = try cols.idxAny("Fix")
-        let iSat = try cols.idxAny("NumSat")
-        let iHdp = try cols.idxAny("HDOP")
+        // Post-22.4.2026 firmware switched to compact column names. `ms` is
+        // raw milliseconds, so divide by 10 to stay in 10ms ticks.
+        let iT: Int
+        let tickDiv: Double
+        if let i = cols.idxOrNil("ms") {
+            iT = i; tickDiv = 10.0
+        } else {
+            iT = try cols.idxAny("Time [10ms]", "Time [mS]"); tickDiv = 1.0
+        }
+        let iUtc = try cols.idxAny("UTC", "utc")
+        let iLat = try cols.idxAny("Lat", "lat")
+        let iLon = try cols.idxAny("Lon", "lon")
+        let iAlt = try cols.idxAny("Alt [m]", "alt_m")
+        let iSpd = try cols.idxAny("Speed [km/h]", "speed_kmh")
+        let iCrs = try cols.idxAny("Course [deg]", "course_deg")
+        let iFix = try cols.idxAny("Fix", "fix_q")
+        let iSat = try cols.idxAny("NumSat", "nsat")
+        let iHdp = try cols.idxAny("HDOP", "hdop")
 
         var out: [GpsRow] = []
         out.reserveCapacity(2048)
@@ -148,9 +176,10 @@ enum CsvParsers {
             lineNo += 1
             if line.isEmpty || line.allSatisfy({ $0.isWhitespace }) { continue }
             let r = splitTrim(line)
+            // Skip corrupted rows — see parseSensorText comment.
             do {
                 out.append(GpsRow(
-                    ticks: try parseDouble(r, iT),
+                    ticks: try parseDouble(r, iT) / tickDiv,
                     utc: try fieldAt(r, iUtc),
                     lat: try parseDouble(r, iLat),
                     lon: try parseDouble(r, iLon),
@@ -162,7 +191,7 @@ enum CsvParsers {
                     hdop: try parseDouble(r, iHdp),
                 ))
             } catch {
-                throw CsvParseError(message: "gps csv row \(lineNo): \(error.localizedDescription)")
+                continue
             }
         }
         return out
@@ -176,10 +205,16 @@ enum CsvParsers {
             throw CsvParseError(message: "battery csv: empty file")
         }
         let cols = try HeaderMap(headerLine: header)
-        let iT   = try cols.idxAny("Time [10ms]", "Time [mS]")
-        let iV   = try cols.idxAny("Voltage [mV]")
-        let iSoc = try cols.idxAny("SOC [0.1%]")
-        let iCur = try cols.idxAny("Current [100uA]")
+        let iT: Int
+        let tickDiv: Double
+        if let i = cols.idxOrNil("ms") {
+            iT = i; tickDiv = 10.0
+        } else {
+            iT = try cols.idxAny("Time [10ms]", "Time [mS]"); tickDiv = 1.0
+        }
+        let iV   = try cols.idxAny("Voltage [mV]", "v_mV")
+        let iSoc = try cols.idxAny("SOC [0.1%]", "soc_x10")
+        let iCur = try cols.idxAny("Current [100uA]", "i_x100uA")
 
         var out: [BatteryRow] = []
         out.reserveCapacity(2048)
@@ -190,13 +225,13 @@ enum CsvParsers {
             let r = splitTrim(line)
             do {
                 out.append(BatteryRow(
-                    ticks: try parseDouble(r, iT),
+                    ticks: try parseDouble(r, iT) / tickDiv,
                     voltageMv: try parseInt(r, iV),
                     socTenthPct: try parseInt(r, iSoc),
                     currentHundredUa: try parseInt(r, iCur),
                 ))
             } catch {
-                throw CsvParseError(message: "battery csv row \(lineNo): \(error.localizedDescription)")
+                continue
             }
         }
         return out
@@ -222,6 +257,16 @@ private struct HeaderMap {
         throw CsvParseError(
             message: "missing column, expected one of \(names); got \(Array(map.keys))"
         )
+    }
+
+    /// Non-throwing peek for optional columns. Used by `parseSensorText`
+    /// etc. to detect the post-22.4.2026 firmware's `ms` time column and
+    /// switch unit conversion accordingly.
+    func idxOrNil(_ names: String...) -> Int? {
+        for n in names {
+            if let v = map[n] { return v }
+        }
+        return nil
     }
 }
 
