@@ -473,26 +473,34 @@ final class FileSyncViewModel {
             // reflects reality. Legacy PumpTsueri ignores 0x07 (no
             // reply) — the toggle just stays at its last/unknown state.
             ble.send(.getLogMode)
-            // Resume after an interrupted transfer (desktop v0.0.9): the
-            // aborted partial is already in the mirror, so a fresh sync
-            // pass skips every complete file and re-pulls only the
-            // unfinished one from its mirror offset. Also resume if
-            // "Keep synced" is on. A plain first connect does neither.
+            // Stamp the box's open Sens/Gps CSVs with the phone's wall clock
+            // (SET_TIME 0x08) on EVERY connect — "first time and every time
+            // the box connects". The box has no RTC; it pairs this epoch with
+            // its free-running ms counter (the CSV `ms` column) and writes a
+            // `# SYNC` anchor, so Replay can time-align without a GPS fix.
             //
-            // Defer the kick by 500 ms so the in-flight getLogMode
-            // `modeReq` finishes first — otherwise the LIST inside
-            // startSyncPass collides with it and gets rejected as
-            // "another op is in flight".
-            if transferInterrupted || keepSynced {
-                let why = transferInterrupted ? "Resume" : "Keep synced"
-                transferInterrupted = false
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .milliseconds(500))
-                    guard let self = self,
-                          self.connection == .connected,
-                          !self.syncing else { return }
-                    self.startSyncPass(reason: why)
-                }
+            // All of getLogMode → SET_TIME → startSyncPass are serialised with
+            // 500 ms gaps because the firmware holds only ONE pending command
+            // at a time (a second write clobbers the first) and the BLE worker
+            // is single-op. The epoch is sampled right before the send so it
+            // matches the box-tick the firmware stamps (skew = one BLE
+            // interval, ~tens of ms — not the ~500 ms it would be if sampled
+            // at connect time).
+            let resumeReason: String? = (transferInterrupted || keepSynced)
+                ? (transferInterrupted ? "Resume" : "Keep synced") : nil
+            transferInterrupted = false
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self = self, self.connection == .connected else { return }
+                self.ble.send(.setTime(epochMs: Int64(Date().timeIntervalSince1970 * 1000)))
+                // Resume after an interrupted transfer (desktop v0.0.9) or a
+                // "Keep synced" reconnect: a fresh sync pass skips complete
+                // files and re-pulls only the unfinished tail. Another 500 ms
+                // so the LIST doesn't clobber the SET_TIME write.
+                guard let why = resumeReason else { return }
+                try? await Task.sleep(for: .milliseconds(500))
+                guard self.connection == .connected, !self.syncing else { return }
+                self.startSyncPass(reason: why)
             }
         case .disconnected:
             connection = .disconnected

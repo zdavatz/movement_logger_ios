@@ -336,6 +336,12 @@ private struct AlignmentSummary: View {
                 .font(.system(size: 12, design: .monospaced))
             Text("gps rows:        \(vm.gpsRows.count == 0 ? "—" : String(vm.gpsRows.count))")
                 .font(.system(size: 12, design: .monospaced))
+            if let src = vm.alignmentSource {
+                let exact = src.hasPrefix("Phone-clock sync — exact")
+                Label(src, systemImage: exact ? "checkmark.seal.fill" : "info.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(exact ? Color.green : .secondary)
+            }
             if let s = vm.rideSlicingSummary {
                 Text(s)
                     .font(.system(size: 11, design: .monospaced))

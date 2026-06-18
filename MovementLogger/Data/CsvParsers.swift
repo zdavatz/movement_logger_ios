@@ -50,6 +50,21 @@ struct BatteryRow {
     let currentHundredUa: Int
 }
 
+/// A host-clock time-sync anchor the firmware stamps into Sens/Gps CSVs on
+/// each BLE connect (`SET_TIME` 0x08): a `# SYNC epoch_ms=… tick_ms=…`
+/// comment line pairing the phone's absolute wall-clock millis with the
+/// box's free-running ms counter. Because the box has no RTC, these anchors
+/// are the *only* drift-free, GPS-independent way to map a logged row's tick
+/// to absolute time — and they share the phone's clock domain with the
+/// replay video's `creation_time`, eliminating cross-clock skew.
+struct SyncAnchor: Equatable {
+    /// Box tick in the SAME unit as `SensorRow.ticks` / `GpsRow.ticks`
+    /// (10 ms units), so it slots straight into the abs-time interpolation.
+    let ticks: Double
+    /// Phone wall-clock epoch milliseconds the host pushed at this tick.
+    let epochMs: Int64
+}
+
 struct CsvParseError: Error, LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -70,6 +85,56 @@ enum CsvParsers {
     static func parseBatteryFile(_ url: URL) throws -> [BatteryRow] {
         let text = try String(contentsOf: url, encoding: .utf8)
         return try parseBatteryText(text)
+    }
+
+    static func parseSyncAnchorsFile(_ url: URL) -> [SyncAnchor] {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        return parseSyncAnchors(text)
+    }
+
+    /// Pull every `# SYNC epoch_ms=<u64> tick_ms=<u32>` marker out of a Sens
+    /// or Gps CSV (written by the firmware's SET_TIME handler). `tick_ms` is
+    /// the box's raw `HAL_GetTick()` ms — the same clock as the `ms`/`Time`
+    /// column — so we divide by the file's tick divisor to land in the
+    /// row-tick (10 ms) unit. The data-row parsers already skip these comment
+    /// lines (they fail the float parse and `continue`), so this is a cheap
+    /// separate pass that never disturbs row parsing. Returns [] for files
+    /// from firmware that predates the marker (legacy / never-connected).
+    static func parseSyncAnchors(_ text: String) -> [SyncAnchor] {
+        var tickDiv = 10.0          // compact `ms` schema → raw ms; ÷10 → 10ms ticks
+        var sawHeader = false
+        var out: [SyncAnchor] = []
+        for rawLine in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" }) {
+            let line = String(rawLine).trimmingCharacters(in: CharacterSet(charactersIn: "\r \t"))
+            if line.isEmpty { continue }
+            if !sawHeader {
+                sawHeader = true
+                // Legacy spaced header ("Time [10ms]", …) is already in 10ms
+                // units; the compact header ("ms,…") stores raw ms.
+                if line.lowercased().contains("time [") { tickDiv = 1.0 }
+                continue
+            }
+            guard line.hasPrefix("#"), line.contains("SYNC") else { continue }
+            var epochMs: Int64?
+            var tickMs: Double?
+            for tok in line.split(whereSeparator: { $0 == " " || $0 == "\t" }) {
+                if tok.hasPrefix("epoch_ms=") {
+                    epochMs = Int64(tok.dropFirst("epoch_ms=".count))
+                } else if tok.hasPrefix("tick_ms=") {
+                    tickMs = Double(tok.dropFirst("tick_ms=".count))
+                }
+            }
+            if let e = epochMs, let t = tickMs, e > 0 {
+                out.append(SyncAnchor(ticks: t / tickDiv, epochMs: e))
+            }
+        }
+        // Sort + dedupe by tick so the abs-time interpolation gets a clean,
+        // monotone anchor curve even if connects produced out-of-order or
+        // duplicate markers.
+        out.sort { $0.ticks < $1.ticks }
+        var deduped: [SyncAnchor] = []
+        for a in out where deduped.last?.ticks != a.ticks { deduped.append(a) }
+        return deduped
     }
 
     static func parseSensorText(_ text: String) throws -> [SensorRow] {

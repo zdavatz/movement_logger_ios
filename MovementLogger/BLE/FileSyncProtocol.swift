@@ -28,6 +28,13 @@ enum FileSyncProtocol {
     static let opSetMode: UInt8 = 0x06
     /// GET_MODE: box replies one byte 0 = auto, 1 = manual.
     static let opGetMode: UInt8 = 0x07
+    /// SET_TIME `<epoch_ms:u64-LE>`: push the phone's wall-clock millis so the
+    /// box (which has no RTC) stamps a `# SYNC epoch_ms=… tick_ms=…` anchor
+    /// into the open Sens/Gps CSVs, pairing the phone epoch with its
+    /// free-running ms counter. Sent on every connect; lets replay resolve
+    /// absolute wall-clock without a GPS fix. Box replies one status byte we
+    /// don't track (legacy firmware without 0x08 just ignores the write).
+    static let opSetTime: UInt8 = 0x08
 
     // Status bytes returned in single-byte FileData notifies.
     static let statusOK: UInt8 = 0x00
@@ -70,6 +77,10 @@ enum BleCmd {
     case setLogMode(manual: Bool)
     /// Query the box's current log-mode; reply arrives as `.logMode`.
     case getLogMode
+    /// Push the phone's current wall-clock millis to the box so it stamps a
+    /// time-sync anchor into the open Sens/Gps CSVs. Fire-and-forget — no
+    /// tracked reply (so legacy firmware that ignores 0x08 never stalls us).
+    case setTime(epochMs: Int64)
 }
 
 enum BleEvent {

@@ -49,6 +49,12 @@ final class ReplayViewModel {
     /// most recent video pick. Surfaced in `LoadedStatusBar` so the user
     /// can immediately see what (if anything) was auto-loaded.
     var autoPickSummary: String? = nil
+    /// How the panels are time-aligned to the video, so the user knows
+    /// whether the cursor is exact or a best-effort sweep:
+    /// "Phone-clock sync — exact" (firmware `# SYNC` markers, the new path),
+    /// "GPS-derived time", or "Approximate — …" (cursor sweep, no real
+    /// wall-clock). Surfaced in the Alignment block.
+    var alignmentSource: String? = nil
 
     // ----- Internal full-data backing (NOT observed) --------------------------
 
@@ -56,6 +62,12 @@ final class ReplayViewModel {
     @ObservationIgnored private var fullGpsRows: [GpsRow] = []
     @ObservationIgnored private var fullSmoothedSpeed: [Double] = []
     @ObservationIgnored private var fullGpsAbsTimesMs: [Int64] = []
+    /// Host-clock time-sync anchors (`# SYNC` markers) extracted from the
+    /// loaded sensor / GPS CSVs. When present, they drive a drift-free,
+    /// GPS-independent tick→wall-clock mapping that shares the video's clock
+    /// domain — see `applyVideoAndSlice` / `absTimesFromSyncAnchors`.
+    @ObservationIgnored private var sensorSyncAnchors: [SyncAnchor] = []
+    @ObservationIgnored private var gpsSyncAnchors: [SyncAnchor] = []
 
     // -------------------------------------------------------------------------
 
@@ -146,8 +158,43 @@ final class ReplayViewModel {
             return dateMatches.min(by: { $0.dateDiff < $1.dateDiff })?.url
         }
 
-        let sensorMatch = bestMatch(Self.isSensCsv)
-        let gpsMatch = bestMatch(Self.isGpsCsv)
+        // ---- Tier 1 (most reliable): true wall-clock coverage. A file whose
+        // firmware `# SYNC` markers prove the recording spans the video's
+        // timestamp IS the session the video belongs to — no filename
+        // guessing. `wallClockCoverage` maps the file's first/last row tick
+        // to absolute epoch via its anchors.
+        let coverageTolMs: Int64 = 5 * 60 * 1000   // 5 min slack at the edges
+        func coverageMatch(_ predicate: (String) -> Bool) -> URL? {
+            let scored = recordings
+                .filter { predicate($0.lastPathComponent) }
+                .compactMap { url -> (url: URL, dist: Int64)? in
+                    guard let cov = Self.wallClockCoverage(url) else { return nil }
+                    guard referenceMs >= cov.start - coverageTolMs,
+                          referenceMs <= cov.end + coverageTolMs else { return nil }
+                    return (url, abs(referenceMs - (cov.start + cov.end) / 2))
+                }
+            return scored.min(by: { $0.dist < $1.dist })?.url
+        }
+
+        var sensorMatch = coverageMatch(Self.isSensCsv)
+        var gpsMatch = coverageMatch(Self.isGpsCsv)
+        let coverageHit = sensorMatch != nil || gpsMatch != nil
+
+        // ---- Tier 2: numeric-suffix companion. On a real SD card the Sens
+        // and Gps file of one session share their NNN (SENS002 ↔ GPS002 —
+        // the desktop's canonical pairing rule). If one side matched by
+        // coverage, pull its companion across even if the other side's own
+        // coverage was inconclusive.
+        if let s = sensorMatch, gpsMatch == nil {
+            gpsMatch = companionBySessionNumber(of: s, recordings: recordings, predicate: Self.isGpsCsv)
+        }
+        if let g = gpsMatch, sensorMatch == nil {
+            sensorMatch = companionBySessionNumber(of: g, recordings: recordings, predicate: Self.isSensCsv)
+        }
+
+        // ---- Tier 3 (fallback): filename token overlap, then ±7-day mod date.
+        if sensorMatch == nil { sensorMatch = bestMatch(Self.isSensCsv) }
+        if gpsMatch == nil { gpsMatch = bestMatch(Self.isGpsCsv) }
 
         var summaryBits: [String] = []
         if let s = sensorMatch, s != sensorFile {
@@ -162,7 +209,9 @@ final class ReplayViewModel {
         } else if gpsMatch == nil {
             summaryBits.append("GPS: no match")
         }
-        autoPickSummary = summaryBits.isEmpty ? nil : "auto-pick: " + summaryBits.joined(separator: " · ")
+        let how = coverageHit ? " (by recorded time)" : ""
+        autoPickSummary = summaryBits.isEmpty ? nil
+            : "auto-pick\(how): " + summaryBits.joined(separator: " · ")
         // If neither auto-picked, fusion still needs to run for the
         // re-sliced data (existing sensor/GPS against the new ride window).
         if sensorMatch == nil && gpsMatch == nil {
@@ -200,15 +249,77 @@ final class ReplayViewModel {
         return Set(parts.filter { $0.count >= 2 && !skip.contains($0) })
     }
 
+    /// The session number shared by a Sens/Gps pair on the SD card
+    /// (`SENS002.CSV` / `GPS002.CSV` → `"002"`). nil for iPhone-GPS or
+    /// otherwise un-numbered names.
+    private static func sessionNumber(_ name: String) -> String? {
+        let stem = ((name.lowercased()) as NSString).deletingPathExtension
+        for p in ["sens", "gps", "bat"] where stem.hasPrefix(p) {
+            let digits = stem.dropFirst(p.count).prefix(while: { $0.isNumber })
+            if !digits.isEmpty { return String(digits) }
+        }
+        return nil
+    }
+
+    /// Find the `predicate`-matching recording that shares `url`'s session
+    /// number — the companion of a matched file (SENS002 → GPS002).
+    private func companionBySessionNumber(
+        of url: URL, recordings: [URL], predicate: (String) -> Bool
+    ) -> URL? {
+        guard let num = Self.sessionNumber(url.lastPathComponent) else { return nil }
+        return recordings.first {
+            predicate($0.lastPathComponent) && Self.sessionNumber($0.lastPathComponent) == num
+        }
+    }
+
+    /// Absolute wall-clock span of a recording, derived from its firmware
+    /// `# SYNC` markers: map the first and last data-row tick to epoch ms
+    /// through the file's anchors. nil when the file carries no markers
+    /// (legacy / never-connected) — auto-pick then falls back to filename
+    /// heuristics. Reads the file once; cheap enough for a one-shot pick.
+    private static func wallClockCoverage(_ url: URL) -> (start: Int64, end: Int64)? {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let anchors = CsvParsers.parseSyncAnchors(text)
+        guard !anchors.isEmpty else { return nil }
+
+        var tickDiv = 10.0
+        var sawHeader = false
+        var firstTick: Double?
+        var lastTick: Double?
+        for rawLine in text.split(omittingEmptySubsequences: false, whereSeparator: { $0 == "\n" }) {
+            let line = String(rawLine).trimmingCharacters(in: CharacterSet(charactersIn: "\r \t"))
+            if line.isEmpty { continue }
+            if !sawHeader {
+                sawHeader = true
+                if line.lowercased().contains("time [") { tickDiv = 1.0 }
+                continue
+            }
+            if line.hasPrefix("#") { continue }
+            guard let firstField = line.split(separator: ",", maxSplits: 1).first,
+                  let ms = Double(firstField.trimmingCharacters(in: .whitespaces)) else { continue }
+            let t = ms / tickDiv
+            if firstTick == nil { firstTick = t }
+            lastTick = t
+        }
+        guard let ft = firstTick, let lt = lastTick else { return nil }
+        let ep = absTimesFromSyncAnchors(ticks: [ft, lt], anchors: anchors)
+        guard ep.count == 2 else { return nil }
+        return (min(ep[0], ep[1]), max(ep[0], ep[1]))
+    }
+
     @MainActor
     func pickSensorCsv(_ url: URL) async {
         loading = true; error = nil
         do {
-            let rows = try await Task.detached(priority: .userInitiated) {
-                try CsvParsers.parseSensorFile(url)
+            let parsed = try await Task.detached(priority: .userInitiated) {
+                () -> (rows: [SensorRow], anchors: [SyncAnchor]) in
+                let text = try String(contentsOf: url, encoding: .utf8)
+                return (try CsvParsers.parseSensorText(text),
+                        CsvParsers.parseSyncAnchors(text))
             }.value
             sensorFile = url
-            fullSensorRows = rows
+            fullSensorRows = parsed.rows
+            sensorSyncAnchors = parsed.anchors
             applyVideoAndSlice()
             loading = false
             await maybeComputeFusion()
@@ -223,17 +334,19 @@ final class ReplayViewModel {
         loading = true; error = nil
         do {
             let result = try await Task.detached(priority: .userInitiated) {
-                () -> (rows: [GpsRow], smooth: [Double]) in
-                let rows = try CsvParsers.parseGpsFile(url)
+                () -> (rows: [GpsRow], smooth: [Double], anchors: [SyncAnchor]) in
+                let text = try String(contentsOf: url, encoding: .utf8)
+                let rows = try CsvParsers.parseGpsText(text)
                 let raw = GpsMath.positionDerivedSpeedKmh(rows)
                 let cleaned = GpsMath.rejectAccOutliers(rows, rawKmh: raw)
                 let smooth = GpsMath.smoothSpeedKmh(cleaned)
-                return (rows, smooth)
+                return (rows, smooth, CsvParsers.parseSyncAnchors(text))
             }.value
 
             gpsFile = url
             fullGpsRows = result.rows
             fullSmoothedSpeed = result.smooth
+            gpsSyncAnchors = result.anchors
             applyVideoAndSlice()
             loading = false
             await maybeComputeFusion()
@@ -281,21 +394,42 @@ final class ReplayViewModel {
         }
 
         // ----- Step 2: compute FULL-data abs UTC arrays. Crucially we
-        // interpolate sensor abs times BEFORE slicing — using ALL GPS
-        // anchors — so even when the video window falls outside GPS
-        // coverage we can still extrapolate sensor abs times and slice
-        // sensors by absolute time. Without this, the old code passed
-        // the sliced (often empty) gpsRows into the interpolator and
-        // got a useless all-zero array.
-        fullGpsAbsTimesMs = fullGpsRows.map { row in
-            GpsTime.toUtcMillis(
-                row.utc, year: date.year, month1to12: date.month, day: date.day
-            ) ?? -1
+        // interpolate sensor abs times BEFORE slicing — so even when the
+        // video window falls outside GPS coverage we can still slice
+        // sensors by absolute time.
+        //
+        // PRIMARY source = the firmware's `# SYNC` markers (phone wall clock,
+        // paired with the box tick on every connect). These are drift-free,
+        // need no GPS fix, and live in the SAME clock domain as the video's
+        // creation_time — so they remove the cross-clock skew that made the
+        // old GPS-only path desync. They also make the alignment date
+        // irrelevant (the anchor carries absolute epoch directly), sidestepping
+        // the timezone / midnight-rollover fragility of hhmmss.ss.
+        //
+        // FALLBACK (legacy files / never-connected sessions) = the old
+        // GPS-hhmmss.ss piecewise interpolation, or an all-zero array that
+        // step 5 turns into a cursor sweep.
+        if !gpsSyncAnchors.isEmpty {
+            fullGpsAbsTimesMs = Self.absTimesFromSyncAnchors(
+                ticks: fullGpsRows.map { $0.ticks }, anchors: gpsSyncAnchors)
+        } else {
+            fullGpsAbsTimesMs = fullGpsRows.map { row in
+                GpsTime.toUtcMillis(
+                    row.utc, year: date.year, month1to12: date.month, day: date.day
+                ) ?? -1
+            }
         }
-        let fullSensorAbsTimesMs = interpolateSensorAbsTimes(
-            sensorRows: fullSensorRows, gpsRows: fullGpsRows,
-            gpsAbsTimesMs: fullGpsAbsTimesMs
-        )
+        let usedSyncAnchors = !sensorSyncAnchors.isEmpty
+        let fullSensorAbsTimesMs: [Int64]
+        if usedSyncAnchors {
+            fullSensorAbsTimesMs = Self.absTimesFromSyncAnchors(
+                ticks: fullSensorRows.map { $0.ticks }, anchors: sensorSyncAnchors)
+        } else {
+            fullSensorAbsTimesMs = interpolateSensorAbsTimes(
+                sensorRows: fullSensorRows, gpsRows: fullGpsRows,
+                gpsAbsTimesMs: fullGpsAbsTimesMs
+            )
+        }
 
         // ----- Step 3: ride window slicing by ABSOLUTE TIME. Both sensor
         // and GPS arrays get sliced against [videoCreation, +duration]
@@ -392,7 +526,50 @@ final class ReplayViewModel {
             )
         }
 
+        // ----- Honest alignment label. `needsSensorStretch` means we fell
+        // back to the linear cursor-sweep (no real wall-clock correspondence)
+        // — say so rather than pretend the cursor is exact.
+        let approximate = needsSensorStretch
+        if usedSyncAnchors || !gpsSyncAnchors.isEmpty {
+            alignmentSource = approximate
+                ? "Phone-clock sync — video outside session, approximate"
+                : "Phone-clock sync — exact"
+        } else if approximate {
+            alignmentSource = "Approximate — no sync marker or GPS fix"
+        } else {
+            alignmentSource = "GPS-derived time"
+        }
+
         rideSlicingSummary = summary
+    }
+
+    /// Map row ticks → absolute epoch ms through the firmware's host-clock
+    /// `# SYNC` anchors. Piecewise-linear between anchors (drift-free when
+    /// several connects produced markers across the session); constant
+    /// 10 ms/tick extrapolation before the first / after the last anchor.
+    /// A single anchor degenerates to a fixed 10 ms/tick offset from that
+    /// one connect — still phone-clock-correct near the connect, only
+    /// re-accumulating ThreadX drift far from it. `anchors` must be
+    /// tick-sorted + deduped (as `CsvParsers.parseSyncAnchors` returns).
+    static func absTimesFromSyncAnchors(ticks: [Double], anchors: [SyncAnchor]) -> [Int64] {
+        let n = ticks.count
+        guard n > 0, let first = anchors.first, let last = anchors.last else { return [] }
+        var out = [Int64](repeating: 0, count: n)
+        var j = 0
+        for i in 0..<n {
+            let t = ticks[i]
+            if t <= first.ticks {
+                out[i] = first.epochMs + Int64((t - first.ticks) * 10.0)
+            } else if t >= last.ticks {
+                out[i] = last.epochMs + Int64((t - last.ticks) * 10.0)
+            } else {
+                while j + 1 < anchors.count && anchors[j + 1].ticks <= t { j += 1 }
+                let a = anchors[j], b = anchors[j + 1]
+                let frac = (t - a.ticks) / (b.ticks - a.ticks)
+                out[i] = Int64(Double(a.epochMs) + Double(b.epochMs - a.epochMs) * frac)
+            }
+        }
+        return out
     }
 
     /// Build a linear abs-time array of `count` entries that spans the

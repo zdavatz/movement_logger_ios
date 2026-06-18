@@ -230,6 +230,7 @@ final class BleClient: NSObject {
         case .delete(let name): sendDelete(name: name)
         case .setLogMode(let m): sendSetMode(manual: m)
         case .getLogMode: sendGetMode()
+        case .setTime(let ms): sendSetTime(epochMs: ms)
         }
     }
 
@@ -400,6 +401,23 @@ final class BleClient: NSObject {
         }
         if !writeCmdBytes(Data([FileSyncProtocol.opGetMode])) { return }
         op = .modeReq(isSet: false, manual: false, lastProgress: now())
+    }
+
+    /// SET_TIME `0x08 + epoch_ms(u64-LE)`: hand the box the phone's wall
+    /// clock so it stamps a `# SYNC` anchor into the open Sens/Gps CSVs.
+    /// Deliberately *fire-and-forget* — it does NOT occupy a `CurrentOp`
+    /// slot: the host never needs the reply, and legacy firmware that
+    /// doesn't implement 0x08 never answers (so tracking it would stall the
+    /// op for the full 20 s watchdog window). The box's OK byte, if any,
+    /// lands while `op == .idle` and is harmlessly ignored. Skipped if an
+    /// op is mid-flight so a stray marker can't interleave with a READ.
+    private func sendSetTime(epochMs: Int64) {
+        guard case .idle = op else { return }
+        var le = UInt64(bitPattern: epochMs).littleEndian
+        var payload = Data([FileSyncProtocol.opSetTime])
+        withUnsafeBytes(of: &le) { payload.append(contentsOf: $0) }
+        if !writeCmdBytes(payload) { return }
+        emitStatus("SET_TIME sent — box clock anchored to phone")
     }
 
     // -------------------------------------------------------------------------
