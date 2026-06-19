@@ -1,5 +1,6 @@
 import SwiftUI
 import CoreBluetooth
+import UniformTypeIdentifiers
 
 struct FileSyncScreen: View {
     /// Owned by `MainNav` so the Live tab can observe the same instance
@@ -66,14 +67,15 @@ private struct ConnectionBar: View {
                     .buttonStyle(.borderedProminent)
                     // Disable while ANY worker op is in flight — keep-synced
                     // READs hold the worker busy for minutes on a big file,
-                    // and tap-while-busy would just collide with the "another
-                    // op is in flight" rejection.
-                    .disabled(vm.listing || vm.syncing || !vm.downloads.isEmpty)
+                    // a firmware upload owns the single-op slot too, and
+                    // tap-while-busy would just collide with the "another op
+                    // is in flight" rejection.
+                    .disabled(vm.listing || vm.syncing || !vm.downloads.isEmpty || vm.firmwareUploading)
                     Button(action: vm.syncNow) {
                         Text(vm.syncing ? "Syncing…" : "Sync now")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(vm.listing || vm.syncing || !vm.downloads.isEmpty)
+                    .disabled(vm.listing || vm.syncing || !vm.downloads.isEmpty || vm.firmwareUploading)
                     // Disconnect is back so one person can sync, drop the
                     // link, and hand the box to the next person to sync.
                     // STOP_LOG stays removed: with the always-on firmware
@@ -119,8 +121,112 @@ private struct ConnectionBar: View {
                 if vm.logModeManual == true {
                     SessionStarter(vm: vm)
                 }
+                Divider()
+                FirmwareUpdateSection(vm: vm)
             }
         }
+    }
+}
+
+/// Firmware-over-BLE (OTA) section. Pick a `.bin`, then stream it to the
+/// box's inactive flash bank; on COMMIT the box verifies the SHA, swaps
+/// banks and reboots. Only available while connected + idle — the picker +
+/// upload are gated on the same busy flags as List / Sync.
+private struct FirmwareUpdateSection: View {
+    @Bindable var vm: FileSyncViewModel
+    @State private var importing = false
+
+    /// `.bin` is not a registered system UTType — fall back to `.data` so the
+    /// importer still surfaces the file. `UTType(filenameExtension:)` returns
+    /// a dynamic type that also matches.
+    private static let binTypes: [UTType] =
+        [UTType(filenameExtension: "bin") ?? .data, .data]
+
+    private var busy: Bool {
+        vm.firmwareUploading || vm.listing || vm.syncing || !vm.downloads.isEmpty
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Firmware update").font(.footnote.weight(.semibold))
+                Spacer()
+            }
+            HStack {
+                Button {
+                    importing = true
+                } label: {
+                    Label("Upload firmware (.bin)", systemImage: "arrow.up.doc")
+                }
+                .buttonStyle(.bordered)
+                .disabled(busy)
+                if vm.firmwareUploading {
+                    Button("Cancel", role: .destructive, action: vm.cancelFirmwareUpload)
+                        .buttonStyle(.bordered)
+                }
+                Spacer()
+            }
+            if let u = vm.fwUpload {
+                FwUploadProgressRow(state: u)
+            }
+            if let status = vm.fwUploadStatus {
+                Text(status)
+                    .font(.footnote)
+                    .foregroundStyle(vm.fwUploadSucceeded
+                                     ? Color(red: 0.10, green: 0.55, blue: 0.20)
+                                     : Color(red: 0.67, green: 0.12, blue: 0.12))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Text("Sends a new .bin to the box's spare flash bank, then reboots into it. Keep the box close and powered during the transfer.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .fileImporter(isPresented: $importing,
+                      allowedContentTypes: Self.binTypes,
+                      allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first { vm.uploadFirmware(url: url) }
+            case .failure(let err):
+                vm.fwUploadSucceeded = false
+                vm.fwUploadStatus = "Couldn't open file: \(err.localizedDescription)"
+            }
+        }
+    }
+}
+
+/// In-flight firmware-upload progress card. Cloned from `SyncProgressRow`:
+/// filename + byte progress + percent + a determinate bar.
+private struct FwUploadProgressRow: View {
+    let state: FwUploadState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Image(systemName: "arrow.up.circle.fill")
+                    .foregroundStyle(.tint)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Uploading firmware")
+                        .font(.footnote.weight(.semibold))
+                    Text(state.fileName)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Text("\(Int(state.fraction * 100))%")
+                    .font(.footnote.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.tint)
+            }
+            ProgressView(value: state.fraction)
+            Text("\(humanBytes(state.bytesDone)) / \(humanBytes(state.total))")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(10)
+        .background(Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -447,11 +553,11 @@ private struct FileRow: View {
                 } else {
                     Button(progress == nil ? "Download" : "…") { vm.download(file) }
                         .buttonStyle(.bordered)
-                        .disabled(progress != nil)
+                        .disabled(progress != nil || vm.firmwareUploading)
                 }
                 Button("Delete") { vm.delete(file) }
                     .buttonStyle(.bordered)
-                    .disabled(progress != nil || deleteReason != nil)
+                    .disabled(progress != nil || deleteReason != nil || vm.firmwareUploading)
             }
             if let reason = deleteReason {
                 Text("Can't delete: \(reason)")

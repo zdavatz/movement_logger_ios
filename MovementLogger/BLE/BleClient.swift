@@ -231,6 +231,8 @@ final class BleClient: NSObject {
         case .setLogMode(let m): sendSetMode(manual: m)
         case .getLogMode: sendGetMode()
         case .setTime(let ms): sendSetTime(epochMs: ms)
+        case .uploadFirmware(let image, let sha): startFwUpload(image: image, sha256: sha)
+        case .abortFirmware: abortFwUpload(reason: "cancelled by user")
         }
     }
 
@@ -297,6 +299,18 @@ final class BleClient: NSObject {
             emitErr("DELETE \(name) aborted by disconnect")
         case .modeReq(let isSet, _, _):
             emitErr("\(isSet ? "SET_MODE" : "GET_MODE") aborted by disconnect")
+        case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
+            // A disconnect during COMMIT is the EXPECTED success path: the
+            // box swaps banks + resets, dropping the link within ~200 ms.
+            // Treat it as success. A drop in begin/data is a real failure —
+            // the staged image is incomplete and the box stays on old fw.
+            if phase == .commit {
+                emit(.fwUploadDone(success: true,
+                                   message: "firmware accepted — box is rebooting"))
+            } else {
+                emit(.fwUploadDone(success: false,
+                                   message: "firmware upload interrupted at \(offset) B (link lost)"))
+            }
         case .idle:
             break
         }
@@ -418,6 +432,169 @@ final class BleClient: NSObject {
         withUnsafeBytes(of: &le) { payload.append(contentsOf: $0) }
         if !writeCmdBytes(payload) { return }
         emitStatus("SET_TIME sent — box clock anchored to phone")
+    }
+
+    // -------------------------------------------------------------------------
+    //  Firmware update (OTA over FileCmd/FileData)
+    // -------------------------------------------------------------------------
+    //
+    // Handshake: FW_BEGIN (erases the inactive bank, ~1 s) → a stream of
+    // FW_DATA chunks, each ACK-gated on a 4-byte next-offset reply before the
+    // next is sent → FW_COMMIT (verifies the SHA, swaps banks, resets — the
+    // link drops within ~200 ms, which we treat as success). Single-in-flight
+    // through the same `.uploadingFirmware` op slot as READ; the box rejects
+    // concurrent ops with BUSY.
+
+    /// Per-FW_DATA payload byte budget: opcode(1) + offset(4) = 5 header bytes
+    /// subtracted from the negotiated write length, clamped to 244 (the
+    /// firmware's receive buffer). Smaller is fine, just slower.
+    private func fwChunkBytes() -> Int {
+        let maxWrite = peripheral?.maximumWriteValueLength(for: .withoutResponse) ?? 23
+        let usable = min(244, maxWrite) - 5
+        return max(1, usable)
+    }
+
+    private func startFwUpload(image: Data, sha256: Data) {
+        guard case .idle = op else {
+            emitErr("another op is in flight — wait or Disconnect"); return
+        }
+        guard sha256.count == 32 else {
+            emit(.fwUploadDone(success: false, message: "internal error: SHA-256 must be 32 bytes"))
+            return
+        }
+        guard !image.isEmpty else {
+            emit(.fwUploadDone(success: false, message: "firmware image is empty"))
+            return
+        }
+        // FW_BEGIN: 0x09 + image_len(u32-LE) + sha256(32) = 37 bytes.
+        var payload = Data([FileSyncProtocol.opFwBegin])
+        var lenLE = UInt32(clamping: image.count).littleEndian
+        withUnsafeBytes(of: &lenLE) { payload.append(contentsOf: $0) }
+        payload.append(sha256)
+        if !writeCmdBytes(payload) {
+            emit(.fwUploadDone(success: false, message: "not connected"))
+            return
+        }
+        op = .uploadingFirmware(image: image, sha256: sha256, offset: 0,
+                                lastEmit: 0, retries: 0, phase: .begin,
+                                lastProgress: now())
+        emit(.fwUploadStarted(total: Int64(image.count)))
+        emitStatus("FW_BEGIN sent (\(image.count) B) — erasing bank…")
+    }
+
+    /// Send the FW_DATA chunk at the current `offset`. Returns false if the
+    /// write itself failed (no peripheral / no characteristic).
+    @discardableResult
+    private func sendFwChunk() -> Bool {
+        guard case .uploadingFirmware(let image, _, let offset, _, _, _, _) = op else { return false }
+        let n = min(fwChunkBytes(), image.count - Int(offset))
+        guard n > 0 else { return false }
+        let start = image.index(image.startIndex, offsetBy: Int(offset))
+        let end = image.index(start, offsetBy: n)
+        var payload = Data([FileSyncProtocol.opFwData])
+        var offLE = UInt32(clamping: offset).littleEndian
+        withUnsafeBytes(of: &offLE) { payload.append(contentsOf: $0) }
+        payload.append(image[start..<end])
+        return writeCmdBytes(payload)
+    }
+
+    /// FW_COMMIT — verify + swap + reset. The box drops the link right after
+    /// the 0xA0 reply; the disconnect-after-commit is treated as success.
+    private func sendFwCommit() {
+        if !writeCmdBytes(Data([FileSyncProtocol.opFwCommit])) {
+            // Lost the link before COMMIT could be written. If we'd already
+            // staged the whole image the box may still commit on its own
+            // timeout, but we can't know — report a clean failure.
+            finishFwUpload(success: false, message: "lost connection before commit")
+            return
+        }
+        emitStatus("FW_COMMIT sent — box verifying image…")
+    }
+
+    /// Best-effort FW_ABORT, then drop the op locally. Safe to call even if
+    /// the write fails (e.g. the link is already down).
+    private func abortFwUpload(reason: String) {
+        guard case .uploadingFirmware = op else { return }
+        _ = writeCmdBytes(Data([FileSyncProtocol.opFwAbort]))
+        finishFwUpload(success: false, message: "firmware upload aborted (\(reason))")
+    }
+
+    /// Resolve the op and emit the terminal event exactly once.
+    private func finishFwUpload(success: Bool, message: String) {
+        guard case .uploadingFirmware = op else { return }
+        op = .idle
+        emit(.fwUploadDone(success: success, message: message))
+    }
+
+    private func handleFwNotify(_ value: Data) {
+        guard case .uploadingFirmware(let image, let sha, let offset,
+                                      let lastEmit, _, let phase, _) = op else { return }
+        switch phase {
+        case .begin:
+            // FW_BEGIN reply: single status byte. 0x00 = bank erased, ready.
+            guard let b = value.first else { return }
+            if b == FileSyncProtocol.statusOK {
+                emitStatus("bank erased — streaming firmware…")
+                op = .uploadingFirmware(image: image, sha256: sha, offset: 0,
+                                        lastEmit: 0, retries: 0, phase: .data,
+                                        lastProgress: now())
+                if !sendFwChunk() {
+                    finishFwUpload(success: false, message: "not connected")
+                }
+            } else {
+                finishFwUpload(success: false,
+                               message: "FW_BEGIN: \(FileSyncProtocol.fwErrorMessage(b))")
+            }
+
+        case .data:
+            // SUCCESS = 4-byte LE next-expected offset; ERROR = 1 byte.
+            // Disambiguate purely by length.
+            if value.count == 4 {
+                var done = Int64(ackOffset(value))
+                if done > Int64(image.count) { done = Int64(image.count) }
+                if done - lastEmit >= Self.fwProgressChunkBytes || done >= Int64(image.count) {
+                    emit(.fwUploadProgress(bytesDone: done, total: Int64(image.count)))
+                }
+                if done >= Int64(image.count) {
+                    // Whole image staged — move to COMMIT.
+                    op = .uploadingFirmware(image: image, sha256: sha, offset: done,
+                                            lastEmit: done, retries: 0, phase: .commit,
+                                            lastProgress: now())
+                    sendFwCommit()
+                } else {
+                    op = .uploadingFirmware(image: image, sha256: sha, offset: done,
+                                            lastEmit: max(lastEmit, done), retries: 0,
+                                            phase: .data, lastProgress: now())
+                    if !sendFwChunk() {
+                        finishFwUpload(success: false, message: "not connected")
+                    }
+                }
+            } else if let b = value.first {
+                // 1-byte error: 0xE7 bad-seq / 0xE5 flash-fail are fatal.
+                finishFwUpload(success: false,
+                               message: "FW_DATA @\(offset): \(FileSyncProtocol.fwErrorMessage(b))")
+            }
+
+        case .commit:
+            // FW_COMMIT reply: 0xA0 = ready (box reboots), else error.
+            guard let b = value.first else { return }
+            if b == FileSyncProtocol.fwReady {
+                finishFwUpload(success: true,
+                               message: "firmware accepted — box is rebooting")
+            } else {
+                finishFwUpload(success: false,
+                               message: "FW_COMMIT: \(FileSyncProtocol.fwErrorMessage(b))")
+            }
+        }
+    }
+
+    /// Decode a 4-byte little-endian ACK offset from a FW_DATA reply.
+    private func ackOffset(_ value: Data) -> UInt32 {
+        var v: UInt32 = 0
+        for (i, byte) in value.prefix(4).enumerated() {
+            v |= UInt32(byte) << (8 * i)
+        }
+        return v
     }
 
     // -------------------------------------------------------------------------
@@ -580,6 +757,8 @@ final class BleClient: NSObject {
             handleDeleteNotify(data)
         case .modeReq:
             handleModeNotify(data)
+        case .uploadingFirmware:
+            handleFwNotify(data)
         }
     }
 
@@ -813,12 +992,21 @@ final class BleClient: NSObject {
             emit(.listDone)
             return
         }
+        // FW_DATA has a dedicated resend-on-timeout path (the box is
+        // idempotent for offset < cursor) handled below, before the generic
+        // stale handling. FW_BEGIN/COMMIT fall through to the generic timeout.
+        if case .uploadingFirmware(_, _, _, _, _, let phase, let lp) = op,
+           phase == .data, n - lp > Self.fwDataTimeoutMs {
+            tickFwDataResend(n)
+            return
+        }
         let stale: Bool
         switch op {
         case .listing(_, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .reading(_, _, _, _, _, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .deleting(_, let lp): stale = n - lp > Self.opIdleTimeoutMs
         case .modeReq(_, _, let lp): stale = n - lp > Self.opIdleTimeoutMs
+        case .uploadingFirmware(_, _, _, _, _, _, let lp): stale = n - lp > Self.fwBeginCommitTimeoutMs
         case .idle: stale = false
         }
         guard stale else { return }
@@ -835,6 +1023,12 @@ final class BleClient: NSObject {
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
         case .modeReq(let isSet, _, _):
             emitErr("\(isSet ? "SET_MODE" : "GET_MODE") timed out — no reply for 20 s")
+        case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
+            // FW_BEGIN (bank erase can take ~1 s but not 30 s) or FW_COMMIT
+            // (SHA pass) never answered. FW_DATA is resent above, not here.
+            let what = phase == .begin ? "FW_BEGIN (bank erase)" : "FW_COMMIT (verify)"
+            emit(.fwUploadDone(success: false,
+                               message: "\(what) timed out at \(offset) B — no reply"))
         case .idle: break
         }
         op = .idle
@@ -844,6 +1038,26 @@ final class BleClient: NSObject {
         // continue (desktop v0.0.12). Partial is already handed back.
         if stalledRead, lastConnectedId != nil, reconnect == nil {
             armReconnect()
+        }
+    }
+
+    /// FW_DATA timed out (no ACK notify within `fwDataTimeoutMs`). The box is
+    /// idempotent for an offset below its cursor, so re-sending the SAME chunk
+    /// is safe. Bounded retries; exhaustion fails the upload (best-effort
+    /// FW_ABORT so the box drops the stale staging).
+    private func tickFwDataResend(_ n: Int64) {
+        guard case .uploadingFirmware(let image, let sha, let offset, let lastEmit,
+                                      let retries, .data, _) = op else { return }
+        if retries >= Self.fwMaxRetries {
+            abortFwUpload(reason: "no ACK after \(Self.fwMaxRetries) resends at \(offset) B")
+            return
+        }
+        op = .uploadingFirmware(image: image, sha256: sha, offset: offset,
+                                lastEmit: lastEmit, retries: retries + 1, phase: .data,
+                                lastProgress: n)
+        emitStatus("FW_DATA @\(offset) — no ACK, resending (\(retries + 1)/\(Self.fwMaxRetries))")
+        if !sendFwChunk() {
+            finishFwUpload(success: false, message: "not connected")
         }
     }
 
@@ -861,7 +1075,17 @@ final class BleClient: NSObject {
         /// `isSet` true = SET (reply is a status byte; on OK the box is
         /// now in `manual`), false = GET (reply is 0/1 = the mode).
         case modeReq(isSet: Bool, manual: Bool, lastProgress: Int64)
+        /// Firmware OTA in flight. `offset` is the next byte to send (==
+        /// the box's last ACK), `phase` tracks the FW_BEGIN → FW_DATA →
+        /// FW_COMMIT handshake. ACK-gated: one chunk outstanding at a time,
+        /// the next is only sent from the 4-byte ACK notify.
+        case uploadingFirmware(image: Data, sha256: Data, offset: Int64,
+                               lastEmit: Int64, retries: Int, phase: FwPhase,
+                               lastProgress: Int64)
     }
+
+    /// Stage of the firmware handshake the worker is awaiting a reply for.
+    private enum FwPhase { case begin, data, commit }
 
     private func now() -> Int64 {
         Int64(DispatchTime.now().uptimeNanoseconds / 1_000_000)
@@ -911,6 +1135,19 @@ final class BleClient: NSObject {
         AgentConfig.keepSynced && AgentConfig.logModeManual != true
     }
     private static let progressChunkBytes: Int64 = 4 * 1024
+
+    // Firmware-update tunables.
+    /// Emit a progress event at most every ~2 KB (FW chunks are ~180 B, so
+    /// this throttles the UI without losing visible motion).
+    private static let fwProgressChunkBytes: Int64 = 2 * 1024
+    /// Per-FW_DATA ACK wait before a resend. Generous — the box's flash write
+    /// + notify pacing is the bottleneck, same as a READ chunk.
+    private static let fwDataTimeoutMs: Int64 = 5_000
+    /// FW_BEGIN bank erase and FW_COMMIT SHA-pass can each take a few seconds;
+    /// allow well over that before declaring the op dead.
+    private static let fwBeginCommitTimeoutMs: Int64 = 15_000
+    /// Resends of a single FW_DATA chunk before giving up.
+    private static let fwMaxRetries = 5
 }
 
 // MARK: - CBCentralManagerDelegate

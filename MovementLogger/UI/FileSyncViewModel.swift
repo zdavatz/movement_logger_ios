@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import CryptoKit
 
 struct DiscoveredDevice: Identifiable, Equatable {
     let identifier: UUID
@@ -24,6 +25,17 @@ struct DownloadProgress: Equatable {
 }
 
 enum ConnectionStatus { case disconnected, connecting, connected }
+
+/// In-flight firmware-upload state. `nil` when no OTA is running.
+struct FwUploadState: Equatable {
+    let fileName: String
+    var bytesDone: Int64
+    let total: Int64
+    var fraction: Double {
+        guard total > 0 else { return 0 }
+        return min(1, max(0, Double(bytesDone) / Double(total)))
+    }
+}
 
 /// Sparkline sample for the Live tab. `tSec` is seconds since the first
 /// sample of this connection (relative — the box has no RTC), `value` is
@@ -102,6 +114,15 @@ final class FileSyncViewModel {
     var sessionDurationSeconds: Int = 1800  // 30-min default, matches desktop
     var sessionRunning: SessionRunning? = nil
     var live: LiveState = LiveState()
+
+    /// In-flight firmware OTA — drives the progress card. nil = none running.
+    var fwUpload: FwUploadState? = nil
+    /// One-line firmware-update result banner. Set on completion (success or
+    /// failure); cleared when a fresh upload starts. Green ✅ on success.
+    var fwUploadStatus: String? = nil
+    /// True iff the last firmware upload completed successfully (drives the
+    /// green vs red styling of `fwUploadStatus`).
+    var fwUploadSucceeded: Bool = false
 
     /// First-sample box-timestamp; sparkline X axis is
     /// `(s.timestampMs - liveT0Ms) / 1000`. Tracked outside `LiveState` so
@@ -220,7 +241,12 @@ final class FileSyncViewModel {
     /// don't fight for the single CoreBluetooth queue.
     var isBusy: Bool {
         connection != .disconnected || listing || syncing || !downloads.isEmpty
+            || fwUpload != nil
     }
+
+    /// True while a firmware upload is staging — used to gate List / Sync /
+    /// Download so they don't collide with the single-op FW transfer.
+    var firmwareUploading: Bool { fwUpload != nil }
 
     /// Connect by saved `CBPeripheral.identifier` — the BG handler path,
     /// which doesn't have a `DiscoveredDevice` because it hasn't scanned.
@@ -366,6 +392,51 @@ final class FileSyncViewModel {
     func stopLog() {
         logLine("STOP_LOG")
         ble.send(.stopLog)
+    }
+
+    /// Upload a `.bin` firmware image to the box over BLE (OTA). Reads the
+    /// file, computes its SHA-256, and kicks off the FW_BEGIN → FW_DATA… →
+    /// FW_COMMIT handshake in `BleClient`. Only valid when connected + idle —
+    /// the UI gates the button, but we re-check here. Result + progress land
+    /// on the `.fwUpload*` events.
+    func uploadFirmware(url: URL) {
+        guard connection == .connected else {
+            fwUploadSucceeded = false
+            fwUploadStatus = "Connect to the box before uploading firmware."
+            return
+        }
+        // Security-scoped resources for files chosen via the document picker.
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            fwUploadSucceeded = false
+            fwUploadStatus = "Couldn't read \(url.lastPathComponent): \(error.localizedDescription)"
+            logLine("ERROR: firmware read \(url.lastPathComponent): \(error.localizedDescription)")
+            return
+        }
+        guard !data.isEmpty else {
+            fwUploadSucceeded = false
+            fwUploadStatus = "\(url.lastPathComponent) is empty."
+            return
+        }
+        let digest = SHA256.hash(data: data)
+        let shaBytes = Data(digest)
+        fwUploadStatus = nil
+        fwUploadSucceeded = false
+        fwUpload = FwUploadState(fileName: url.lastPathComponent,
+                                 bytesDone: 0, total: Int64(data.count))
+        logLine("FW upload \(url.lastPathComponent) (\(data.count) B, sha256 \(shaBytes.prefix(4).map { String(format: "%02x", $0) }.joined())…)")
+        ble.send(.uploadFirmware(image: data, sha256: shaBytes))
+    }
+
+    /// Cancel an in-flight firmware upload (best-effort FW_ABORT on the box).
+    func cancelFirmwareUpload() {
+        guard fwUpload != nil else { return }
+        logLine("FW upload cancel")
+        ble.send(.abortFirmware)
     }
 
     func setSessionDuration(_ seconds: Int) {
@@ -593,6 +664,29 @@ final class FileSyncViewModel {
             logLine("box log mode: \(manual ? "manual" : "auto")")
         case .sample(let s):
             onSample(s)
+        case .fwUploadStarted(let total):
+            if var u = fwUpload {
+                u.bytesDone = 0
+                fwUpload = u
+            } else {
+                // BleClient started one we didn't pre-seed (defensive).
+                fwUpload = FwUploadState(fileName: "firmware.bin", bytesDone: 0, total: total)
+            }
+        case .fwUploadProgress(let bytesDone, let total):
+            if var u = fwUpload {
+                u.bytesDone = bytesDone
+                fwUpload = u
+            } else {
+                fwUpload = FwUploadState(fileName: "firmware.bin",
+                                        bytesDone: bytesDone, total: total)
+            }
+        case .fwUploadDone(let success, let message):
+            fwUpload = nil
+            fwUploadSucceeded = success
+            fwUploadStatus = success
+                ? "✅ \(message) — reconnect in a few seconds"
+                : "⚠ Firmware update failed: \(message)"
+            logLine(success ? "FW upload done: \(message)" : "ERROR: FW upload: \(message)")
         }
     }
 

@@ -36,12 +36,43 @@ enum FileSyncProtocol {
     /// don't track (legacy firmware without 0x08 just ignores the write).
     static let opSetTime: UInt8 = 0x08
 
+    // --- Firmware-update opcodes (OTA over the same FileCmd/FileData chars) ---
+    //
+    // The box stages a new firmware image into the inactive flash bank, then
+    // verifies + swaps + resets on COMMIT. Single-in-flight through the same
+    // worker state machine as READ (concurrent ops get rejected with BUSY).
+    /// FW_BEGIN `[image_len:u32-LE][sha256:32]` — erase the inactive bank and
+    /// arm staging. Box replies one status byte (0x00 ready, else error).
+    static let opFwBegin: UInt8 = 0x09
+    /// FW_DATA `[offset:u32-LE][bytes…]` — write one chunk at `offset`. Box
+    /// replies a 4-byte LE next-expected-offset ACK, or a 1-byte error.
+    static let opFwData: UInt8 = 0x0A
+    /// FW_COMMIT (no payload) — verify the staged SHA, swap banks, reset. Box
+    /// replies 0xA0 (FW_READY) then drops the link, or a 1-byte error.
+    static let opFwCommit: UInt8 = 0x0B
+    /// FW_ABORT (no payload) — discard the staged image. Box replies 0x00.
+    static let opFwAbort: UInt8 = 0x0C
+
     // Status bytes returned in single-byte FileData notifies.
     static let statusOK: UInt8 = 0x00
     static let statusBusy: UInt8 = 0xB0
     static let statusNotFound: UInt8 = 0xE1
     static let statusIOError: UInt8 = 0xE2
     static let statusBadRequest: UInt8 = 0xE3
+
+    // Firmware-update status bytes (in single-byte FW_* error notifies).
+    /// FW_COMMIT success: image verified, box is swapping banks + resetting.
+    static let fwReady: UInt8 = 0xA0
+    /// FW_COMMIT: staged SHA-256 didn't match — image rejected, box stayed
+    /// on the old firmware.
+    static let fwHashMismatch: UInt8 = 0xE4
+    /// FW_BEGIN bank-erase failed / FW_DATA / FW_COMMIT flash write failed.
+    static let fwFlashFail: UInt8 = 0xE5
+    /// FW_BEGIN: image is larger than the inactive bank can hold.
+    static let fwTooBig: UInt8 = 0xE6
+    /// FW_DATA: offset didn't match the box's cursor (bad sequence), or
+    /// FW_COMMIT: fewer bytes staged than `image_len` (short image).
+    static let fwBadSeq: UInt8 = 0xE7
 
     static func isStatusByte(_ b: UInt8) -> Bool {
         b == statusBusy || b == statusNotFound || b == statusIOError || b == statusBadRequest
@@ -54,6 +85,19 @@ enum FileSyncProtocol {
         case statusIOError: return "IO_ERROR"
         case statusBadRequest: return "BAD_REQUEST"
         default: return "unknown error"
+        }
+    }
+
+    /// Human-readable reason for a firmware-update error byte.
+    static func fwErrorMessage(_ b: UInt8) -> String {
+        switch b {
+        case statusBusy:      return "box busy (logging or another op in progress)"
+        case fwHashMismatch:  return "image rejected (hash mismatch)"
+        case fwFlashFail:     return "flash write failed"
+        case fwTooBig:        return "image too big for the box's firmware bank"
+        case fwBadSeq:        return "bad sequence / short image"
+        case statusBadRequest: return "bad request (malformed FW command)"
+        default: return "unknown firmware error (0x\(String(format: "%02X", b)))"
         }
     }
 }
@@ -81,6 +125,15 @@ enum BleCmd {
     /// time-sync anchor into the open Sens/Gps CSVs. Fire-and-forget — no
     /// tracked reply (so legacy firmware that ignores 0x08 never stalls us).
     case setTime(epochMs: Int64)
+    /// Upload a firmware image to the box's inactive flash bank, then verify +
+    /// swap + reset (OTA). `image` is the exact `.bin` bytes; `sha256` is its
+    /// SHA-256 digest (32 bytes). Drives the FW_BEGIN → FW_DATA… → FW_COMMIT
+    /// handshake through the single-op state machine; progress + result arrive
+    /// as `.fwUploadProgress` / `.fwUploadDone` events.
+    case uploadFirmware(image: Data, sha256: Data)
+    /// Abort an in-flight firmware upload (best-effort FW_ABORT). Cancels the
+    /// `.uploadingFirmware` op locally regardless of the box's reply.
+    case abortFirmware
 }
 
 enum BleEvent {
@@ -115,4 +168,12 @@ enum BleEvent {
     /// connected to PumpLogger firmware that exposes the SensorStream
     /// characteristic; legacy PumpTsueri builds never produce this event.
     case sample(LiveSample)
+    /// A firmware upload started; `total` is the image byte length.
+    case fwUploadStarted(total: Int64)
+    /// Firmware-upload progress — `bytesDone` of `total` staged so far.
+    case fwUploadProgress(bytesDone: Int64, total: Int64)
+    /// Firmware upload finished. `success == true` means the box accepted
+    /// the image and is rebooting into it (reconnect in a few seconds);
+    /// `false` carries a human-readable failure reason in `message`.
+    case fwUploadDone(success: Bool, message: String)
 }
