@@ -214,6 +214,24 @@ def set_whats_new(c: Client, version_id: str, notes: str) -> None:
         print(f"  WARN: could not set whatsNew on {locale} (first version?) — {e}")
 
 
+def ensure_encryption_answer(c: Client, build_id: str) -> None:
+    """Set usesNonExemptEncryption=false on the build if it's unset.
+
+    A build whose Info.plist lacks ITSAppUsesNonExemptEncryption uploads with
+    a null encryption answer, and the review submission 409s with
+    ENTITY_ERROR.ATTRIBUTE.REQUIRED on usesNonExemptEncryption. New builds
+    carry the plist key (so this is a no-op); this covers older uploads.
+    """
+    b = c.get(f"/builds/{build_id}")["data"]
+    if b["attributes"].get("usesNonExemptEncryption") is not None:
+        return
+    c.patch(f"/builds/{build_id}", {
+        "data": {"type": "builds", "id": build_id,
+                 "attributes": {"usesNonExemptEncryption": False}},
+    })
+    print(f"  set usesNonExemptEncryption=false on build {build_id}")
+
+
 def attach_build(c: Client, version_id: str, build_id: str) -> None:
     c.patch(f"/appStoreVersions/{version_id}/relationships/build", {
         "data": {"type": "builds", "id": build_id},
@@ -332,6 +350,7 @@ def main() -> None:
     else:
         print("  no notes provided — leaving whatsNew unchanged")
 
+    ensure_encryption_answer(c, build_id)
     attach_build(c, version_id, build_id)
     submit_for_review(c, app_id, version_id, do_submit=not args.no_submit)
     print("done.")

@@ -145,6 +145,13 @@ enum BleEvent {
     /// — the iOS analogue of the desktop's btleplug peripheral id.
     case connected(boxId: String)
     case disconnected
+    /// A bounded auto-reconnect has begun (mid-transfer drop / stall). The
+    /// link is actually DOWN even though we suppress `.disconnected` to keep
+    /// the UI on the connected screen — so the consumer must stop issuing new
+    /// ops (a READ sent now fails "not connected" and orphans its progress
+    /// row). Cleared by the next `.connected` (success) or `.disconnected`
+    /// (reconnect exhausted).
+    case reconnecting
     case listEntry(name: String, size: Int64)
     case listDone
     case readStarted(name: String, size: Int64)

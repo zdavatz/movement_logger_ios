@@ -973,6 +973,10 @@ final class BleClient: NSObject {
     /// we never had a connected box or a reconnect is already running.
     private func armReconnect() {
         guard let id = lastConnectedId, reconnect == nil else { return }
+        // Tell the VM the link is down BEFORE disconnectInner emits the
+        // `.readAborted` + `.error` (which would otherwise pump the next
+        // queued READ into the dead link and orphan its progress row).
+        emit(.reconnecting)
         disconnectInner(emitEvent: false)
         reconnect = ReconnectState(id: id, attempt: 1, phase: .waiting,
                                    nextAtMs: now() + Self.reconnectWaitMs)
@@ -1061,7 +1065,7 @@ final class BleClient: NSObject {
         case .listing(_, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .reading(_, _, _, _, _, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .deleting(_, let lp): stale = n - lp > Self.opIdleTimeoutMs
-        case .modeReq(_, _, let lp): stale = n - lp > Self.opIdleTimeoutMs
+        case .modeReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .uploadingFirmware(_, _, _, _, _, _, let lp): stale = n - lp > Self.fwBeginCommitTimeoutMs
         case .idle: stale = false
         }
@@ -1078,7 +1082,7 @@ final class BleClient: NSObject {
             stalledRead = true
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
         case .modeReq(let isSet, _, _):
-            emitErr("\(isSet ? "SET_MODE" : "GET_MODE") timed out — no reply for 20 s")
+            emitErr("\(isSet ? "SET_MODE" : "GET_MODE") timed out — no reply for \(Self.modeReqTimeoutMs / 1000) s (firmware may not support this opcode)")
         case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
             // FW_BEGIN (bank erase can take ~1 s but not 30 s) or FW_COMMIT
             // (SHA pass) never answered. FW_DATA is resent above, not here.
@@ -1160,6 +1164,13 @@ final class BleClient: NSObject {
     private static let scanDurationMs: Int = 5_000
     private static let watchdogTickMs: Int = 200
     private static let opIdleTimeoutMs: Int64 = 20_000
+    /// GET/SET_MODE is a single-byte reply that returns in well under a second
+    /// when supported. Firmware that doesn't implement 0x07 never answers, so
+    /// the connect-time GET_MODE would otherwise hold the single-op worker for
+    /// the full 20 s — blocking the user's first `List files` with "another op
+    /// is in flight". Time it out fast so the worker frees up and SET_TIME +
+    /// LIST proceed within a few seconds of connect.
+    private static let modeReqTimeoutMs: Int64 = 4_000
     private static let listInactivityDoneMs: Int64 = 500
     /// How long the box stays busy after SET_TIME (0x08) before it can
     /// service the next FileCmd. Measured ≥1.8 s works, ~0.5 s fails; 2 s
@@ -1186,7 +1197,12 @@ final class BleClient: NSObject {
     private static let reconnectAttempts = 30
     private static let reconnectWaitMs: Int64 = 2_000
     private static let reconnectScanMs: Int64 = 3_000
-    private static let reconnectConnectMs: Int64 = 60_000
+    // 60 s was one slow cycle per failed attempt (~65 s with the wait+scan);
+    // a brief RF drop where the box re-advertises in seconds then waited a
+    // full minute to be retried. 18 s catches the box's connectable window
+    // ~3× faster while still allowing for a box that takes a few seconds to
+    // start advertising again after the link drops.
+    private static let reconnectConnectMs: Int64 = 18_000
 
     /// `true` when the user has opted into Keep-synced (mirrored from
     /// `AgentConfig`). Drives the unbounded-vs-bounded reconnect choice.

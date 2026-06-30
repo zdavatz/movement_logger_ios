@@ -117,6 +117,12 @@ final class FileSyncViewModel {
     /// first command doesn't look like a frozen tap (see settle notes in
     /// CLAUDE.md). Mirror of `BleClient.setTimeSettleMs`.
     var clockSyncing: Bool = false
+    /// A bounded auto-reconnect is running: the BLE link is actually down even
+    /// though `connection` still reads `.connected` (we keep the UI put while
+    /// retrying). The queue pumps gate on this — issuing a READ now would fail
+    /// "not connected" and orphan a stuck progress row (the BAT011 hang). Set
+    /// by `.reconnecting`, cleared by `.connected` / `.disconnected`.
+    var reconnecting: Bool = false
     var log: [String] = []
     var sessionDurationSeconds: Int = 1800  // 30-min default, matches desktop
     var sessionRunning: SessionRunning? = nil
@@ -345,32 +351,44 @@ final class FileSyncViewModel {
     /// to match `download()` / `startRead()` — in practice always reached
     /// from a main-thread context (SwiftUI tap or the @MainActor onEvent).
     private func pumpManualQueue() {
-        guard connection == .connected,
+        guard connection == .connected, !reconnecting,
               !listing, downloads.isEmpty, syncInFlight == nil,
               fwUpload == nil, !briefOpInFlight
         else { return }
-        guard !manualQueue.isEmpty else { return }
-        let next = manualQueue.removeFirst()
-        queuedDownloads = manualQueue.map { $0.name }
-        startRead(next)
+        // Skip past any queued files that turn out already-mirrored (they
+        // issue no READ, so they'd otherwise strand the queue). Stop as soon
+        // as one issues a real READ — `.readDone` re-pumps from there.
+        while let next = manualQueue.first {
+            manualQueue.removeFirst()
+            queuedDownloads = manualQueue.map { $0.name }
+            if startRead(next) { return }
+        }
     }
 
     /// Actually start a READ: record the resume offset, show the progress
     /// row, send the command. Shared by the manual queue (`pumpManualQueue`)
     /// and the auto-sync queue (`pumpSyncQueue`); callers guarantee the
     /// worker is idle, so this never collides.
-    private func startRead(_ file: RemoteFile) {
+    ///
+    /// Returns `true` iff a READ was actually issued. `false` means the file
+    /// is already fully mirrored so nothing was sent — the caller MUST then
+    /// advance its queue itself, because no `.readDone` will arrive to pump
+    /// it. (Before this, the early-return silently stranded the queue: the
+    /// in-flight file showed but never progressed, and the rest never ran.)
+    @discardableResult
+    private func startRead(_ file: RemoteFile) -> Bool {
         // Live-mirror: resume/grow from whatever is already on disk. The
         // firmware seeks to `offset`, so an interrupted file continues
         // and a grown log only fetches its new tail (desktop v0.0.14).
         let offset = mirrorOffset(name: file.name, boxSize: file.size)
         if file.size > 0, offset >= file.size {
             logLine("\(file.name) already mirrored (\(file.size) B)")
-            return
+            return false
         }
         downloads[file.name] = DownloadProgress(bytesDone: offset, total: file.size)
         logLine("READ \(file.name) @\(offset)/\(file.size) B")
         ble.send(.read(name: file.name, size: file.size, offset: offset))
+        return true
     }
 
     /// "Sync now" — pull every session file whose local mirror is behind
@@ -607,8 +625,18 @@ final class FileSyncViewModel {
         case .scanStopped:
             scanning = false
             logLine("scan stopped (\(discovered.count) found)")
+        case .reconnecting:
+            // Link dropped mid-transfer; BleClient is retrying and keeps the
+            // UI on the connected screen. Block the queue pumps until we're
+            // genuinely back, and drop any optimistic in-flight rows so a
+            // half file doesn't sit frozen (the real partial was already
+            // appended via `.readAborted`). The resume pass re-pulls them.
+            reconnecting = true
+            downloads = [:]
+            logLine("link lost — reconnecting")
         case .connected(let boxId):
             connection = .connected
+            reconnecting = false
             connectedBoxId = boxId.isEmpty ? nil : boxId
             // Persist the box id for the background agent so it can
             // reconnect after the app has been suspended/terminated.
@@ -660,6 +688,7 @@ final class FileSyncViewModel {
             }
         case .disconnected:
             connection = .disconnected
+            reconnecting = false
             connectedBoxId = nil
             deleteError = nil
             briefOpInFlight = false
@@ -857,20 +886,31 @@ final class FileSyncViewModel {
     /// from `.readDone` of the previous one.
     @MainActor
     private func pumpSyncQueue() {
-        guard !syncQueue.isEmpty else {
-            if syncing {
-                syncing = false
-                syncPassTotal = 0
-                syncPassTotalBytes = 0
-                syncPassCompletedBytes = 0
-                syncStatus = "Sync: complete"
-                logLine("Sync: complete")
-            }
-            return
+        // Link down mid-reconnect: don't issue a READ (it'd fail "not
+        // connected" and orphan a stuck row). The resume sync pass on the
+        // next `.connected` re-drives the queue from the mirror offsets.
+        guard !reconnecting else { return }
+        // Advance through the queue, skipping files that are already fully
+        // mirrored (startRead issues no READ for them, so there's no
+        // `.readDone` to re-pump — leaving them in-flight would stall the
+        // whole pass on the first already-complete file). Fold their bytes
+        // into the progress total and move on; stop on the first real READ.
+        while let next = syncQueue.first {
+            syncQueue.removeFirst()
+            syncInFlight = next.name
+            if startRead(next) { return }
+            syncPassCompletedBytes += mirrorLocalSize(name: next.name)
+            syncInFlight = nil
         }
-        let next = syncQueue.removeFirst()
-        syncInFlight = next.name
-        startRead(next)
+        // Drained.
+        if syncing {
+            syncing = false
+            syncPassTotal = 0
+            syncPassTotalBytes = 0
+            syncPassCompletedBytes = 0
+            syncStatus = "Sync: complete"
+            logLine("Sync: complete")
+        }
     }
 
     // ---------------- Live mirror (desktop v0.0.14) ---------------------------

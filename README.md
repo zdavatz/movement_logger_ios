@@ -4,7 +4,7 @@ Movement Logger GUI for iOS — SwiftUI + CoreBluetooth + AVKit. Talks to the Pu
 
 ## Features
 
-- **Sync tab** — BLE scan / connect / LIST / READ / DELETE / STOP_LOG / START_LOG against the PumpTsueri SensorTile.box. CSVs land in the app's `Documents/`, accessible from the Files app. Long READs continue in the background — switch to another app while a session downloads and the bytes keep flowing (`UIBackgroundModes = bluetooth-central` + per-session `beginBackgroundTask` assertion).
+- **Sync tab** — BLE scan / connect / LIST / READ / DELETE / STOP_LOG / START_LOG against the PumpTsueri SensorTile.box. CSVs land in the app's `Documents/`, accessible from the Files app. Long READs continue in the background — switch to another app while a session downloads and the bytes keep flowing (`UIBackgroundModes = bluetooth-central` + a renewed per-session `beginBackgroundTask` assertion), and the screen can lock without dropping the link. A mid-transfer link drop auto-reconnects and resumes from the local mirror offset rather than freezing the queue. **For stable large-file sync the box should run firmware ≥ v0.0.17** — older firmware lacks the connection-stability fixes (45 s stall tolerance, no aggressive 4 s supervision timeout) and a working `GET_MODE`, so big files drop after a few minutes; flash the latest firmware over BLE from the desktop app if needed.
 - **Sync now** — distinct from per-file Download: pulls every session file (`Sens*/Gps*/Bat*.csv` + `Mic*.wav`) on the box not already mirrored locally, tracked in a local SQLite DB (`Application Support/sqlite/sync.db`) keyed per box. Manual downloads register too, so a later Sync skips them. Purely additive — never deletes anything on the box. Port of the desktop's SQLite-tracked sync. While a pass runs the Sync tab shows a cumulative byte-progress card (overall `X MB / Y MB`, %, files N/M + per-file bar) so you can tell it's actually pulling data even though the file list is intentionally cleared during the diff. The PumpTsueri BLE link delivers ~2 KB/s (single-op protocol — parallel transfers aren't possible), so the *first* sync of an old session can take minutes per MB; subsequent syncs only fetch the new tail.
 - **Background sync agent** — once "Keep synced" is on with the box in AUTO mode, mirroring continues even when the app is closed (port of Android `sync/` + desktop `--agent`). Two layered iOS mechanisms:
     - **CoreBluetooth State Restoration** wakes the app when the known box comes into range, even after a phone reboot.
@@ -41,14 +41,20 @@ Screenshots in `screenshots/`. See `CLAUDE.md` for architecture details, AVFound
 
 ## Release
 
-Tag-driven CI release. Bump the patch by `+0.0.1`, push the tag, and the workflow at `.github/workflows/release.yml` runs on `macos-15`:
+Tag-driven CI. Two separate version trains (see `CLAUDE.md`):
+
+- **`0.0.x` = binary / TestFlight builds** — bumped per dev iteration, installed over USB (`devicectl`) and/or uploaded for TestFlight. **Never** auto-submitted to the public App Store.
+- **`1.x.x` = public App Store releases** — the only tags that auto-submit for review. The current store version is **1.0.5**.
 
 ```sh
-git tag v0.0.6
-git push origin v0.0.6
+git tag v1.0.6            # store release (1.x = auto-submit)
+git push origin v1.0.6
+# …or a binary-only build:
+git tag v0.0.32           # 0.0.x = build + upload, no store submit
+git push origin v0.0.32
 ```
 
-The workflow parses the tag, patches `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in the pbxproj at build time, archives Release, exports an App Store IPA, uploads it to App Store Connect via `xcrun altool`, and finally creates a GitHub release with the IPA attached.
+The workflow at `.github/workflows/release.yml` (runs on `macos-26`) parses the tag, patches `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in the pbxproj at build time, archives Release, exports an App Store IPA, uploads it to App Store Connect via `xcrun altool`, and creates a GitHub release with the IPA attached. For `1.x.x` tags it then runs `scripts/submit_for_review.py`, which attaches the processed build, sets "What's New" from the tag message, and submits for review with `releaseType=AFTER_APPROVAL` (auto-publish once Apple approves — the iOS analogue of the Android `--track production --release-status completed` flow). Export compliance is answered by `ITSAppUsesNonExemptEncryption=false` in `Info.plist`. The submit step is gated on the tag's major version (`steps.ver.outputs.store`), so a `0.0.x` tag stops after the upload.
 
 Required GitHub Actions secrets (set once at `Settings → Secrets and variables → Actions`):
 

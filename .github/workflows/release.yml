@@ -41,9 +41,17 @@ jobs:
           TAG="${GITHUB_REF##*/}"           # e.g. v0.0.6
           VERSION="${TAG#v}"                # 0.0.6
           BUILD="${VERSION##*.}"            # 6 — patch component as build number
+          MAJOR="${VERSION%%.*}"            # 0 (binary build) or 1+ (store release)
+          # Versioning policy: 0.0.x tags are binary/TestFlight builds only;
+          # 1.x.x+ tags are public App Store releases that get auto-submitted
+          # for review. Gate the submit step on this so a dev tag can never
+          # publish (and a 0.0.x couldn't supersede the live 1.0.x anyway).
+          if [ "$MAJOR" -ge 1 ]; then STORE=true; else STORE=false; fi
           echo "tag=$TAG"          >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
           echo "build=$BUILD"      >> "$GITHUB_OUTPUT"
+          echo "store=$STORE"      >> "$GITHUB_OUTPUT"
+          echo "Tag $TAG → version $VERSION, build $BUILD, store-release=$STORE"
 
       - name: Patch MARKETING_VERSION + CURRENT_PROJECT_VERSION in pbxproj
         run: |
@@ -195,6 +203,9 @@ jobs:
             || echo "Release may already exist — skipping."
 
       - name: Submit for App Store review (auto-publish on approval)
+        # Only public store-release tags (1.x.x+) auto-submit; 0.0.x tags are
+        # binary/TestFlight builds and stop after the upload above.
+        if: steps.ver.outputs.store == 'true'
         # Mirrors the Android "production track, status=completed" flow: once
         # the build finishes processing, attach it to the version, set
         # "What's New" from the tag/commit message, and submit for review with
