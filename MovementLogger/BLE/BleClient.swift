@@ -110,10 +110,16 @@ final class BleClient: NSObject {
     // timers alive during the quiet moments between BLE notifications (e.g. the
     // 500 ms LIST-inactivity wait, the post-START_LOG sleep, gaps between READ
     // chunks), we also hold a UIApplication background-task assertion while a
-    // peripheral is connected. iOS extends that assertion as long as BLE traffic
-    // keeps arriving, so a long READ doesn't get suspended even if the user
-    // switches apps.
+    // peripheral is connected. A single `beginBackgroundTask` only grants a
+    // finite slice (~30 s on modern iOS) and is NOT auto-extended by BLE
+    // traffic — so we RENEW it: the expiration handler immediately starts a
+    // fresh assertion before ending the old one, keeping the worker alive
+    // across the lock screen for the whole connected session (gated by
+    // `bgRenew` so a Disconnect/close stops the chain).
     private var bgTaskID: UIBackgroundTaskIdentifier = .invalid
+    /// While true, an expiring background assertion re-arms a new one. Set on
+    /// connect, cleared on disconnect/close so the renewal chain terminates.
+    private var bgRenew: Bool = false
 
     override init() {
         var ec: AsyncStream<BleEvent>.Continuation!
@@ -175,18 +181,31 @@ final class BleClient: NSObject {
         // UIApplication APIs must be touched on the main actor.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.bgRenew = true
             if self.bgTaskID != .invalid { return }
-            self.bgTaskID = UIApplication.shared.beginBackgroundTask(withName: "ble-sync") { [weak self] in
-                // Expiration handler — iOS is about to suspend us. End the
-                // assertion so the system doesn't kill the app outright.
-                self?.endBackgroundAssertion()
-            }
+            self.startBgAssertionOnMain()
+        }
+    }
+
+    /// Start one background-task assertion. Its expiration handler re-arms a
+    /// fresh assertion (when `bgRenew`) BEFORE ending the old one, so there's
+    /// never a window with zero assertions where iOS could suspend us. Must
+    /// run on the main thread (UIKit invokes the expiration handler on main).
+    private func startBgAssertionOnMain() {
+        let app = UIApplication.shared
+        self.bgTaskID = app.beginBackgroundTask(withName: "ble-sync") { [weak self] in
+            guard let self = self else { return }
+            let expiring = self.bgTaskID
+            self.bgTaskID = .invalid
+            if self.bgRenew { self.startBgAssertionOnMain() }
+            if expiring != .invalid { app.endBackgroundTask(expiring) }
         }
     }
 
     private func endBackgroundAssertion() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            self.bgRenew = false
             guard self.bgTaskID != .invalid else { return }
             UIApplication.shared.endBackgroundTask(self.bgTaskID)
             self.bgTaskID = .invalid
@@ -644,11 +663,16 @@ final class BleClient: NSObject {
             peripheral?.discoverServices(nil)
         case .disconnected(let err):
             if let err = err { emitErr("disconnected: \(err.localizedDescription)") }
-            let wasTransfer: Bool = { if case .reading = op { return true } else { return false } }()
-            if wasTransfer, lastConnectedId != nil, reconnect == nil {
-                // Mid-READ remote drop: keep the partial (disconnectInner
-                // emits .readAborted) and auto-reconnect instead of
-                // surfacing a hard .disconnected (desktop v0.0.11/12).
+            if lastConnectedId != nil, reconnect == nil {
+                // Auto-reconnect on ANY unexpected drop for a known box, not
+                // just mid-READ. A lock-screen suspend can drop an *idle*
+                // link; without this it would hard-disconnect straight to the
+                // Connect screen. `armReconnect` is a no-op when
+                // `lastConnectedId` is nil — a user-initiated Disconnect
+                // clears it first (see `.disconnect`), so a deliberate
+                // disconnect still ends cleanly instead of bouncing back. A
+                // mid-READ partial is still preserved: `armReconnect` →
+                // `disconnectInner(emitEvent: false)` emits `.readAborted`.
                 armReconnect()
             } else if reconnect == nil {
                 disconnectInner(emitEvent: true)
