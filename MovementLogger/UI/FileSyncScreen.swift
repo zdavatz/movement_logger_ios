@@ -86,6 +86,18 @@ private struct ConnectionBar: View {
                 Spacer()
             }
             if vm.connection == .connected {
+                // Post-connect SET_TIME settle: the box is stamping its
+                // `# SYNC` clock anchor and drops a too-early file command,
+                // so the first List/Download is held ~2 s. Show why, so the
+                // held tap doesn't read as a freeze.
+                if vm.clockSyncing {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Syncing box clock… first List/Download starts in a moment")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 HStack {
                     Toggle(isOn: Binding(
                         get: { vm.keepSynced },

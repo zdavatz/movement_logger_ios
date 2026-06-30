@@ -110,6 +110,13 @@ final class FileSyncViewModel {
     /// the next `.connected` (desktop v0.0.9). Persists across the
     /// disconnect on purpose.
     var transferInterrupted: Bool = false
+    /// True during the post-connect SET_TIME settle window (~2 s): the box
+    /// is busy writing its `# SYNC` anchor and silently drops a file command
+    /// that arrives too soon, so `BleClient` holds the first LIST/READ until
+    /// the window closes. Drives a "syncing box clock…" hint so that held
+    /// first command doesn't look like a frozen tap (see settle notes in
+    /// CLAUDE.md). Mirror of `BleClient.setTimeSettleMs`.
+    var clockSyncing: Bool = false
     var log: [String] = []
     var sessionDurationSeconds: Int = 1800  // 30-min default, matches desktop
     var sessionRunning: SessionRunning? = nil
@@ -634,6 +641,14 @@ final class FileSyncViewModel {
                 try? await Task.sleep(for: .milliseconds(500))
                 guard let self = self, self.connection == .connected else { return }
                 self.ble.send(.setTime(epochMs: Int64(Date().timeIntervalSince1970 * 1000)))
+                // Light up the settle hint for the same ~2 s window the BLE
+                // worker holds the first file command, so a List/Download tap
+                // in that window reads as "waiting on the box" not "frozen".
+                self.clockSyncing = true
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .milliseconds(2000))
+                    self?.clockSyncing = false
+                }
                 // Resume after an interrupted transfer (desktop v0.0.9) or a
                 // "Keep synced" reconnect: a fresh sync pass skips complete
                 // files and re-pulls only the unfinished tail. Another 500 ms
