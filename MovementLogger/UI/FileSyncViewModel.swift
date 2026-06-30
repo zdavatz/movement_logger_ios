@@ -147,6 +147,24 @@ final class FileSyncViewModel {
     /// download), so `.readDone` knows whether to advance the queue.
     /// Public-read so the UI can show progress for the in-flight file.
     private(set) var syncInFlight: String? = nil
+    /// Manual (button-tap) download queue. The BLE worker is single-op, so
+    /// tapping Download on a second file while the first is still streaming
+    /// used to be rejected by the worker ("another op in flight") and the
+    /// row stuck forever. Instead we queue taps here and drain them strictly
+    /// one-at-a-time — the next READ is issued only when the worker goes
+    /// idle (`pumpManualQueue`, from `.readDone` / `.listDone`). Distinct
+    /// from `syncQueue`: that's the auto-sync pass; this is explicit taps.
+    private var manualQueue: [RemoteFile] = []
+    /// Names of files queued behind the in-flight download. The row shows
+    /// "Queued" until its turn (public so the UI can read it).
+    private(set) var queuedDownloads: [String] = []
+    /// True while a brief single-op command that isn't reflected in the UI
+    /// state (DELETE, GET/SET log mode) is outstanding on the worker.
+    /// `pumpManualQueue` consults it so a Delete-then-Download or mode-
+    /// toggle-then-Download double-tap doesn't issue a READ the worker
+    /// would reject. Set when such a command is sent; cleared on its
+    /// completion event or any `.error`, and on `.disconnected`.
+    private var briefOpInFlight = false
     /// Total file count of the current sync pass (set at `startSyncPass`,
     /// reset on completion). Used to render "Syncing X of N".
     private(set) var syncPassTotal: Int = 0
@@ -291,7 +309,50 @@ final class FileSyncViewModel {
         ble.send(.list)
     }
 
+    /// Manual Download tap. Enqueues the file and drains the queue serially
+    /// — the BLE worker is single-op, so two files can never be in flight at
+    /// once. Tapping a second file while a big one streams now waits its
+    /// turn (row shows "Queued") instead of getting wedged.
     func download(_ file: RemoteFile) {
+        // Already mirrored? Nothing to do (skip even queueing).
+        let offset = mirrorOffset(name: file.name, boxSize: file.size)
+        if file.size > 0, offset >= file.size {
+            logLine("\(file.name) already mirrored (\(file.size) B)")
+            return
+        }
+        // Dedupe: ignore a re-tap of a file already downloading or queued.
+        if downloads[file.name] != nil || manualQueue.contains(where: { $0.name == file.name }) {
+            return
+        }
+        manualQueue.append(file)
+        queuedDownloads = manualQueue.map { $0.name }
+        logLine("queued \(file.name) (\(manualQueue.count) waiting)")
+        pumpManualQueue()
+    }
+
+    /// Issue the next queued manual download iff the worker is idle — no
+    /// LIST, no READ (manual or sync) in flight, no firmware upload, and
+    /// connected. Called after each tap and whenever an op completes
+    /// (`.readDone` / `.listDone` / `.deleteDone` / `.logMode` / `.error`).
+    /// The idle guard is what keeps downloads strictly serial. Nonisolated
+    /// to match `download()` / `startRead()` — in practice always reached
+    /// from a main-thread context (SwiftUI tap or the @MainActor onEvent).
+    private func pumpManualQueue() {
+        guard connection == .connected,
+              !listing, downloads.isEmpty, syncInFlight == nil,
+              fwUpload == nil, !briefOpInFlight
+        else { return }
+        guard !manualQueue.isEmpty else { return }
+        let next = manualQueue.removeFirst()
+        queuedDownloads = manualQueue.map { $0.name }
+        startRead(next)
+    }
+
+    /// Actually start a READ: record the resume offset, show the progress
+    /// row, send the command. Shared by the manual queue (`pumpManualQueue`)
+    /// and the auto-sync queue (`pumpSyncQueue`); callers guarantee the
+    /// worker is idle, so this never collides.
+    private func startRead(_ file: RemoteFile) {
         // Live-mirror: resume/grow from whatever is already on disk. The
         // firmware seeks to `offset`, so an interrupted file continues
         // and a grown log only fetches its new tail (desktop v0.0.14).
@@ -385,6 +446,7 @@ final class FileSyncViewModel {
 
     func delete(_ file: RemoteFile) {
         deleteError = nil  // clear a stale rejection on a fresh attempt
+        briefOpInFlight = true
         logLine("DELETE \(file.name)")
         ble.send(.delete(name: file.name))
     }
@@ -455,6 +517,7 @@ final class FileSyncViewModel {
 
     /// Persist the box log-mode and remember it locally.
     func setLogMode(_ manual: Bool) {
+        briefOpInFlight = true
         logLine("SET_MODE \(manual ? "manual" : "auto")")
         ble.send(.setLogMode(manual: manual))
     }
@@ -474,6 +537,9 @@ final class FileSyncViewModel {
         case .status(let msg): logLine(msg)
         case .error(let msg):
             logLine("ERROR: \(msg)")
+            // Any op that ended in an error releases the brief-op guard
+            // (DELETE / mode-query aborts all surface here).
+            briefOpInFlight = false
             // Surface DELETE rejections prominently — the box refuses
             // some Debug rows (8.3-name miss → NOT_FOUND, >15 chars →
             // BAD_REQUEST, logging active → BUSY). Without this it only
@@ -524,6 +590,9 @@ final class FileSyncViewModel {
                     syncStatus = "Sync aborted (BLE error) — try again"
                 }
             }
+            // A brief op (DELETE / mode) may have just freed the worker —
+            // let any queued manual download proceed.
+            pumpManualQueue()
         case .discovered(let id, let name, let rssi):
             if !discovered.contains(where: { $0.identifier == id }) {
                 discovered.append(DiscoveredDevice(identifier: id, name: name, rssi: rssi))
@@ -543,6 +612,7 @@ final class FileSyncViewModel {
             // Ask the box which log-mode it's in so the UI toggle
             // reflects reality. Legacy PumpTsueri ignores 0x07 (no
             // reply) — the toggle just stays at its last/unknown state.
+            briefOpInFlight = true
             ble.send(.getLogMode)
             // Stamp the box's open Sens/Gps CSVs with the phone's wall clock
             // (SET_TIME 0x08) on EVERY connect — "first time and every time
@@ -577,6 +647,9 @@ final class FileSyncViewModel {
             connection = .disconnected
             connectedBoxId = nil
             deleteError = nil
+            briefOpInFlight = false
+            manualQueue = []
+            queuedDownloads = []
             syncing = false
             syncPending = false
             syncQueue = []
@@ -609,6 +682,8 @@ final class FileSyncViewModel {
                 syncPending = false
                 runSyncDiff()
             }
+            // Drain any downloads the user queued while the LIST ran.
+            pumpManualQueue()
         case .readStarted:
             break
         case .readProgress(let name, let bytesDone):
@@ -638,6 +713,10 @@ final class FileSyncViewModel {
                 syncInFlight = nil
                 pumpSyncQueue()
             }
+            // Worker just freed up — start the next queued manual download
+            // (no-op if the sync pass above re-armed a READ, since the idle
+            // guard then fails).
+            pumpManualQueue()
         case .readAborted(let name, let content, let base):
             // Link dropped / stalled mid-file. Persist the partial into
             // the mirror so the resume continues from the *true* break
@@ -652,16 +731,20 @@ final class FileSyncViewModel {
                 "(\(have) B of \(name) kept)"
             logLine("kept \(have) B of \(name) for resume")
         case .deleteDone(let name):
+            briefOpInFlight = false
             files.removeAll { $0.name == name }
             deleteError = nil
             logLine("deleted \(name)")
+            pumpManualQueue()
         case .logMode(let manual):
+            briefOpInFlight = false
             logModeManual = manual
             // Persist + reschedule — the gating policy is sensitive to
             // MANUAL (which disables BG sync).
             AgentConfig.logModeManual = manual
             BackgroundSync.refresh()
             logLine("box log mode: \(manual ? "manual" : "auto")")
+            pumpManualQueue()
         case .sample(let s):
             onSample(s)
         case .fwUploadStarted(let total):
@@ -772,7 +855,7 @@ final class FileSyncViewModel {
         }
         let next = syncQueue.removeFirst()
         syncInFlight = next.name
-        download(next)
+        startRead(next)
     }
 
     // ---------------- Live mirror (desktop v0.0.14) ---------------------------

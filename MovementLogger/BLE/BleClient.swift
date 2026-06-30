@@ -61,6 +61,16 @@ final class BleClient: NSObject {
     private var streamSubscribeKicked: Bool = false
     private var op: CurrentOp = .idle
     private var scanning: Bool = false
+    /// Monotonic deadline (`now()` clock, ms) until which file commands must
+    /// hold off because the box is still digesting a SET_TIME. The firmware
+    /// holds exactly one pending command; right after `0x08` it's busy
+    /// appending the `# SYNC` anchor to the open CSV on SD and **silently
+    /// drops** the next FileCmd that arrives too soon — so a LIST/READ tapped
+    /// a few hundred ms after connect would never be answered and trip the
+    /// 20 s watchdog. Confirmed on Android's wire trace: LIST timed out only
+    /// when it followed `0x08` by ~0.5 s, and always succeeded with a ≥1.8 s
+    /// gap. `awaitCmdSettle()` enforces the gap. 0 = no pending settle.
+    private var setTimeSettleUntil: Int64 = 0
     /// Identifier of the box we last successfully subscribed to — the
     /// reconnect target after an unexpected mid-transfer drop.
     private var lastConnectedId: UUID?
@@ -213,6 +223,14 @@ final class BleClient: NSObject {
     // -------------------------------------------------------------------------
 
     private func handleCommand(_ cmd: BleCmd) async {
+        // Hold file commands until the post-SET_TIME settle elapses (see
+        // `setTimeSettleUntil`). Connection-control + the time write itself
+        // never wait — only the FileCmd ops the box would otherwise drop.
+        switch cmd {
+        case .list, .read, .delete, .setLogMode, .getLogMode:
+            await awaitCmdSettle()
+        default: break
+        }
         switch cmd {
         case .scan: startScan()
         case .connect(let id): connect(identifier: id)
@@ -431,7 +449,21 @@ final class BleClient: NSObject {
         var payload = Data([FileSyncProtocol.opSetTime])
         withUnsafeBytes(of: &le) { payload.append(contentsOf: $0) }
         if !writeCmdBytes(payload) { return }
+        // Box is now busy writing the # SYNC anchor; hold the next FileCmd
+        // for the settle window so the firmware doesn't drop it.
+        setTimeSettleUntil = now() + Self.setTimeSettleMs
         emitStatus("SET_TIME sent — box clock anchored to phone")
+    }
+
+    /// Block until the post-SET_TIME settle window elapses. The worker is
+    /// single-op, so stalling here can't starve a concurrent transfer — it
+    /// just spaces the time write from the following command. Only ever
+    /// waits once per connect (the deadline isn't re-armed).
+    private func awaitCmdSettle() async {
+        let wait = setTimeSettleUntil - now()
+        if wait > 0 {
+            try? await Task.sleep(for: .milliseconds(Int(wait)))
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1105,6 +1137,10 @@ final class BleClient: NSObject {
     private static let watchdogTickMs: Int = 200
     private static let opIdleTimeoutMs: Int64 = 20_000
     private static let listInactivityDoneMs: Int64 = 500
+    /// How long the box stays busy after SET_TIME (0x08) before it can
+    /// service the next FileCmd. Measured ≥1.8 s works, ~0.5 s fails; 2 s
+    /// gives margin for an SD flush. One-time per connect.
+    private static let setTimeSettleMs: Int64 = 2_000
     // Auto-reconnect tunables.
     //
     // Two regimes (mirrors desktop v0.0.19): bounded when Keep-synced is

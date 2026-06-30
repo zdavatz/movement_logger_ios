@@ -523,6 +523,7 @@ private struct FileRow: View {
 
     var body: some View {
         let progress = vm.downloads[file.name]
+        let queued = vm.queuedDownloads.contains(file.name)
         let savedPath = vm.savedPaths[file.name]
         let deleteReason = deleteUnsupported(file.name)
         // Fully downloaded = local mirror has at least the box's size.
@@ -551,13 +552,15 @@ private struct FileRow: View {
                     }
                     .buttonStyle(.bordered)
                 } else {
-                    Button(progress == nil ? "Download" : "…") { vm.download(file) }
+                    Button(progress != nil ? "…" : (queued ? "Queued" : "Download")) {
+                        vm.download(file)
+                    }
                         .buttonStyle(.bordered)
-                        .disabled(progress != nil || vm.firmwareUploading)
+                        .disabled(progress != nil || queued || vm.firmwareUploading)
                 }
                 Button("Delete") { vm.delete(file) }
                     .buttonStyle(.bordered)
-                    .disabled(progress != nil || deleteReason != nil || vm.firmwareUploading)
+                    .disabled(progress != nil || queued || deleteReason != nil || vm.firmwareUploading)
             }
             if let reason = deleteReason {
                 Text("Can't delete: \(reason)")
