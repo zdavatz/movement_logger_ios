@@ -213,13 +213,20 @@ def delete_stale_editable_versions(c: Client, app_id: str, keep_version: str) ->
     stale one (e.g. a prior release wedged by a failed auto-submit) must be
     removed before a new version can be created. Never touches LOCKED (live /
     in-review) versions."""
-    vers = c.get(f"/apps/{app_id}/appStoreVersions", params={"limit": 20})["data"]
+    vers = c.get(f"/apps/{app_id}/appStoreVersions", params={"limit": 50})["data"]
     for v in vers:
-        vs = v["attributes"]["versionString"]
-        state = v["attributes"]["appStoreState"]
-        if vs != keep_version and state in EDITABLE_STATES:
-            print(f"  deleting stale editable AppStoreVersion {vs} "
-                  f"(state={state}) — it blocks creating {keep_version}")
+        a = v["attributes"]
+        vs = a["versionString"]
+        # The attribute was renamed appStoreState -> state; accept either.
+        state = a.get("appStoreState") or a.get("state") or "?"
+        plat = a.get("platform", "?")
+        print(f"  existing version {vs} (platform={plat}, state={state})")
+        # Delete anything editable that's in our way: a different versionString
+        # that is NOT live/in-review (LOCKED). Broader than EDITABLE_STATES so
+        # an unexpected state string still gets cleared rather than blocking us.
+        if vs != keep_version and plat == PLATFORM and state not in LOCKED_STATES:
+            print(f"  deleting stale AppStoreVersion {vs} (state={state}) "
+                  f"— it blocks creating {keep_version}")
             c.delete(f"/appStoreVersions/{v['id']}")
 
 
