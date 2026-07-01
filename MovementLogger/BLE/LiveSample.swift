@@ -35,6 +35,8 @@ struct LiveSample: Equatable {
     let gpsFixQ: UInt8
     /// Satellites used in the current fix.
     let gpsNsat: UInt8
+    /// Strongest satellite C/N0 in dB-Hz (from GSV); 0 = no data. Antenna-quality metric.
+    let gpsCn0Max: UInt8
     let gpsValid: Bool
     let loggingActive: Bool
     let lowBattery: Bool
@@ -151,6 +153,7 @@ struct LiveSample: Equatable {
                 gpsCourseCdeg: Int16(littleEndian: i16(40)),
                 gpsFixQ: raw[42],
                 gpsNsat: raw[43],
+                gpsCn0Max: raw[45],
                 gpsValid: flags & 0x01 != 0,
                 loggingActive: flags & 0x04 != 0,
                 lowBattery: flags & 0x02 != 0
@@ -167,6 +170,7 @@ struct LiveSample: Equatable {
         lhs.gpsAltM == rhs.gpsAltM && lhs.gpsSpeedCmh == rhs.gpsSpeedCmh &&
         lhs.gpsCourseCdeg == rhs.gpsCourseCdeg &&
         lhs.gpsFixQ == rhs.gpsFixQ && lhs.gpsNsat == rhs.gpsNsat &&
+        lhs.gpsCn0Max == rhs.gpsCn0Max &&
         lhs.gpsValid == rhs.gpsValid && lhs.loggingActive == rhs.loggingActive &&
         lhs.lowBattery == rhs.lowBattery
     }

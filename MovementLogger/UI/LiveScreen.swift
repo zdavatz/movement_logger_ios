@@ -166,6 +166,12 @@ private struct ReadoutGrid: View {
                        c: String(format: "%.2f km/h  (%.1f°)",
                                  Double(s.gpsSpeedCmh) / 100,
                                  Double(s.gpsCourseCdeg) / 100))
+            ReadoutRow(label: "GPS C/N0",
+                       a: s.gpsCn0Max > 0 ? "\(s.gpsCn0Max) dB-Hz max" : "—",
+                       b: (s.gpsCn0Max == 0 ? "no GSV / no data"
+                           : (s.gpsCn0Max >= 40 ? "good antenna"
+                           : (s.gpsCn0Max >= 30 ? "ok" : "weak signal"))),
+                       c: "")
             HStack(alignment: .firstTextBaseline) {
                 label("Flags")
                 HStack(spacing: 12) {
