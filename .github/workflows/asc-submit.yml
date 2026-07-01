@@ -1,0 +1,75 @@
+name: Submit uploaded build to App Store review
+
+# Manual, build-decoupled submit. Use when a binary is ALREADY uploaded to
+# App Store Connect (e.g. the Release workflow built + uploaded it but its
+# auto-submit step failed) and you just want to (re)submit it for review
+# WITHOUT rebuilding. Runs the same scripts/submit_for_review.py the Release
+# workflow uses, against an already-processed build — pure API calls, so it
+# runs on Ubuntu in ~1 min and can be re-run safely (the script is idempotent
+# and self-heals a stale editable version left by a prior failed submit).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Marketing version already uploaded (e.g. 1.0.7)'
+        required: true
+      build:
+        description: 'Build number / CFBundleVersion (e.g. 7)'
+        required: true
+      notes:
+        description: "What's New text (plain — no HTML / angle brackets)"
+        required: false
+        default: 'GPS Debug: u-blox antenna survey (fix quality, per-signal C/N0, antenna/RF health) tunnelled over BLE. Needs box firmware v0.0.18 or newer.'
+      release_type:
+        description: 'AFTER_APPROVAL (auto-publish once approved) or MANUAL'
+        required: false
+        default: 'AFTER_APPROVAL'
+
+permissions:
+  contents: read
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BUNDLE_ID: ch.pumptsueri.movementlogger
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install App Store Connect API deps
+        run: pip install --quiet PyJWT requests cryptography
+
+      - name: Stage App Store Connect API key
+        env:
+          API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          API_KEY_ID:        ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          if [ -z "$API_KEY_P8_BASE64" ]; then
+            echo "::error::APPLE_API_KEY_P8_BASE64 secret is empty."
+            exit 1
+          fi
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$API_KEY_P8_BASE64" | base64 --decode \
+            > ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
+
+      - name: Submit for review
+        env:
+          APPLE_API_KEY_ID:    ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          BUNDLE_ID:           ${{ env.BUNDLE_ID }}
+          NOTES:               ${{ github.event.inputs.notes }}
+        run: |
+          printf '%s\n' "$NOTES" > "$RUNNER_TEMP/notes.txt"
+          echo "What's New:"; cat "$RUNNER_TEMP/notes.txt"
+          python scripts/submit_for_review.py \
+            --version "${{ github.event.inputs.version }}" \
+            --build "${{ github.event.inputs.build }}" \
+            --notes-file "$RUNNER_TEMP/notes.txt" \
+            --release-type "${{ github.event.inputs.release_type }}"

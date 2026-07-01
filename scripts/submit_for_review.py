@@ -124,6 +124,10 @@ class Client:
         r = self.s.patch(f"{API_BASE}{path}", json=body); self._raise(r)
         return r.json() if r.text else {}
 
+    def delete(self, path):
+        r = self.s.delete(f"{API_BASE}{path}"); self._raise(r)
+        return r.json() if r.text else {}
+
     @staticmethod
     def _raise(r):
         if r.status_code >= 300:
@@ -185,6 +189,13 @@ def find_or_create_version(c: Client, app_id: str, version: str,
             })["data"]
         if state in LOCKED_STATES:
             sys.exit(f"AppStoreVersion {version} is {state} — cannot edit/submit it")
+    # Apple allows only ONE editable version at a time, so a leftover editable
+    # version at a DIFFERENT string (e.g. a prior release whose auto-submit
+    # failed) blocks creating this one with 409 RELATIONSHIP.INVALID ("cannot
+    # create a new version in the current state"). Clear those stale editables
+    # first so a wedged prior release can't block the next one. Only ever
+    # deletes EDITABLE (never LOCKED = live/in-review) versions.
+    delete_stale_editable_versions(c, app_id, keep_version=version)
     print(f"  creating AppStoreVersion {version} (releaseType={release_type})")
     return c.post("/appStoreVersions", {
         "data": {
@@ -196,23 +207,42 @@ def find_or_create_version(c: Client, app_id: str, version: str,
     })["data"]
 
 
+def delete_stale_editable_versions(c: Client, app_id: str, keep_version: str) -> None:
+    """Delete any editable AppStoreVersion whose versionString differs from
+    keep_version. Apple permits only one editable version at a time, so a
+    stale one (e.g. a prior release wedged by a failed auto-submit) must be
+    removed before a new version can be created. Never touches LOCKED (live /
+    in-review) versions."""
+    vers = c.get(f"/apps/{app_id}/appStoreVersions", params={"limit": 20})["data"]
+    for v in vers:
+        vs = v["attributes"]["versionString"]
+        state = v["attributes"]["appStoreState"]
+        if vs != keep_version and state in EDITABLE_STATES:
+            print(f"  deleting stale editable AppStoreVersion {vs} "
+                  f"(state={state}) — it blocks creating {keep_version}")
+            c.delete(f"/appStoreVersions/{v['id']}")
+
+
 def set_whats_new(c: Client, version_id: str, notes: str) -> None:
     locs = c.get(f"/appStoreVersions/{version_id}/appStoreVersionLocalizations")["data"]
     if not locs:
         print("  no localizations to set whatsNew on — skipping")
         return
-    target = next((l for l in locs if l["attributes"]["locale"].startswith("en")), locs[0])
-    loc_id = target["id"]
-    locale = target["attributes"]["locale"]
-    try:
-        c.patch(f"/appStoreVersionLocalizations/{loc_id}", {
-            "data": {"type": "appStoreVersionLocalizations", "id": loc_id,
-                     "attributes": {"whatsNew": notes}},
-        })
-        print(f"  set whatsNew on {locale} ({len(notes)} chars)")
-    except RuntimeError as e:
-        # First-ever version forbids whatsNew (nothing to be "new" over).
-        print(f"  WARN: could not set whatsNew on {locale} (first version?) — {e}")
+    # Set whatsNew on EVERY localization — each locale's field is independently
+    # "required" for submission, so setting only English left e.g. de-DE empty
+    # and 409'd the submit with ATTRIBUTE.REQUIRED.
+    for loc in locs:
+        loc_id = loc["id"]
+        locale = loc["attributes"]["locale"]
+        try:
+            c.patch(f"/appStoreVersionLocalizations/{loc_id}", {
+                "data": {"type": "appStoreVersionLocalizations", "id": loc_id,
+                         "attributes": {"whatsNew": notes}},
+            })
+            print(f"  set whatsNew on {locale} ({len(notes)} chars)")
+        except RuntimeError as e:
+            # First-ever version forbids whatsNew (nothing to be "new" over).
+            print(f"  WARN: could not set whatsNew on {locale} (first version?) — {e}")
 
 
 def ensure_encryption_answer(c: Client, build_id: str) -> None:
