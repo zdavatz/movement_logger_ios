@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -297,14 +298,26 @@ def submit_for_review(c: Client, app_id: str, version_id: str, do_submit: bool) 
 # ---------------------------------------------------------------- main
 
 def clean_notes(raw: str) -> str:
-    """Drop commit trailers / the 🤖 line so they don't leak into whatsNew."""
+    """Drop commit trailers / the 🤖 line so they don't leak into whatsNew, and
+    strip anything Apple treats as markup. App Store Connect rejects a whatsNew
+    that contains `<...>` (it reads angle-bracketed tokens like `<label>` or
+    `<u8>` — common in commit messages — as HTML tags, error
+    ENTITY_ERROR.ATTRIBUTE.INVALID.INVALID_CHARACTERS), which then leaves the
+    required field empty and blocks the review submission. Neutralise the
+    brackets rather than deleting the words so the notes stay readable."""
     out = []
     for line in raw.splitlines():
         s = line.strip()
-        if s.startswith("Co-Authored-By:") or s.startswith("🤖"):
+        if s.startswith("Co-Authored-By:") or s.startswith("Claude-Session:") or s.startswith("🤖"):
             continue
         out.append(line)
-    return "\n".join(out).strip()
+    text = "\n".join(out).strip()
+    # Comparison operators first, so `>= v0.0.18` doesn't become `)= v0.0.18`.
+    text = text.replace(">=", "≥").replace("<=", "≤")
+    # `<label>` -> `(label)`; any bare `<` / `>` -> a paren so nothing reads as a tag.
+    text = re.sub(r"<([^>]*)>", r"(\1)", text)
+    text = text.replace("<", "(").replace(">", ")")
+    return text.strip()
 
 
 def main() -> None:
