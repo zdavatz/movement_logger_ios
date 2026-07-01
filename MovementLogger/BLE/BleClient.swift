@@ -54,6 +54,11 @@ final class BleClient: NSObject {
     private var cmdChar: CBCharacteristic?
     private var dataChar: CBCharacteristic?
     private var streamChar: CBCharacteristic?
+    /// True while the u-blox GPS bridge (opcode 0x0D) is active. FileData
+    /// notifies then carry raw UBX frames for the GPS Debug survey instead of
+    /// FileSync payloads, so they bypass the `op` state machine. Reset on
+    /// disconnect.
+    private var bridgeActive: Bool = false
     /// True once we've kicked off the SensorStream `setNotifyValue(true, …)`;
     /// resets on disconnect. Used to keep `onCharacteristicsDiscovered` (which
     /// fires once per discovered service) idempotent — it can be called
@@ -270,6 +275,8 @@ final class BleClient: NSObject {
         case .setTime(let ms): sendSetTime(epochMs: ms)
         case .uploadFirmware(let image, let sha): startFwUpload(image: image, sha256: sha)
         case .abortFirmware: abortFwUpload(reason: "cancelled by user")
+        case .gpsBridge(let on): sendGpsBridge(on: on)
+        case .ubxPoll(let frame): sendUbxPoll(frame: frame)
         }
     }
 
@@ -360,6 +367,7 @@ final class BleClient: NSObject {
         streamSubscribeKicked = false
         streamAsm.removeAll(keepingCapacity: true)
         streamAsmNext = 0
+        bridgeActive = false
         endBackgroundAssertion()
         if emitEvent { emit(.disconnected) }
     }
@@ -378,6 +386,34 @@ final class BleClient: NSObject {
         if !writeCmdBytes(Data([FileSyncProtocol.opList])) { return }
         op = .listing(line: "", lastProgress: now(), rowsSeen: 0)
         emitStatus("LIST sent")
+    }
+
+    /// Turn the u-blox GPS bridge on/off (opcode 0x0D). Fire-and-forget — the
+    /// box sends no FileData reply to the command itself; UBX reply frames
+    /// arrive later as bridged FileData notifies. Starting requires an idle op
+    /// (the survey and a FileSync READ can't share the FileData channel).
+    private func sendGpsBridge(on: Bool) {
+        if on {
+            guard case .idle = op else {
+                emitErr("another op is in flight — stop it before GPS Debug"); return
+            }
+        }
+        if !writeCmdBytes(Data([FileSyncProtocol.opGpsBridge, on ? 1 : 0])) {
+            bridgeActive = false   // link gone → nothing is bridging anymore
+            return
+        }
+        bridgeActive = on
+        emitStatus(on ? "GPS bridge on" : "GPS bridge off")
+    }
+
+    /// Forward one raw UBX poll frame to the u-blox (opcode 0x0E). No-op unless
+    /// the bridge is active. Poll frames are tiny (8 B) so a single
+    /// write-without-response fits any negotiated MTU.
+    private func sendUbxPoll(frame: Data) {
+        guard bridgeActive, !frame.isEmpty else { return }
+        var payload = Data([FileSyncProtocol.opUbxPoll])
+        payload.append(frame)
+        _ = writeCmdBytes(payload)
     }
 
     private func sendRead(name: String, size: Int64, offset: Int64) {
@@ -799,6 +835,12 @@ final class BleClient: NSObject {
     private func onNotification(charUUID: CBUUID, data: Data) {
         if charUUID == FileSyncProtocol.streamUUID {
             handleStreamNotify(data)
+            return
+        }
+        // GPS-bridge mode: FileData notifies carry raw u-blox UBX frames, not
+        // FileSync payloads — divert them to the survey and never touch `op`.
+        if bridgeActive {
+            emit(.ubxFrame(data))
             return
         }
         // FileData path — drive the in-flight op's state machine.

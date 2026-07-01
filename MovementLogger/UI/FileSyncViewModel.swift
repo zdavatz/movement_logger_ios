@@ -221,6 +221,13 @@ final class FileSyncViewModel {
     private let ble: BleClient
     private var eventTask: Task<Void, Never>?
 
+    /// GPS Debug survey (u-blox UBX poll over the BLE box-bridge). Observed
+    /// directly by `GpsDebugScreen`; driven through this VM so it shares the
+    /// one `BleClient`. `gpsSurveyActive` mirrors `gps.running` so the sync
+    /// loops back off while a survey owns the FileData channel.
+    let gps = GpsDebugModel()
+    private(set) var gpsSurveyActive: Bool = false
+
     private let tsFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss.SSS"
@@ -253,6 +260,10 @@ final class FileSyncViewModel {
         // on — fires from the @MainActor init, which is fine.
         self.keepSynced = AgentConfig.keepSynced
         self.logModeManual = AgentConfig.logModeManual
+        // Wire the GPS Debug survey to the single BleClient.
+        self.gps.onSendBridge = { [weak self] on in self?.ble.send(.gpsBridge(on: on)) }
+        self.gps.onSendPoll = { [weak self] frame in self?.ble.send(.ubxPoll(frame)) }
+        self.gps.onRunningChanged = { [weak self] running in self?.gpsSurveyActive = running }
         self.eventTask = Task { [weak self] in
             guard let stream = self?.ble.events else { return }
             for await event in stream {
@@ -353,7 +364,7 @@ final class FileSyncViewModel {
     private func pumpManualQueue() {
         guard connection == .connected, !reconnecting,
               !listing, downloads.isEmpty, syncInFlight == nil,
-              fwUpload == nil, !briefOpInFlight
+              fwUpload == nil, !briefOpInFlight, !gpsSurveyActive
         else { return }
         // Skip past any queued files that turn out already-mirrored (they
         // issue no READ, so they'd otherwise strand the queue). Stop as soon
@@ -396,6 +407,27 @@ final class FileSyncViewModel {
     /// transfer (issues #3, #14). Additive only: never issues DELETE.
     func syncNow() { startSyncPass(reason: "Sync now") }
 
+    /// Start the GPS Debug survey (u-blox UBX poll over the BLE bridge). Needs a
+    /// connected, idle box — the survey and a FileSync READ can't share the
+    /// FileData channel, so we refuse while anything else is in flight.
+    func startGpsDebug() {
+        guard connection == .connected, !reconnecting else {
+            logLine("GPS Debug: connect a box first"); return
+        }
+        guard !listing, downloads.isEmpty, syncInFlight == nil, fwUpload == nil,
+              !briefOpInFlight, !transferInterrupted
+        else { logLine("GPS Debug: box busy — wait for sync/downloads to finish"); return }
+        logLine("GPS Debug survey started (label \(gps.label))")
+        gps.start()
+    }
+
+    /// Stop the GPS Debug survey and turn the box bridge off.
+    func stopGpsDebug() {
+        guard gpsSurveyActive else { return }
+        gps.stop()
+        logLine("GPS Debug survey stopped (\(gps.epochCount) epochs)")
+    }
+
     /// "Keep synced" — while connected and idle, re-run a sync pass every
     /// 30 s so a continuously-growing log keeps mirrored (desktop
     /// v0.0.14). The pass itself only fetches each file's new tail.
@@ -430,7 +462,7 @@ final class FileSyncViewModel {
         // re-runs `startSyncPass` itself with reason "Resume".
         guard keepSynced, connection == .connected,
               !listing, !syncing, downloads.isEmpty, syncInFlight == nil,
-              !transferInterrupted
+              !transferInterrupted, !gpsSurveyActive
         else { return }
         startSyncPass(reason: "Keep synced")
     }
@@ -689,6 +721,9 @@ final class FileSyncViewModel {
         case .disconnected:
             connection = .disconnected
             reconnecting = false
+            // A GPS Debug survey can't continue without the link — stop it so
+            // its files close cleanly and the poll timer doesn't keep firing.
+            if gpsSurveyActive { gps.stop() }
             connectedBoxId = nil
             deleteError = nil
             briefOpInFlight = false
@@ -814,6 +849,10 @@ final class FileSyncViewModel {
                 ? "✅ \(message) — reconnect in a few seconds"
                 : "⚠ Firmware update failed: \(message)"
             logLine(success ? "FW upload done: \(message)" : "ERROR: FW upload: \(message)")
+        case .ubxFrame(let data):
+            // Raw bridged u-blox UBX reply — feed the GPS Debug survey. Only
+            // meaningful while a survey is running; a no-op otherwise.
+            gps.feed(data)
         }
     }
 
