@@ -88,6 +88,66 @@ final class FileSyncViewModel {
     var connection: ConnectionStatus = .disconnected
     var scanning: Bool = false
     var discovered: [DiscoveredDevice] = []
+
+    /// Compass hard-iron offset (mG) — single source of truth for the app.
+    /// Written by the Live tab's guided calibration and by `autoCalibrate`;
+    /// mirrored to `AgentConfig.magOffsetMg` for persistence.
+    var magOffsetMg: [Double]? = AgentConfig.magOffsetMg
+    /// One-tap direction calibration: bias subtracted from the heading.
+    var headingBiasDeg: Double = AgentConfig.headingBiasDeg ?? 0
+    /// Auto-calibration envelope — FLAT samples only (|az| >= 0.9 g). A
+    /// full flat rotation traces a symmetric circle in the mag X/Y plane,
+    /// so its min/max midpoints are a valid hard-iron estimate for X and
+    /// Y. Tilted samples are excluded: they expand the envelope
+    /// asymmetrically and drag the midpoint (the bug that overwrote a
+    /// good guided calibration with garbage). Z is never touched here —
+    /// it comes from the guided calibration only.
+    private var autoMin = [Double.infinity, Double.infinity]
+    private var autoMax = [-Double.infinity, -Double.infinity]
+
+    /// Wipe the compass calibration: hard-iron offset, direction bias and
+    /// the auto-cal envelope. The continuous auto-calibration then starts
+    /// learning from scratch (one flat rotation re-fills it).
+    func resetMagCalibration() {
+        magOffsetMg = nil
+        AgentConfig.magOffsetMg = nil
+        headingBiasDeg = 0
+        AgentConfig.headingBiasDeg = nil
+        autoMin = [Double.infinity, Double.infinity]
+        autoMax = [-Double.infinity, -Double.infinity]
+    }
+
+    /// Continuous, conservative auto-calibration from flat samples.
+    private func autoCalibrate(_ s: LiveSample) {
+        let ax = Double(s.accMg.0), ay = Double(s.accMg.1), az = Double(s.accMg.2)
+        // Flat + still: lid up or down, no big lateral acceleration.
+        guard abs(az) >= 900, abs(ax) <= 300, abs(ay) <= 300 else { return }
+        let m = [Double(s.magMg.0), Double(s.magMg.1)]
+        let tot = (m[0] * m[0] + m[1] * m[1]).squareRoot()
+        guard tot < 1500 else { return }
+        for i in 0..<2 {
+            autoMin[i] = min(autoMin[i], m[i])
+            autoMax[i] = max(autoMax[i], m[i])
+        }
+        let spanX = autoMax[0] - autoMin[0]
+        let spanY = autoMax[1] - autoMin[1]
+        // Accept only when both spans look like a full circle (>= 180 mG)
+        // AND are similar (a circle, not a stray arc) — asymmetric
+        // coverage must never produce an offset.
+        guard spanX >= 180, spanY >= 180,
+              max(spanX, spanY) / min(spanX, spanY) <= 1.8 else { return }
+        var off = magOffsetMg ?? [0, 0, 0]
+        let nx = (autoMax[0] + autoMin[0]) / 2
+        let ny = (autoMax[1] + autoMin[1]) / 2
+        // Apply only on a real change so we don't churn UserDefaults.
+        guard abs(nx - off[0]) > 10 || abs(ny - off[1]) > 10 else { return }
+        off[0] = nx
+        off[1] = ny
+        magOffsetMg = off
+        AgentConfig.magOffsetMg = off
+        print("[autocal] offset -> [\(Int(off[0])), \(Int(off[1])), \(Int(off[2]))] " +
+              "spanX=\(Int(spanX)) spanY=\(Int(spanY))")
+    }
     var files: [RemoteFile] = []
     var downloads: [String: DownloadProgress] = [:]
     var savedPaths: [String: String] = [:]
@@ -857,6 +917,7 @@ final class FileSyncViewModel {
     }
 
     private func onSample(_ s: LiveSample) {
+        autoCalibrate(s)
         let t0 = liveT0Ms ?? s.timestampMs
         if liveT0Ms == nil { liveT0Ms = t0 }
         let dt = Double(s.timestampMs &- t0) / 1000.0

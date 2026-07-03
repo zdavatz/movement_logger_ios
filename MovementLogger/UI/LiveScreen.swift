@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 
 /// Live tab — renders the most recent SensorStream snapshot at 0.5 Hz.
 ///
@@ -11,9 +12,6 @@ import SwiftUI
 struct LiveScreen: View {
     @Bindable var vm: FileSyncViewModel
     let onGoToSync: () -> Void
-    /// Compass hard-iron offset (mG) — loaded once, refreshed by the
-    /// "Calibrate compass" flow in `OrientationSection`.
-    @State private var magOffset: [Double]? = AgentConfig.magOffsetMg
 
     var body: some View {
         NavigationStack {
@@ -29,10 +27,12 @@ struct LiveScreen: View {
                         FreshnessStrip(live: vm.live)
                         Divider()
                         if let sample = vm.live.latestSample {
-                            ReadoutGrid(sample: sample, magOffset: magOffset)
+                            ReadoutGrid(sample: sample, magOffset: vm.magOffsetMg,
+                                        headingBias: vm.headingBiasDeg)
                             Spacer().frame(height: 8)
                             OrientationSection(live: vm.live, sample: sample,
-                                               magOffset: $magOffset)
+                                               magOffset: $vm.magOffsetMg,
+                                               headingBias: $vm.headingBiasDeg)
                             Spacer().frame(height: 8)
                             Text("Acc magnitude (g)").font(.subheadline).fontWeight(.semibold)
                             Sparkline(points: vm.live.accHistory,
@@ -114,6 +114,7 @@ private struct FreshnessStrip: View {
 private struct ReadoutGrid: View {
     let sample: LiveSample
     let magOffset: [Double]?
+    let headingBias: Double
 
     var body: some View {
         let s = sample
@@ -136,7 +137,8 @@ private struct ReadoutGrid: View {
             ReadoutRow(label: "Angles (°)",
                        a: String(format: "Roll %+6.1f", s.rollDeg()),
                        b: String(format: "Pitch %+6.1f", s.pitchDeg()),
-                       c: String(format: "Yaw %5.1f", s.headingDeg(magOffMg: magOffset)))
+                       c: String(format: "Yaw %5.1f",
+                                 normDeg(s.headingDeg(magOffMg: magOffset) - headingBias)))
             let accA = s.accAxisAnglesDeg()
             ReadoutRow(label: "Acc∠grav (°)",
                        a: String(format: "X %5.1f", accA.0),
@@ -235,75 +237,162 @@ private struct ReadoutRow: View {
 /// how-to text + the rotating 3D wireframe. Calibration collects per-axis
 /// mag min/max for 30 s while the user tumbles the box; the midpoints
 /// become the offset (persisted via `AgentConfig.magOffsetMg`).
+/// Wrap a degree value into [0, 360).
+private func normDeg(_ d: Double) -> Double {
+    var v = d.truncatingRemainder(dividingBy: 360)
+    if v < 0 { v += 360 }
+    return v
+}
+
 private struct OrientationSection: View {
     let live: LiveState
     let sample: LiveSample
     @Binding var magOffset: [Double]?
+    @Binding var headingBias: Double
 
-    @State private var calUntil: Date? = nil
-    @State private var calMin: [Double] = [.infinity, .infinity, .infinity]
-    @State private var calMax: [Double] = [-.infinity, -.infinity, -.infinity]
-    @State private var now = Date()
-    private let tick = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+    /// iPhone's own compass — reference readout next to the box heading.
+    @State private var phoneCompass = PhoneCompass()
 
     private static let howToCalibrate = """
-        How to calibrate: tap the button, then rotate the box slowly flat on \
-        the table through one full circle — pause about 3 s per quarter turn \
-        (the box sends one sample every 2 s). Then briefly tip it on its nose \
-        and on its side. The offset is stored and survives restarts. Calibrate \
-        away from laptops, speakers and steel surfaces; re-calibrate if the \
-        arrow stops following the rotation.
+        The compass auto-calibrates while this tab is open: rotate the box \
+        through one slow full circle and the offset is learned and stored by \
+        itself. Keep away from laptops, speakers and steel surfaces. Reset \
+        calibration wipes the learned offset and direction if something \
+        looks off.
         """
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 Text("Box orientation").font(.subheadline).fontWeight(.semibold)
-                if let until = calUntil {
-                    let left = max(0, Int(until.timeIntervalSince(now).rounded(.up)))
-                    Text("calibrating — tumble the box… \(left)s")
-                        .font(.subheadline).foregroundStyle(.orange)
-                } else {
-                    Button("Calibrate compass (30 s)") {
-                        calMin = [.infinity, .infinity, .infinity]
-                        calMax = [-.infinity, -.infinity, -.infinity]
-                        calUntil = Date().addingTimeInterval(30)
-                    }
-                    .buttonStyle(.bordered)
-                }
             }
-            if calUntil == nil, let off = magOffset {
+            do {
+                // THE calibration: hard-iron is learned automatically
+                // (autoCalibrate); the only thing the user must provide is
+                // one known direction. Box flat, USB-C end south, one tap.
+                let flat = abs(Double(sample.accMg.2)) >= 900
+                if let phone = phoneCompass.headingDeg {
+                    // Convention (fixed): FRONT = the USB-C connector end.
+                    // Lay the box parallel to the iPhone with the USB-C
+                    // end pointing the same way as the phone's top, one
+                    // tap — the phone's OS-calibrated compass is the
+                    // reference, no need to know south.
+                    Text("Front of the box = USB-C connector end. Lay the iPhone flat on the table pointing SOUTH, the box parallel next to it with the USB-C end also pointing south, then tap:")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    Button("Box parallel to iPhone — set direction") {
+                        let raw = sample.headingDeg(magOffMg: magOffset)
+                        headingBias = normDeg(raw - phone)
+                        AgentConfig.headingBiasDeg = headingBias
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!flat)
+                } else {
+                    Button("Nose points SOUTH — set direction") {
+                        let raw = sample.headingDeg(magOffMg: magOffset)
+                        headingBias = normDeg(raw - 180.0)
+                        AgentConfig.headingBiasDeg = headingBias
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!flat)
+                }
+                if !flat {
+                    Text("lay the box flat to set the direction")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Button("Reset calibration") {
+                    FileSyncViewModel.shared.resetMagCalibration()
+                }
+                .buttonStyle(.bordered)
+            }
+            if let off = magOffset {
                 Text(String(format: "offset [%+.0f %+.0f %+.0f] mG", off[0], off[1], off[2]))
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            // iPhone's own (OS-calibrated) compass as a reference readout —
+            // hold the phone away from the box, its magnets disturb it.
+            if let ph = phoneCompass.headingDeg {
+                let acc = phoneCompass.accuracyDeg.map { String(format: " ±%.0f°", $0) } ?? ""
+                let box = normDeg(sample.headingDeg(magOffMg: magOffset) - headingBias)
+                Text(String(format: "iPhone compass %.0f°%@  ·  box %.0f°", ph, acc, box))
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("(compare while the phone lies flat, ≥ 50 cm from the box)")
+                    .font(.caption2).foregroundStyle(.secondary)
             }
             Text(Self.howToCalibrate)
                 .font(.subheadline).foregroundStyle(.secondary)
             OrientationBoxCanvas(pitchDeg: sample.pitchDeg(),
                                  rollDeg: sample.rollDeg(),
-                                 headingDeg: sample.headingDeg(magOffMg: magOffset))
+                                 headingDeg: normDeg(
+                                     sample.headingDeg(magOffMg: magOffset) - headingBias),
+                                 compassRotDeg: phoneCompass.headingDeg ?? 0)
         }
-        .onReceive(tick) { t in
-            now = t
-            if let until = calUntil, t >= until {
-                let off = [(calMin[0] + calMax[0]) / 2,
-                           (calMin[1] + calMax[1]) / 2,
-                           (calMin[2] + calMax[2]) / 2]
-                // A run with no usable samples leaves infinities — discard.
-                if off.allSatisfy({ $0.isFinite }) {
-                    AgentConfig.magOffsetMg = off
-                    magOffset = off
-                }
-                calUntil = nil
-            }
+        .onAppear { phoneCompass.start() }
+        .onDisappear { phoneCompass.stop() }
+    }
+}
+
+/// Looping pose animation for the guided calibration: the wireframe box
+/// turns from the previous step's pose into the target pose (1.5 s motion
+/// + 1 s hold), so the user sees the exact movement instead of parsing
+/// "clockwise" from text. `from == to` renders a static pose (step 1).
+private struct CalPoseAnimation: View {
+    let from: (Double, Double, Double)  // pitch, roll, heading
+    let to: (Double, Double, Double)
+
+    var body: some View {
+        TimelineView(.animation) { tl in
+            let cycle = 2.5
+            let t = tl.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: cycle)
+            let raw = min(1.0, t / 1.5)
+            let e = raw * raw * (3 - 2 * raw)   // smoothstep ease-in-out
+            OrientationBoxCanvas(
+                pitchDeg: from.0 + (to.0 - from.0) * e,
+                rollDeg: from.1 + (to.1 - from.1) * e,
+                headingDeg: from.2 + (to.2 - from.2) * e,
+                height: 110
+            )
         }
-        .onChange(of: live.sampleCount) {
-            guard calUntil != nil, let s = live.latestSample else { return }
-            let m = [Double(s.magMg.0), Double(s.magMg.1), Double(s.magMg.2)]
-            for i in 0..<3 {
-                calMin[i] = min(calMin[i], m[i])
-                calMax[i] = max(calMax[i], m[i])
-            }
+    }
+}
+
+/// The iPhone's own compass (CoreLocation heading) — an OS-calibrated
+/// reference the user can compare the box heading against. Reuses the
+/// location permission the GPS cross-check feature already requests
+/// (NSLocationWhenInUseUsageDescription is in Info.plist).
+@Observable
+private final class PhoneCompass: NSObject, CLLocationManagerDelegate {
+    var headingDeg: Double? = nil
+    var accuracyDeg: Double? = nil
+    private let mgr = CLLocationManager()
+
+    override init() {
+        super.init()
+        mgr.delegate = self
+    }
+
+    func start() {
+        if mgr.authorizationStatus == .notDetermined {
+            mgr.requestWhenInUseAuthorization()
         }
+        if CLLocationManager.headingAvailable() {
+            mgr.startUpdatingHeading()
+        }
+    }
+
+    func stop() { mgr.stopUpdatingHeading() }
+
+    func locationManagerDidChangeAuthorization(_ m: CLLocationManager) {
+        let st = m.authorizationStatus
+        if st == .authorizedWhenInUse || st == .authorizedAlways,
+           CLLocationManager.headingAvailable() {
+            m.startUpdatingHeading()
+        }
+    }
+
+    func locationManager(_ m: CLLocationManager, didUpdateHeading h: CLHeading) {
+        headingDeg = h.magneticHeading >= 0 ? h.magneticHeading : nil
+        accuracyDeg = h.headingAccuracy >= 0 ? h.headingAccuracy : nil
     }
 }
 
@@ -316,16 +405,34 @@ private struct OrientationBoxCanvas: View {
     let pitchDeg: Double
     let rollDeg: Double
     let headingDeg: Double
+    var height: CGFloat = 200
+    /// iPhone compass heading: rotates the whole scene so screen-up is
+    /// the direction the phone's top points — the preview then behaves
+    /// like a compass app and the arrow points physically right no
+    /// matter which way the user faces. 0 = fixed north-up (desktop).
+    var compassRotDeg: Double = 0
 
     var body: some View {
         Canvas { ctx, size in
             let cx = Double(size.width) / 2
             let cy = Double(size.height) / 2
             let scale = Double(size.height) / 3.2
+            let vr = -compassRotDeg * .pi / 180
+            let svr = sin(vr), cvr = cos(vr)
 
-            let sr = sin(rollDeg * .pi / 180), cr = cos(rollDeg * .pi / 180)
-            let sp = sin(pitchDeg * .pi / 180), cp = cos(pitchDeg * .pi / 180)
-            let sy = sin(headingDeg * .pi / 180), cyw = cos(headingDeg * .pi / 180)
+            // Sign flip for the DRAWING only: the sensor reads +1 g on the
+            // axis pointing UP (z-up frame) while the NED math below assumes
+            // z-down, which mirrored the tilt direction — box stood on its
+            // nose drew the arrow pointing down. Flat behaviour and heading
+            // are unaffected.
+            let sr = -sin(rollDeg * .pi / 180), cr = cos(rollDeg * .pi / 180)
+            let sp = -sin(pitchDeg * .pi / 180), cp = cos(pitchDeg * .pi / 180)
+            // +90°: the eCompass yaw references the SHORT body axis, but the
+            // nose arrow sits on the long (-y) axis — without the shift the
+            // drawn arrow pointed east while the real nose (and the heading
+            // number) said south. Verified against the real box.
+            let yawDraw = (headingDeg + 90) * .pi / 180
+            let sy = sin(yawDraw), cyw = cos(yawDraw)
 
             // body -> world (NED): Rz(yaw) * Ry(pitch) * Rx(roll)
             func rot(_ v: (Double, Double, Double)) -> (Double, Double, Double) {
@@ -338,7 +445,10 @@ private struct OrientationBoxCanvas: View {
             let el = 28.0 * .pi / 180
             let sel = sin(el), cel = cos(el)
             func project(_ w: (Double, Double, Double)) -> CGPoint {
-                CGPoint(x: cx + w.1 * scale, y: cy - (w.0 * sel - w.2 * cel) * scale)
+                // View rotation by the phone's own heading (compass mode).
+                let n = w.0 * cvr - w.1 * svr
+                let e = w.0 * svr + w.1 * cvr
+                return CGPoint(x: cx + e * scale, y: cy - (n * sel - w.2 * cel) * scale)
             }
             func p3(_ v: (Double, Double, Double)) -> CGPoint { project(rot(v)) }
             func line(_ a: CGPoint, _ b: CGPoint, _ color: Color, _ w: CGFloat) {
@@ -351,13 +461,18 @@ private struct OrientationBoxCanvas: View {
             let lid = Color(red: 0.31, green: 0.71, blue: 0.98)
             let nose = Color(red: 0.26, green: 0.63, blue: 0.28)
 
-            // Fixed ground-plane compass cross (world frame).
+            // Ground-plane compass cross (world frame) — all four labels
+            // so the south end can't be misread as north.
             line(project((1.35, 0, 0)), project((-1.35, 0, 0)), axis, 1)
             line(project((0, 1.35, 0)), project((0, -1.35, 0)), axis, 1)
-            ctx.draw(Text("N").font(.subheadline).foregroundStyle(.secondary),
+            ctx.draw(Text("N").font(.subheadline).bold().foregroundStyle(.red),
                      at: project((1.5, 0, 0)))
             ctx.draw(Text("E").font(.subheadline).foregroundStyle(.secondary),
                      at: project((0, 1.5, 0)))
+            ctx.draw(Text("S").font(.subheadline).foregroundStyle(.secondary),
+                     at: project((-1.5, 0, 0)))
+            ctx.draw(Text("W").font(.subheadline).foregroundStyle(.secondary),
+                     at: project((0, -1.5, 0)))
 
             // Cuboid — long side is body Y. z down in NED: lid has z = -hz.
             let hx = 0.62, hy = 1.0, hz = 0.28
@@ -369,12 +484,23 @@ private struct OrientationBoxCanvas: View {
             for (a, b) in [(4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)] {
                 line(pts[a], pts[b], side, 1.3)
             }
+            // Fill the lid semi-transparently: a bare wireframe cuboid is a
+            // Necker cube — the eye flips which face is "up". The filled
+            // lid disambiguates above/below at a glance.
+            var lidFace = Path()
+            lidFace.move(to: pts[0])
+            for i in [1, 2, 3] { lidFace.addLine(to: pts[i]) }
+            lidFace.closeSubpath()
+            ctx.fill(lidFace, with: .color(lid.opacity(0.25)))
             for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
                 line(pts[a], pts[b], lid, 2)
             }
-            // Nose arrow along the long (+y) end of the lid.
+            // Nose arrow along the long end of the lid. Body -y, not +y:
+            // verified against the real box (box pointed up must draw the
+            // arrow up; with +y it drew mirrored while side-tips were
+            // already correct — the arrow simply marked the wrong end).
             let lidC = p3((0, 0, -hz))
-            let tip = p3((0, hy * 1.25, -hz))
+            let tip = p3((0, -hy * 1.25, -hz))
             line(lidC, tip, nose, 2)
             let ang = atan2(tip.y - lidC.y, tip.x - lidC.x)
             for s in [1.0, -1.0] {
@@ -382,7 +508,7 @@ private struct OrientationBoxCanvas: View {
                 line(tip, CGPoint(x: tip.x + 12 * cos(a2), y: tip.y + 12 * sin(a2)), nose, 2)
             }
         }
-        .frame(height: 200)
+        .frame(height: height)
     }
 }
 

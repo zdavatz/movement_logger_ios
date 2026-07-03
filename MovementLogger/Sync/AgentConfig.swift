@@ -17,6 +17,7 @@ enum AgentConfig {
     private static let kLogModeManual = "agent.logModeManual"
     private static let kLogModeManualKnown = "agent.logModeManualKnown"
     private static let kMagOffset = "agent.magOffsetMg"
+    private static let kHeadingBias = "agent.headingBiasDeg"
 
     /// `CBPeripheral.identifier.uuidString` of the box the user is mirroring.
     /// Persisted on every successful `.connected` so the BG handler can
@@ -68,6 +69,25 @@ enum AgentConfig {
                 UserDefaults.standard.set(v, forKey: kMagOffset)
             } else {
                 UserDefaults.standard.removeObject(forKey: kMagOffset)
+            }
+        }
+    }
+
+    /// Constant heading bias (deg) from the one-tap direction calibration:
+    /// lay the box flat, point its nose SOUTH, confirm — bias = computed
+    /// heading − 180. Subtracted from the displayed/drawn heading. This
+    /// absorbs every constant rotation in the chain (mag-vs-accel axis
+    /// alignment, soft-iron rotation, mounting) in a single step; the
+    /// continuous auto-calibration handles the hard-iron offset.
+    static var headingBiasDeg: Double? {
+        get {
+            UserDefaults.standard.object(forKey: kHeadingBias) as? Double
+        }
+        set {
+            if let v = newValue {
+                UserDefaults.standard.set(v, forKey: kHeadingBias)
+            } else {
+                UserDefaults.standard.removeObject(forKey: kHeadingBias)
             }
         }
     }
