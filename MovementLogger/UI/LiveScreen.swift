@@ -361,7 +361,10 @@ private struct OrientationSection: View {
             guard let s = live.latestSample else { return }
             // Update the render heading only while the box is flat enough
             // for the compass to be meaningful (|az| >= 0.6 g).
-            if abs(Double(s.accMg.2)) >= 600 {
+            // LID-UP only (az >= +0.6 g): upside-down the eCompass
+            // heading is mirrored — freezing it made the arrow flip
+            // east/west when the box was then stood up.
+            if Double(s.accMg.2) >= 600 {
                 lastFlatHeading = normDeg(
                     s.headingDeg(magOffMg: magOffset) - headingBias)
             }
