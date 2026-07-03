@@ -16,6 +16,7 @@ enum AgentConfig {
     private static let kKeepSynced = "agent.keepSynced"
     private static let kLogModeManual = "agent.logModeManual"
     private static let kLogModeManualKnown = "agent.logModeManualKnown"
+    private static let kMagOffset = "agent.magOffsetMg"
 
     /// `CBPeripheral.identifier.uuidString` of the box the user is mirroring.
     /// Persisted on every successful `.connected` so the BG handler can
@@ -47,6 +48,26 @@ enum AgentConfig {
             } else {
                 UserDefaults.standard.set(false, forKey: kLogModeManualKnown)
                 UserDefaults.standard.removeObject(forKey: kLogModeManual)
+            }
+        }
+    }
+
+    /// Magnetometer hard-iron offset [x, y, z] in mG, from the Live tab's
+    /// "Calibrate compass" flow — desktop `mag_offset_mg` / Android parity.
+    /// Subtracted from the raw mag before the eCompass heading; without it
+    /// a box-fixed magnetic bias bigger than the ~200 mG horizontal earth
+    /// field pins the heading regardless of rotation. `nil` = uncalibrated.
+    static var magOffsetMg: [Double]? {
+        get {
+            guard let a = UserDefaults.standard.array(forKey: kMagOffset) as? [Double],
+                  a.count == 3 else { return nil }
+            return a
+        }
+        set {
+            if let v = newValue, v.count == 3 {
+                UserDefaults.standard.set(v, forKey: kMagOffset)
+            } else {
+                UserDefaults.standard.removeObject(forKey: kMagOffset)
             }
         }
     }

@@ -73,9 +73,15 @@ struct LiveSample: Equatable {
     /// [0, 360). Uses accel-derived roll/pitch to project the mag vector
     /// onto the horizontal plane before taking atan2 of its components.
     /// Standard formula — see e.g. ST AN4248.
-    func headingDeg() -> Double {
+    func headingDeg(magOffMg: [Double]? = nil) -> Double {
         let ax = Double(accMg.0), ay = Double(accMg.1), az = Double(accMg.2)
-        let mx = Double(magMg.0), my = Double(magMg.1), mz = Double(magMg.2)
+        // Hard-iron correction (Live tab "Calibrate compass"): a box-fixed
+        // magnetic bias bigger than the ~200 mG horizontal earth field
+        // otherwise pins the heading regardless of rotation.
+        let off = magOffMg ?? [0, 0, 0]
+        let mx = Double(magMg.0) - off[0]
+        let my = Double(magMg.1) - off[1]
+        let mz = Double(magMg.2) - off[2]
         let roll = atan2(ay, az)
         let pitch = atan2(-ax, (ay * ay + az * az).squareRoot())
         let sR = sin(roll), cR = cos(roll)
