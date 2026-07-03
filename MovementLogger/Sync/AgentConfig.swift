@@ -18,6 +18,9 @@ enum AgentConfig {
     private static let kLogModeManualKnown = "agent.logModeManualKnown"
     private static let kMagOffset = "agent.magOffsetMg"
     private static let kHeadingBias = "agent.headingBiasDeg"
+    private static let kNosePlusY = "agent.nosePlusY"
+    private static let kNosePlusYKnown = "agent.nosePlusYKnown"
+    private static let kLateralFlip = "agent.lateralFlip"
 
     /// `CBPeripheral.identifier.uuidString` of the box the user is mirroring.
     /// Persisted on every successful `.connected` so the BG handler can
@@ -88,6 +91,41 @@ enum AgentConfig {
                 UserDefaults.standard.set(v, forKey: kHeadingBias)
             } else {
                 UserDefaults.standard.removeObject(forKey: kHeadingBias)
+            }
+        }
+    }
+
+    /// Which body-axis end is the user-defined FRONT (USB-C end): true =
+    /// +Y, false = -Y, nil = unknown. Set by the "USB-C end pointing UP —
+    /// confirm" tap (sign of ay while the box stands on its end). The
+    /// heading bias absorbs the 180° in yaw, but the 3D preview needs the
+    /// real end to tilt the arrow the right way when the box is upright.
+    static var nosePlusY: Bool? {
+        get {
+            guard UserDefaults.standard.bool(forKey: kNosePlusYKnown) else { return nil }
+            return UserDefaults.standard.bool(forKey: kNosePlusY)
+        }
+        set {
+            if let v = newValue {
+                UserDefaults.standard.set(true, forKey: kNosePlusYKnown)
+                UserDefaults.standard.set(v, forKey: kNosePlusY)
+            } else {
+                UserDefaults.standard.set(false, forKey: kNosePlusYKnown)
+                UserDefaults.standard.removeObject(forKey: kNosePlusY)
+            }
+        }
+    }
+
+    /// Lateral render sign (+1/-1) from the "tipped 90° onto its RIGHT
+    /// side — confirm" tap: the sign of ax in that pose. Same empirical
+    /// one-tap pattern as `nosePlusY`. nil = not yet confirmed.
+    static var lateralSign: Double? {
+        get { UserDefaults.standard.object(forKey: kLateralFlip) as? Double }
+        set {
+            if let v = newValue {
+                UserDefaults.standard.set(v, forKey: kLateralFlip)
+            } else {
+                UserDefaults.standard.removeObject(forKey: kLateralFlip)
             }
         }
     }

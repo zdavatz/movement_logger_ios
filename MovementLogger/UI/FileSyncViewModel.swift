@@ -95,6 +95,10 @@ final class FileSyncViewModel {
     var magOffsetMg: [Double]? = AgentConfig.magOffsetMg
     /// One-tap direction calibration: bias subtracted from the heading.
     var headingBiasDeg: Double = AgentConfig.headingBiasDeg ?? 0
+    /// Which body-axis end is the FRONT (USB-C): true = +Y, false = -Y.
+    var nosePlusY: Bool? = AgentConfig.nosePlusY
+    /// Lateral render sign from the right-side confirm tap (+1/-1).
+    var lateralSign: Double? = AgentConfig.lateralSign
     /// Auto-calibration envelope — FLAT samples only (|az| >= 0.9 g). A
     /// full flat rotation traces a symmetric circle in the mag X/Y plane,
     /// so its min/max midpoints are a valid hard-iron estimate for X and
@@ -102,8 +106,11 @@ final class FileSyncViewModel {
     /// asymmetrically and drag the midpoint (the bug that overwrote a
     /// good guided calibration with garbage). Z is never touched here —
     /// it comes from the guided calibration only.
-    private var autoMin = [Double.infinity, Double.infinity]
-    private var autoMax = [-Double.infinity, -Double.infinity]
+    /// Sliding window of recent flat mag samples (x, y). A window —
+    /// not a session-wide envelope — so one motion spike can't poison
+    /// the spans forever (a 444 mG outlier once locked calibration out
+    /// permanently). 64 samples @ 0.5 Hz ≈ 2 min ≈ one slow rotation.
+    private var autoBuf: [(Double, Double)] = []
 
     /// Wipe the compass calibration: hard-iron offset, direction bias and
     /// the auto-cal envelope. The continuous auto-calibration then starts
@@ -113,8 +120,11 @@ final class FileSyncViewModel {
         AgentConfig.magOffsetMg = nil
         headingBiasDeg = 0
         AgentConfig.headingBiasDeg = nil
-        autoMin = [Double.infinity, Double.infinity]
-        autoMax = [-Double.infinity, -Double.infinity]
+        nosePlusY = nil
+        AgentConfig.nosePlusY = nil
+        lateralSign = nil
+        AgentConfig.lateralSign = nil
+        autoBuf.removeAll()
     }
 
     /// Continuous, conservative auto-calibration from flat samples.
@@ -125,28 +135,42 @@ final class FileSyncViewModel {
         let m = [Double(s.magMg.0), Double(s.magMg.1)]
         let tot = (m[0] * m[0] + m[1] * m[1]).squareRoot()
         guard tot < 1500 else { return }
-        for i in 0..<2 {
-            autoMin[i] = min(autoMin[i], m[i])
-            autoMax[i] = max(autoMax[i], m[i])
-        }
-        let spanX = autoMax[0] - autoMin[0]
-        let spanY = autoMax[1] - autoMin[1]
+        autoBuf.append((m[0], m[1]))
+        if autoBuf.count > 64 { autoBuf.removeFirst(autoBuf.count - 64) }
+        guard autoBuf.count >= 8 else { return }
+        let xs = autoBuf.map { $0.0 }
+        let ys = autoBuf.map { $0.1 }
+        let minX = xs.min()!, maxX = xs.max()!
+        let minY = ys.min()!, maxY = ys.max()!
+        let spanX = maxX - minX
+        let spanY = maxY - minY
         // Accept only when both spans look like a full circle (>= 180 mG)
         // AND are similar (a circle, not a stray arc) — asymmetric
-        // coverage must never produce an offset.
+        // coverage must never produce an offset. Spikes age out of the
+        // window, so a rejection here is never permanent.
         guard spanX >= 180, spanY >= 180,
-              max(spanX, spanY) / min(spanX, spanY) <= 1.8 else { return }
+              max(spanX, spanY) / min(spanX, spanY) <= 2.0 else { return }
+        let autoMin = [minX, minY]
+        let autoMax = [maxX, maxY]
         var off = magOffsetMg ?? [0, 0, 0]
         let nx = (autoMax[0] + autoMin[0]) / 2
         let ny = (autoMax[1] + autoMin[1]) / 2
         // Apply only on a real change so we don't churn UserDefaults.
         guard abs(nx - off[0]) > 10 || abs(ny - off[1]) > 10 else { return }
+        // Changing the hard-iron offset shifts the raw heading for the
+        // same physical direction — fold that shift into the stored
+        // direction bias so "set direction" stays valid across auto-cal
+        // refinements (otherwise the preview slowly rotates away).
+        let hOld = s.headingDeg(magOffMg: magOffsetMg)
         off[0] = nx
         off[1] = ny
+        let hNew = s.headingDeg(magOffMg: off)
+        var bias = (headingBiasDeg + (hNew - hOld)).truncatingRemainder(dividingBy: 360)
+        if bias < 0 { bias += 360 }
+        headingBiasDeg = bias
+        AgentConfig.headingBiasDeg = bias
         magOffsetMg = off
         AgentConfig.magOffsetMg = off
-        print("[autocal] offset -> [\(Int(off[0])), \(Int(off[1])), \(Int(off[2]))] " +
-              "spanX=\(Int(spanX)) spanY=\(Int(spanY))")
     }
     var files: [RemoteFile] = []
     var downloads: [String: DownloadProgress] = [:]
