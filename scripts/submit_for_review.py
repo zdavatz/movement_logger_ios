@@ -230,6 +230,73 @@ def delete_stale_editable_versions(c: Client, app_id: str, keep_version: str) ->
             c.delete(f"/appStoreVersions/{v['id']}")
 
 
+def cancel_blocking_submissions(c: Client, app_id: str, target_version: str) -> None:
+    """Apple allows only ONE version in the review pipeline at a time. When a
+    NEWER version is being released, an OLDER version still WAITING_FOR_REVIEW
+    or IN_REVIEW blocks it — version-create 409s with RELATIONSHIP.INVALID
+    ("cannot create a new version in the current state"), and the submit step
+    bails with "a review submission is already …". Policy (user decision, 4.7.2026):
+    a newer version ALWAYS supersedes a pending older one — so cancel any
+    in-pipeline submission whose version differs from `target_version`, freeing
+    the slot. The cancelled version returns to an editable state, which
+    `find_or_create_version` then clears (delete_stale_editable_versions) before
+    creating ours. Never cancels a submission that already carries our target.
+
+    Cancelling is safe/reversible in spirit: the build stays uploaded and the
+    superseding version re-enters review immediately with the same-or-newer
+    binary. Covers WAITING_FOR_REVIEW (queued) and IN_REVIEW (Apple looking) —
+    both are cancellable via `canceled=true` and both block us."""
+    subs = c.get("/reviewSubmissions", params={
+        "filter[app]": app_id, "filter[platform]": PLATFORM, "limit": 20,
+    })["data"]
+    pending = [s for s in subs
+               if s["attributes"]["state"] in ("WAITING_FOR_REVIEW", "IN_REVIEW")]
+    for s in pending:
+        sub_id = s["id"]
+        state = s["attributes"]["state"]
+        # Which version string(s) does this submission carry?
+        items = c.get(f"/reviewSubmissions/{sub_id}/items")["data"]
+        ver_ids = [ (it.get("relationships", {}).get("appStoreVersion", {})
+                     .get("data") or {}).get("id") for it in items ]
+        ver_strings = []
+        for vid in ver_ids:
+            if not vid:
+                continue
+            v = c.get(f"/appStoreVersions/{vid}")["data"]
+            ver_strings.append(v["attributes"]["versionString"])
+        if target_version in ver_strings:
+            print(f"  reviewSubmission {sub_id} already carries {target_version} — leaving it")
+            continue
+        print(f"  cancelling {state} reviewSubmission {sub_id} "
+              f"(version {','.join(ver_strings) or '?'}) — superseded by {target_version}")
+        c.patch(f"/reviewSubmissions/{sub_id}", {
+            "data": {"type": "reviewSubmissions", "id": sub_id,
+                     "attributes": {"canceled": True}},
+        })
+        # Wait for each freed version to leave the locked pipeline state so
+        # find_or_create_version can remove the stale editable and create ours.
+        for vs in ver_strings:
+            _wait_version_unlocked(c, app_id, vs)
+
+
+def _wait_version_unlocked(c: Client, app_id: str, version_string: str,
+                           timeout_s: int = 180, poll_s: int = 5) -> None:
+    """Poll until no AppStoreVersion at `version_string` is in a LOCKED state
+    (cancellation propagated → the version is editable/removable), or time out."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        vers = c.get(f"/apps/{app_id}/appStoreVersions", params={
+            "filter[versionString]": version_string, "limit": 5})["data"]
+        locked = [v for v in vers
+                  if (v["attributes"].get("appStoreState") or v["attributes"].get("state"))
+                  in LOCKED_STATES]
+        if not locked:
+            print(f"  version {version_string} released from the review pipeline")
+            return
+        time.sleep(poll_s)
+    print(f"  WARNING: {version_string} still locked after {timeout_s}s — proceeding anyway")
+
+
 def set_whats_new(c: Client, version_id: str, notes: str) -> None:
     locs = c.get(f"/appStoreVersions/{version_id}/appStoreVersionLocalizations")["data"]
     if not locs:
@@ -390,6 +457,10 @@ def main() -> None:
                            args.build_timeout, args.poll)
     build_id = build["id"]
     print(f"Build VALID: {build_id}")
+
+    # Policy: a newer version always supersedes a pending older one. Cancel any
+    # older submission still in the review pipeline so it can't block us.
+    cancel_blocking_submissions(c, app_id, args.version)
 
     version = find_or_create_version(c, app_id, args.version, args.release_type)
     version_id = version["id"]
