@@ -190,12 +190,15 @@ def find_or_create_version(c: Client, app_id: str, version: str,
         if state in LOCKED_STATES:
             sys.exit(f"AppStoreVersion {version} is {state} — cannot edit/submit it")
     # Apple allows only ONE editable version at a time, so a leftover editable
-    # version at a DIFFERENT string (e.g. a prior release whose auto-submit
-    # failed) blocks creating this one with 409 RELATIONSHIP.INVALID ("cannot
-    # create a new version in the current state"). Clear those stale editables
-    # first so a wedged prior release can't block the next one. Only ever
-    # deletes EDITABLE (never LOCKED = live/in-review) versions.
-    delete_stale_editable_versions(c, app_id, keep_version=version)
+    # version at a DIFFERENT string (a prior release whose auto-submit failed or
+    # was cancelled/superseded) blocks creating this one with 409
+    # RELATIONSHIP.INVALID ("cannot create a new version in the current state").
+    # It usually CAN'T be deleted either — once a build has been uploaded ASC
+    # refuses ("Only the first version of any platform can be deleted"). So
+    # RECLAIM it: rename its versionString to our target and reuse the record.
+    reclaimed = reclaim_stale_editable_version(c, app_id, version, release_type)
+    if reclaimed is not None:
+        return reclaimed
     print(f"  creating AppStoreVersion {version} (releaseType={release_type})")
     return c.post("/appStoreVersions", {
         "data": {
@@ -207,27 +210,34 @@ def find_or_create_version(c: Client, app_id: str, version: str,
     })["data"]
 
 
-def delete_stale_editable_versions(c: Client, app_id: str, keep_version: str) -> None:
-    """Delete any editable AppStoreVersion whose versionString differs from
-    keep_version. Apple permits only one editable version at a time, so a
-    stale one (e.g. a prior release wedged by a failed auto-submit) must be
-    removed before a new version can be created. Never touches LOCKED (live /
-    in-review) versions."""
+def reclaim_stale_editable_version(c: Client, app_id: str, target_version: str,
+                                   release_type: str):
+    """Apple permits only one editable version at a time, and once a build is
+    uploaded that version usually can't be deleted ("only the first version can
+    be deleted"). So when a stale editable version sits at a DIFFERENT string (a
+    prior release whose submit failed / was cancelled), RENAME its versionString
+    to our target and reuse the record instead of creating a new one — which
+    also keeps the store version string matching the uploaded build's
+    CFBundleShortVersionString (Apple requires that match). Returns the reused
+    version dict, or None if there's nothing editable to reclaim (caller then
+    creates fresh). Never touches LOCKED (live / in-review) versions."""
     vers = c.get(f"/apps/{app_id}/appStoreVersions", params={"limit": 50})["data"]
     for v in vers:
         a = v["attributes"]
         vs = a["versionString"]
-        # The attribute was renamed appStoreState -> state; accept either.
         state = a.get("appStoreState") or a.get("state") or "?"
         plat = a.get("platform", "?")
         print(f"  existing version {vs} (platform={plat}, state={state})")
-        # Delete anything editable that's in our way: a different versionString
-        # that is NOT live/in-review (LOCKED). Broader than EDITABLE_STATES so
-        # an unexpected state string still gets cleared rather than blocking us.
-        if vs != keep_version and plat == PLATFORM and state not in LOCKED_STATES:
-            print(f"  deleting stale AppStoreVersion {vs} (state={state}) "
-                  f"— it blocks creating {keep_version}")
-            c.delete(f"/appStoreVersions/{v['id']}")
+        if vs == target_version or plat != PLATFORM or state in LOCKED_STATES:
+            continue
+        print(f"  reclaiming editable AppStoreVersion {vs} (state={state}) "
+              f"-> {target_version} (rename+reuse; ASC won't let it be deleted)")
+        return c.patch(f"/appStoreVersions/{v['id']}", {
+            "data": {"type": "appStoreVersions", "id": v["id"],
+                     "attributes": {"versionString": target_version,
+                                    "releaseType": release_type}},
+        })["data"]
+    return None
 
 
 def cancel_blocking_submissions(c: Client, app_id: str, target_version: str) -> None:
@@ -254,47 +264,63 @@ def cancel_blocking_submissions(c: Client, app_id: str, target_version: str) -> 
     for s in pending:
         sub_id = s["id"]
         state = s["attributes"]["state"]
-        # Which version string(s) does this submission carry?
-        items = c.get(f"/reviewSubmissions/{sub_id}/items")["data"]
-        ver_ids = [ (it.get("relationships", {}).get("appStoreVersion", {})
-                     .get("data") or {}).get("id") for it in items ]
-        ver_strings = []
-        for vid in ver_ids:
-            if not vid:
-                continue
-            v = c.get(f"/appStoreVersions/{vid}")["data"]
-            ver_strings.append(v["attributes"]["versionString"])
-        if target_version in ver_strings:
+        vers = _submission_versions(c, sub_id)
+        if target_version in vers:
             print(f"  reviewSubmission {sub_id} already carries {target_version} — leaving it")
             continue
         print(f"  cancelling {state} reviewSubmission {sub_id} "
-              f"(version {','.join(ver_strings) or '?'}) — superseded by {target_version}")
+              f"(version {','.join(vers) or '?'}) — superseded by {target_version}")
         c.patch(f"/reviewSubmissions/{sub_id}", {
             "data": {"type": "reviewSubmissions", "id": sub_id,
                      "attributes": {"canceled": True}},
         })
-        # Wait for each freed version to leave the locked pipeline state so
-        # find_or_create_version can remove the stale editable and create ours.
-        for vs in ver_strings:
-            _wait_version_unlocked(c, app_id, vs)
+    # Always wait for the pipeline to actually clear before returning — the
+    # cancel above is async (the version goes WAITING_FOR_REVIEW -> CANCELING ->
+    # DEVELOPER_REJECTED over a few seconds), and a prior run may have cancelled
+    # a submission that's still propagating. Not gated on whether *this* run
+    # cancelled anything, and independent of the item->version mapping (which
+    # the earlier bug relied on and got back empty, skipping the wait and
+    # racing the create into a 409). find_or_create_version then removes the
+    # freed (now editable) version and creates ours.
+    _wait_pipeline_clear(c, app_id, target_version)
 
 
-def _wait_version_unlocked(c: Client, app_id: str, version_string: str,
-                           timeout_s: int = 180, poll_s: int = 5) -> None:
-    """Poll until no AppStoreVersion at `version_string` is in a LOCKED state
-    (cancellation propagated → the version is editable/removable), or time out."""
+def _submission_versions(c: Client, sub_id: str) -> list:
+    """Version string(s) an open reviewSubmission carries. The item's
+    appStoreVersion relationship isn't populated without `include`, so pull the
+    included resources and map by id."""
+    data = c.get(f"/reviewSubmissions/{sub_id}/items",
+                 params={"include": "appStoreVersion"})
+    included = {i["id"]: i for i in data.get("included", [])
+                if i.get("type") == "appStoreVersions"}
+    out = []
+    for it in data.get("data", []):
+        vid = (it.get("relationships", {}).get("appStoreVersion", {})
+               .get("data") or {}).get("id")
+        if vid and vid in included:
+            out.append(included[vid]["attributes"]["versionString"])
+    return out
+
+
+def _wait_pipeline_clear(c: Client, app_id: str, target_version: str,
+                         timeout_s: int = 240, poll_s: int = 6) -> None:
+    """Poll until no version OTHER than `target_version` sits in a pipeline
+    state that blocks creating a new version, or time out. Apple permits only
+    one version in review at a time, so this is the gate after a cancel."""
+    blocking_states = {"WAITING_FOR_REVIEW", "IN_REVIEW", "PROCESSING_FOR_APP_STORE"}
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        vers = c.get(f"/apps/{app_id}/appStoreVersions", params={
-            "filter[versionString]": version_string, "limit": 5})["data"]
-        locked = [v for v in vers
-                  if (v["attributes"].get("appStoreState") or v["attributes"].get("state"))
-                  in LOCKED_STATES]
-        if not locked:
-            print(f"  version {version_string} released from the review pipeline")
+        vers = c.get(f"/apps/{app_id}/appStoreVersions", params={"limit": 50})["data"]
+        busy = [v["attributes"]["versionString"] for v in vers
+                if v["attributes"]["versionString"] != target_version
+                and (v["attributes"].get("appStoreState")
+                     or v["attributes"].get("state")) in blocking_states]
+        if not busy:
+            print("  review pipeline clear — ready to create the new version")
             return
+        print(f"  waiting for review pipeline to clear (still busy: {','.join(busy)})…")
         time.sleep(poll_s)
-    print(f"  WARNING: {version_string} still locked after {timeout_s}s — proceeding anyway")
+    print(f"  WARNING: pipeline still busy after {timeout_s}s — proceeding anyway")
 
 
 def set_whats_new(c: Client, version_id: str, notes: str) -> None:
