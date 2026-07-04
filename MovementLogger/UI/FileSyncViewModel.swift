@@ -97,24 +97,61 @@ final class FileSyncViewModel {
     var headingBiasDeg: Double = AgentConfig.headingBiasDeg ?? 0
     /// Which body-axis end is the FRONT (USB-C): true = +Y, false = -Y.
     var nosePlusY: Bool? = AgentConfig.nosePlusY
-    /// Lateral render sign from the right-side confirm tap (+1/-1).
-    var lateralSign: Double? = AgentConfig.lateralSign
-    /// Auto-calibration envelope — FLAT samples only (|az| >= 0.9 g). A
-    /// full flat rotation traces a symmetric circle in the mag X/Y plane,
-    /// so its min/max midpoints are a valid hard-iron estimate for X and
-    /// Y. Tilted samples are excluded: they expand the envelope
-    /// asymmetrically and drag the midpoint (the bug that overwrote a
-    /// good guided calibration with garbage). Z is never touched here —
-    /// it comes from the guided calibration only.
-    /// Sliding window of recent flat mag samples (x, y). A window —
-    /// not a session-wide envelope — so one motion spike can't poison
-    /// the spans forever (a 444 mG outlier once locked calibration out
-    /// permanently). 64 samples @ 0.5 Hz ≈ 2 min ≈ one slow rotation.
-    private var autoBuf: [(Double, Double)] = []
+
+    /// Gyro+accel attitude filter (drives the 3D preview instead of the
+    /// magnetometer) and its latest body-frame world axes for the renderer.
+    let orientationFilter = OrientationFilter()
+    var oriRows: OriRows? = nil
+
+    /// "USB-C points SOUTH — set direction": define the current filter yaw
+    /// as south. Reads the gyro/accel attitude (drift-free tilt, gyro-tracked
+    /// heading), sets the render bias so the nose reads 180°.
+    func setDirectionSouth() {
+        guard let az = orientationFilter.noseAzimuth(nosePlusY: nosePlusY ?? false, biasDeg: 0)
+        else { return }
+        setBias(az - 180.0)
+    }
+
+    /// "Match iPhone compass": box laid flat, parallel to the phone, USB-C
+    /// pointing the same way as the top of the phone. Sets the bias so the
+    /// box nose reads the phone's (OS-calibrated) heading — no need to know
+    /// where south is.
+    func setDirectionFromPhone(_ phoneHeadingDeg: Double) {
+        guard let az = orientationFilter.noseAzimuth(nosePlusY: nosePlusY ?? false, biasDeg: 0)
+        else { return }
+        setBias(az - phoneHeadingDeg)
+    }
+
+    /// Flipping the nose end flips the nose azimuth by exactly 180°,
+    /// independent of pose — so add 180° to keep the set direction valid.
+    func nudgeBiasForNoseFlip() { setBias(headingBiasDeg + 180.0) }
+
+    private func setBias(_ deg: Double) {
+        var b = deg.truncatingRemainder(dividingBy: 360)
+        if b < 0 { b += 360 }
+        headingBiasDeg = b
+        AgentConfig.headingBiasDeg = b
+    }
+    /// Sliding window of recent raw mag samples (x, y, z) over ALL poses —
+    /// the input to the full 3D hard-iron sphere fit. Unlike the old
+    /// flat-only X/Y method, tilted / on-end samples are exactly what we
+    /// WANT here: they light up the Z axis so the fit can find the Z
+    /// offset (the one the flat method left at 0, which corrupted every
+    /// on-end pose). 200 samples @ 0.5 Hz ≈ 6-7 min of ordinary handling.
+    private var autoBuf3: [[Double]] = []
+    /// Flat-only X/Y window — the rough fallback used until enough 3D
+    /// pose coverage accumulates for the sphere fit. Once a real 3D fix
+    /// lands (`have3DFix`) this fallback stops overwriting it.
+    private var autoBufFlat: [(Double, Double)] = []
+    /// Set once the 3D sphere fit produces a well-conditioned offset. From
+    /// then on only the 3D fit may update the offset — the coarse flat
+    /// fallback must not drag a good full calibration back to X/Y-only.
+    private var have3DFix = false
 
     /// Wipe the compass calibration: hard-iron offset, direction bias and
-    /// the auto-cal envelope. The continuous auto-calibration then starts
-    /// learning from scratch (one flat rotation re-fills it).
+    /// the auto-cal windows. The continuous auto-calibration then starts
+    /// learning from scratch (ordinary handling through varied poses
+    /// re-fills the 3D fit).
     func resetMagCalibration() {
         magOffsetMg = nil
         AgentConfig.magOffsetMg = nil
@@ -122,55 +159,128 @@ final class FileSyncViewModel {
         AgentConfig.headingBiasDeg = nil
         nosePlusY = nil
         AgentConfig.nosePlusY = nil
-        lateralSign = nil
-        AgentConfig.lateralSign = nil
-        autoBuf.removeAll()
+        AgentConfig.lateralSign = nil   // clear any stale stored value
+        AgentConfig.directionAnchorAcc = nil
+        AgentConfig.directionAnchorMag = nil
+        autoBuf3.removeAll()
+        autoBufFlat.removeAll()
+        have3DFix = false
+        orientationFilter.reset()
+        oriRows = nil
     }
 
-    /// Continuous, conservative auto-calibration from flat samples.
+    /// Continuous hard-iron auto-calibration. Prefers a full 3D sphere fit
+    /// (all three offsets, so on-end poses are correct); falls back to a
+    /// coarse flat X/Y estimate only until enough 3D coverage exists.
     private func autoCalibrate(_ s: LiveSample) {
         let ax = Double(s.accMg.0), ay = Double(s.accMg.1), az = Double(s.accMg.2)
-        // Flat + still: lid up or down, no big lateral acceleration.
-        guard abs(az) >= 900, abs(ax) <= 300, abs(ay) <= 300 else { return }
-        let m = [Double(s.magMg.0), Double(s.magMg.1)]
-        let tot = (m[0] * m[0] + m[1] * m[1]).squareRoot()
-        guard tot < 1500 else { return }
-        autoBuf.append((m[0], m[1]))
-        if autoBuf.count > 64 { autoBuf.removeFirst(autoBuf.count - 64) }
-        guard autoBuf.count >= 8 else { return }
-        let xs = autoBuf.map { $0.0 }
-        let ys = autoBuf.map { $0.1 }
-        let minX = xs.min()!, maxX = xs.max()!
-        let minY = ys.min()!, maxY = ys.max()!
-        let spanX = maxX - minX
-        let spanY = maxY - minY
-        // Accept only when both spans look like a full circle (>= 180 mG)
-        // AND are similar (a circle, not a stray arc) — asymmetric
-        // coverage must never produce an offset. Spikes age out of the
-        // window, so a rejection here is never permanent.
-        guard spanX >= 180, spanY >= 180,
-              max(spanX, spanY) / min(spanX, spanY) <= 2.0 else { return }
-        let autoMin = [minX, minY]
-        let autoMax = [maxX, maxY]
-        var off = magOffsetMg ?? [0, 0, 0]
-        let nx = (autoMax[0] + autoMin[0]) / 2
-        let ny = (autoMax[1] + autoMin[1]) / 2
+        let mx = Double(s.magMg.0), my = Double(s.magMg.1), mz = Double(s.magMg.2)
+        let mag = (mx * mx + my * my + mz * mz).squareRoot()
+        // Sanity gate only — a body-fixed hard-iron keeps |raw mag| within
+        // a bounded shell; reject wild spikes. Motion / tilt is welcome.
+        guard mag > 80, mag < 2000 else { return }
+
+        autoBuf3.append([mx, my, mz])
+        if autoBuf3.count > 200 { autoBuf3.removeFirst(autoBuf3.count - 200) }
+        // Flat + still feeds the fallback window (lid up or down).
+        if abs(az) >= 900, abs(ax) <= 300, abs(ay) <= 300 {
+            autoBufFlat.append((mx, my))
+            if autoBufFlat.count > 64 { autoBufFlat.removeFirst(autoBufFlat.count - 64) }
+        }
+
+        var candidate: [Double]? = nil
+        // --- primary: full 3D sphere fit once all axes are exercised ---
+        if autoBuf3.count >= 24 {
+            let xs = autoBuf3.map { $0[0] }, ys = autoBuf3.map { $0[1] }, zs = autoBuf3.map { $0[2] }
+            let spanX = xs.max()! - xs.min()!
+            let spanY = ys.max()! - ys.min()!
+            let spanZ = zs.max()! - zs.min()!
+            if spanX >= 300, spanY >= 300, spanZ >= 300,
+               let fit = Self.sphereFit(autoBuf3), fit.r > 150, fit.r < 800 {
+                // residual: points must actually lie on the fitted shell.
+                var se = 0.0
+                for p in autoBuf3 {
+                    let d = ((p[0] - fit.off[0]) * (p[0] - fit.off[0])
+                             + (p[1] - fit.off[1]) * (p[1] - fit.off[1])
+                             + (p[2] - fit.off[2]) * (p[2] - fit.off[2])).squareRoot()
+                    se += (d - fit.r) * (d - fit.r)
+                }
+                let rms = (se / Double(autoBuf3.count)).squareRoot()
+                if rms < 0.20 * fit.r {
+                    candidate = fit.off
+                    have3DFix = true
+                }
+            }
+        }
+        // --- fallback: coarse flat X/Y midpoint, only before a 3D fix ---
+        if candidate == nil, !have3DFix, autoBufFlat.count >= 8 {
+            let xs = autoBufFlat.map { $0.0 }, ys = autoBufFlat.map { $0.1 }
+            let spanX = xs.max()! - xs.min()!, spanY = ys.max()! - ys.min()!
+            if spanX >= 180, spanY >= 180, max(spanX, spanY) / min(spanX, spanY) <= 2.0 {
+                let nx = (xs.max()! + xs.min()!) / 2
+                let ny = (ys.max()! + ys.min()!) / 2
+                candidate = [nx, ny, magOffsetMg?[2] ?? 0]
+            }
+        }
+
+        guard let newOff = candidate else { return }
+        let old = magOffsetMg ?? [0, 0, 0]
         // Apply only on a real change so we don't churn UserDefaults.
-        guard abs(nx - off[0]) > 10 || abs(ny - off[1]) > 10 else { return }
-        // Changing the hard-iron offset shifts the raw heading for the
-        // same physical direction — fold that shift into the stored
-        // direction bias so "set direction" stays valid across auto-cal
-        // refinements (otherwise the preview slowly rotates away).
-        let hOld = s.headingDeg(magOffMg: magOffsetMg)
-        off[0] = nx
-        off[1] = ny
-        let hNew = s.headingDeg(magOffMg: off)
-        var bias = (headingBiasDeg + (hNew - hOld)).truncatingRemainder(dividingBy: 360)
-        if bias < 0 { bias += 360 }
-        headingBiasDeg = bias
-        AgentConfig.headingBiasDeg = bias
-        magOffsetMg = off
-        AgentConfig.magOffsetMg = off
+        guard abs(newOff[0] - old[0]) > 10 || abs(newOff[1] - old[1]) > 10
+                || abs(newOff[2] - old[2]) > 10 else { return }
+        magOffsetMg = newOff
+        AgentConfig.magOffsetMg = newOff
+        // The offset only seeds the gyro filter's initial heading now; the
+        // preview no longer depends on the magnetometer, so an offset change
+        // must NOT touch the render bias (that's owned by set-direction and
+        // carried by the gyro).
+    }
+
+    /// Algebraic (Kåsa) sphere fit: least-squares centre + radius of a set
+    /// of 3D points. Solves the 4×4 normal equations of
+    /// `|p - c|² = r²  ⇔  2c·p + (r² - |c|²) = |p|²`. Returns nil if the
+    /// system is singular (coplanar points — no Z coverage).
+    private static func sphereFit(_ pts: [[Double]]) -> (off: [Double], r: Double)? {
+        // Normal matrix M (4×4) and rhs v for rows a = [2x, 2y, 2z, 1],
+        // b = x²+y²+z².
+        var M = [[Double]](repeating: [Double](repeating: 0, count: 4), count: 4)
+        var v = [Double](repeating: 0, count: 4)
+        for p in pts {
+            let a = [2 * p[0], 2 * p[1], 2 * p[2], 1.0]
+            let b = p[0] * p[0] + p[1] * p[1] + p[2] * p[2]
+            for i in 0..<4 {
+                for j in 0..<4 { M[i][j] += a[i] * a[j] }
+                v[i] += a[i] * b
+            }
+        }
+        guard let x = solveLinear(M, v) else { return nil }
+        let c = [x[0], x[1], x[2]]
+        let r2 = x[3] + c[0] * c[0] + c[1] * c[1] + c[2] * c[2]
+        guard r2 > 0 else { return nil }
+        return (c, r2.squareRoot())
+    }
+
+    /// Small dense solver (Gaussian elimination, partial pivoting) for the
+    /// n×n systems the sphere fit produces. nil on a singular system.
+    private static func solveLinear(_ a0: [[Double]], _ b0: [Double]) -> [Double]? {
+        let n = b0.count
+        var a = a0, b = b0
+        for col in 0..<n {
+            var piv = col
+            for r in (col + 1)..<n where abs(a[r][col]) > abs(a[piv][col]) { piv = r }
+            if abs(a[piv][col]) < 1e-9 { return nil }
+            if piv != col { a.swapAt(col, piv); b.swapAt(col, piv) }
+            let d = a[col][col]
+            for r in 0..<n where r != col {
+                let f = a[r][col] / d
+                if f == 0 { continue }
+                for c in col..<n { a[r][c] -= f * a[col][c] }
+                b[r] -= f * b[col]
+            }
+        }
+        var x = [Double](repeating: 0, count: n)
+        for i in 0..<n { x[i] = b[i] / a[i][i] }
+        return x
     }
     var files: [RemoteFile] = []
     var downloads: [String: DownloadProgress] = [:]
@@ -942,6 +1052,9 @@ final class FileSyncViewModel {
 
     private func onSample(_ s: LiveSample) {
         autoCalibrate(s)
+        // Gyro+accel attitude for the 3D preview (mag-independent).
+        orientationFilter.update(s, magOffset: magOffsetMg)
+        oriRows = orientationFilter.rows
         let t0 = liveT0Ms ?? s.timestampMs
         if liveT0Ms == nil { liveT0Ms = t0 }
         let dt = Double(s.timestampMs &- t0) / 1000.0

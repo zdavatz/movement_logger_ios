@@ -32,10 +32,10 @@ struct LiveScreen: View {
                                         headingBias: vm.headingBiasDeg)
                             Spacer().frame(height: 8)
                             OrientationSection(live: vm.live, sample: sample,
+                                               oriRows: vm.oriRows,
                                                magOffset: $vm.magOffsetMg,
                                                headingBias: $vm.headingBiasDeg,
-                                               nosePlusY: $vm.nosePlusY,
-                                               lateralSign: $vm.lateralSign)
+                                               nosePlusY: $vm.nosePlusY)
                             Spacer().frame(height: 8)
                             Text("Acc magnitude (g)").font(.subheadline).fontWeight(.semibold)
                             Sparkline(points: vm.live.accHistory,
@@ -96,18 +96,23 @@ private struct FreshnessStrip: View {
 
     @ViewBuilder
     private var label: some View {
+        // Fixed-width, one-line rendering so the ticking value can't
+        // reflow the layout (the whole screen used to hop with it).
         if let t = live.latestSampleAt {
             let elapsed = now.timeIntervalSince(t)
             if elapsed < 5 {
-                Text("last sample \(Int(elapsed * 1000)) ms ago")
+                Text(String(format: "last sample %4.1f s ago", elapsed))
                     .font(.caption).foregroundStyle(.green)
+                    .monospacedDigit().lineLimit(1)
             } else {
-                Text("no sample for \(Int(elapsed)) s — check connection")
+                Text(String(format: "no sample for %4.0f s — check connection", elapsed))
                     .font(.caption).foregroundStyle(.orange)
+                    .monospacedDigit().lineLimit(1)
             }
         } else {
             Text("waiting for first SensorStream notify…")
                 .font(.caption).foregroundStyle(.orange)
+                .lineLimit(1)
         }
     }
 }
@@ -130,9 +135,9 @@ private struct ReadoutGrid: View {
                        b: String(format: "Y %+.3f", Double(s.accMg.1) / 1000),
                        c: String(format: "Z %+.3f", Double(s.accMg.2) / 1000))
             ReadoutRow(label: "Gyro (°/s)",
-                       a: String(format: "X %+.2f", Double(s.gyroCdps.0) / 100),
-                       b: String(format: "Y %+.2f", Double(s.gyroCdps.1) / 100),
-                       c: String(format: "Z %+.2f", Double(s.gyroCdps.2) / 100))
+                       a: String(format: "X %+.1f", Double(s.gyroCdps.0) / 10),
+                       b: String(format: "Y %+.1f", Double(s.gyroCdps.1) / 10),
+                       c: String(format: "Z %+.1f", Double(s.gyroCdps.2) / 10))
             ReadoutRow(label: "Mag (mG)",
                        a: String(format: "X %+d", Int(s.magMg.0)),
                        b: String(format: "Y %+d", Int(s.magMg.1)),
@@ -250,18 +255,13 @@ private func normDeg(_ d: Double) -> Double {
 private struct OrientationSection: View {
     let live: LiveState
     let sample: LiveSample
+    let oriRows: OriRows?
     @Binding var magOffset: [Double]?
     @Binding var headingBias: Double
     @Binding var nosePlusY: Bool?
-    @Binding var lateralSign: Double?
 
     /// iPhone's own compass — reference readout next to the box heading.
     @State private var phoneCompass = PhoneCompass()
-    /// Last heading measured while the box lay reasonably flat. Vertical
-    /// poses have no defined compass heading (the horizontal field
-    /// projection collapses), so the preview keeps this instead of
-    /// spinning on noise.
-    @State private var lastFlatHeading: Double = 0
 
     private static let howToCalibrate = """
         The compass auto-calibrates while this tab is open: rotate the box \
@@ -275,6 +275,7 @@ private struct OrientationSection: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 Text("Box orientation").font(.subheadline).fontWeight(.semibold)
+                Text("· gyro-27").font(.caption2).foregroundStyle(.green)
             }
             do {
                 // THE calibration: hard-iron is learned automatically
@@ -288,113 +289,66 @@ private struct OrientationSection: View {
                 Text("Lay the box flat, USB-C end pointing SOUTH, then tap:")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Button("USB-C points SOUTH — set direction") {
-                    let raw = sample.headingDeg(magOffMg: magOffset)
-                    headingBias = normDeg(raw - 180.0)
-                    AgentConfig.headingBiasDeg = headingBias
+                    // Define the gyro filter's current yaw as south.
+                    FileSyncViewModel.shared.setDirectionSouth()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!flat)
+                // (Removed "Match iPhone compass": laid next to the box, the
+                // box's own magnets disturb the phone's compass, so it fed a
+                // wrong heading. One reliable reference — USB-C south — only.)
                 // Once: which physical end carries the USB-C connector, so
                 // the arrow tilts the right way when the box is upright.
                 let upright = abs(Double(sample.accMg.1)) >= 900
                 Text("Once, for tilt: stand the box upright, USB-C end UP, and tap:")
                     .font(.subheadline).foregroundStyle(.secondary)
                 Button("USB-C end is UP — confirm") {
-                    nosePlusY = Double(sample.accMg.1) > 0
-                    AgentConfig.nosePlusY = nosePlusY
+                    // Nose end = the long-axis end currently pointing up.
+                    let was = nosePlusY ?? false
+                    let now = Double(sample.accMg.1) > 0
+                    nosePlusY = now
+                    AgentConfig.nosePlusY = now
+                    // Flipping the nose end flips its azimuth by exactly 180°
+                    // in any pose — keep the set direction valid.
+                    if now != was { FileSyncViewModel.shared.nudgeBiasForNoseFlip() }
                 }
                 .buttonStyle(.bordered)
                 .disabled(!upright)
-                // Same empirical one-tap pattern as the USB-C-up confirm:
-                // hold the box in the defined pose, tap, the accel sign in
-                // that pose pins the lateral render direction (left follows
-                // automatically — it's the mirrored same sign).
-                let onSide = abs(Double(sample.accMg.0)) >= 900
-                Text("Then tip the box 90° onto its RIGHT side (USB-C end still pointing south) and tap:")
-                    .font(.subheadline).foregroundStyle(.secondary)
-                Button("Box is on its RIGHT side — confirm") {
-                    // Sign verified on the real box: at this pose the lid
-                    // must render to the RIGHT; sign(ax) drew it left.
-                    lateralSign = Double(sample.accMg.0) > 0 ? -1 : 1
-                    AgentConfig.lateralSign = lateralSign
-                }
-                .buttonStyle(.bordered)
-                .disabled(!onSide)
-                Text("(if side-tips then mirror, redo this tap with the box on its LEFT side)")
-                    .font(.caption).foregroundStyle(.secondary)
+                // No left/right flip button: the handedness is fixed by the
+                // hardware (mag-Y chirality in Triad.rows), not a user choice.
+                // A scene-mirror toggle reverses the yaw sense and broke the
+                // 360° heading + the "USB-C south" reference every time it was
+                // tapped — removed. Just two taps calibrate: direction + nose.
                 Button("Reset calibration") {
                     FileSyncViewModel.shared.resetMagCalibration()
                 }
                 .buttonStyle(.bordered)
             }
             if let off = magOffset {
-                Text(String(format: "offset [%+.0f %+.0f %+.0f] mG", off[0], off[1], off[2]))
+                Text(String(format: "offset [%+04.0f %+04.0f %+04.0f] mG", off[0], off[1], off[2]))
                     .font(.caption).foregroundStyle(.secondary)
+                    .monospacedDigit().lineLimit(1)
             }
             // iPhone's own (OS-calibrated) compass as a reference readout —
             // hold the phone away from the box, its magnets disturb it.
             if let ph = phoneCompass.headingDeg {
                 let acc = phoneCompass.accuracyDeg.map { String(format: " ±%.0f°", $0) } ?? ""
-                let box = normDeg(sample.headingDeg(magOffMg: magOffset) - headingBias)
-                Text(String(format: "iPhone compass %.0f°%@  ·  box %.0f°", ph, acc, box))
+                let box = FileSyncViewModel.shared.orientationFilter.noseAzimuth(
+                    nosePlusY: nosePlusY ?? false, biasDeg: headingBias) ?? 0
+                Text(String(format: "iPhone compass %3.0f°%@  ·  box %3.0f°", ph, acc, box))
                     .font(.caption).foregroundStyle(.secondary)
+                    .monospacedDigit().lineLimit(1)
                 Text("(compare while the phone lies flat, ≥ 50 cm from the box)")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Text(Self.howToCalibrate)
                 .font(.subheadline).foregroundStyle(.secondary)
-            OrientationBoxCanvas(pitchDeg: sample.pitchDeg(),
-                                 rollDeg: sample.rollDeg(),
-                                 headingDeg: lastFlatHeading,
-                                 // FIXED scene, screen-up = SOUTH — matches the
-                                 // standard calibration protocol (iPhone flat,
-                                 // pointing south). Any live rotation of the
-                                 // scene (phone compass input) proved unusable
-                                 // in field tests: the reference spun whenever
-                                 // the phone moved. Nothing rotates, ever.
-                                 compassRotDeg: 180,
-                                 nosePlusY: nosePlusY ?? false,
-                                 lateralSign: lateralSign)
+            OrientationBoxCanvas(rows: oriRows,
+                                 biasDeg: headingBias,
+                                 nosePlusY: nosePlusY ?? false)
         }
         .onAppear { phoneCompass.start() }
-        .onChange(of: live.sampleCount) {
-            guard let s = live.latestSample else { return }
-            // Update the render heading only while the box is flat enough
-            // for the compass to be meaningful (|az| >= 0.6 g).
-            // LID-UP only (az >= +0.6 g): upside-down the eCompass
-            // heading is mirrored — freezing it made the arrow flip
-            // east/west when the box was then stood up.
-            if Double(s.accMg.2) >= 600 {
-                lastFlatHeading = normDeg(
-                    s.headingDeg(magOffMg: magOffset) - headingBias)
-            }
-        }
         .onDisappear { phoneCompass.stop() }
-    }
-}
-
-/// Looping pose animation for the guided calibration: the wireframe box
-/// turns from the previous step's pose into the target pose (1.5 s motion
-/// + 1 s hold), so the user sees the exact movement instead of parsing
-/// "clockwise" from text. `from == to` renders a static pose (step 1).
-private struct CalPoseAnimation: View {
-    let from: (Double, Double, Double)  // pitch, roll, heading
-    let to: (Double, Double, Double)
-
-    var body: some View {
-        TimelineView(.animation) { tl in
-            let cycle = 2.5
-            let t = tl.date.timeIntervalSinceReferenceDate
-                .truncatingRemainder(dividingBy: cycle)
-            let raw = min(1.0, t / 1.5)
-            let e = raw * raw * (3 - 2 * raw)   // smoothstep ease-in-out
-            OrientationBoxCanvas(
-                pitchDeg: from.0 + (to.0 - from.0) * e,
-                rollDeg: from.1 + (to.1 - from.1) * e,
-                headingDeg: from.2 + (to.2 - from.2) * e,
-                height: 110
-            )
-        }
     }
 }
 
@@ -459,114 +413,72 @@ private final class PhoneCompass: NSObject, CLLocationManagerDelegate {
     }
 }
 
-/// Wireframe cuboid rotated by the live eCompass angles — desktop
-/// `draw_orientation_box` parity. Body frame is NED (x forward, y right,
-/// z down) with the box's LONG side on body Y; rotation body->world is
-/// Rz(yaw)·Ry(pitch)·Rx(roll), viewed from the south at ~28° elevation
-/// (orthographic). Blue lid, green nose arrow, fixed N/E ground cross.
+/// Wireframe cuboid rendered from the gyro+accel attitude filter — the
+/// box's true 3D orientation from gravity (tilt) + gyroscope (rotation),
+/// independent of the magnetometer. All poses are consistent (upside-down
+/// and compound rotations included). Fixed map view, screen-up = SOUTH;
+/// N/E/S/W labels (N red); semi-transparent lid; green nose arrow on the
+/// user-confirmed front end.
 private struct OrientationBoxCanvas: View {
-    let pitchDeg: Double
-    let rollDeg: Double
-    let headingDeg: Double
+    let rows: OriRows?
+    let biasDeg: Double
+    let nosePlusY: Bool
     var height: CGFloat = 200
-    /// iPhone compass heading: rotates the whole scene so screen-up is
-    /// the direction the phone's top points — the preview then behaves
-    /// like a compass app and the arrow points physically right no
-    /// matter which way the user faces. 0 = fixed north-up (desktop).
-    var compassRotDeg: Double = 0
-    /// User-confirmed front end: true = body +Y carries the USB-C end.
-    /// Flips the nose marker and the drawing yaw together so the arrow
-    /// tilts correctly when the box stands upright.
-    var nosePlusY: Bool = false
-    /// Lateral render sign from the right-side confirm tap. nil = not
-    /// confirmed yet (falls back to the nose-based default).
-    var lateralSign: Double? = nil
 
     var body: some View {
         Canvas { ctx, size in
             let cx = Double(size.width) / 2
             let cy = Double(size.height) / 2
             let scale = Double(size.height) / 3.2
-            let vr = -compassRotDeg * .pi / 180
-            let svr = sin(vr), cvr = cos(vr)
-            // Front-end frame change: if the USB-C end sits on body +Y,
-            // render in the 180°-about-Z rotated frame — there the front
-            // is -Y again and pitch/roll simply negate. (Adding 180° to
-            // the yaw instead mirrors left/right side-tips — wrong.)
-            // Lateral sign: from the right-side confirm tap when set (the
-            // ax sign in that pose IS the render sign — see derivation in
-            // the section), else the nose-based frame default.
-            let pitchSign = lateralSign ?? (nosePlusY ? -1.0 : 1.0)
-            let pitchDeg = pitchSign * self.pitchDeg
-            let rollDeg = nosePlusY ? -self.rollDeg : self.rollDeg
-
-            // Sign flip for the DRAWING only: the sensor reads +1 g on the
-            // axis pointing UP (z-up frame) while the NED math below assumes
-            // z-down, which mirrored the tilt direction — box stood on its
-            // nose drew the arrow pointing down. Flat behaviour and heading
-            // are unaffected.
-            let sr = -sin(rollDeg * .pi / 180), cr = cos(rollDeg * .pi / 180)
-            let sp = -sin(pitchDeg * .pi / 180), cp = cos(pitchDeg * .pi / 180)
-            // +90°: the eCompass yaw references the SHORT body axis; the
-            // shift makes the nose end's drawn azimuth equal the displayed
-            // heading. (Front-end choice is handled by the pitch/roll frame
-            // change above, NOT by the yaw.)
-            let yawDraw = (headingDeg + 90) * .pi / 180
-            let sy = sin(yawDraw), cyw = cos(yawDraw)
-
-            // body -> world (NED): Rz(yaw) * Ry(pitch) * Rx(roll)
-            func rot(_ v: (Double, Double, Double)) -> (Double, Double, Double) {
-                let (x, y, z) = v
-                let y1 = y * cr - z * sr, z1 = y * sr + z * cr        // Rx
-                let x2 = x * cp + z1 * sp, z2 = -x * sp + z1 * cp     // Ry
-                return (x2 * cyw - y1 * sy, x2 * sy + y1 * cyw, z2)   // Rz
-            }
-            // Orthographic camera looking north from the south, 28° up.
             let el = 28.0 * .pi / 180
             let sel = sin(el), cel = cos(el)
-            func project(_ w: (Double, Double, Double)) -> CGPoint {
-                // View rotation by the phone's own heading (compass mode).
-                let n = w.0 * cvr - w.1 * svr
-                let e = w.0 * svr + w.1 * cvr
-                return CGPoint(x: cx + e * scale, y: cy - (n * sel - w.2 * cel) * scale)
-            }
-            func p3(_ v: (Double, Double, Double)) -> CGPoint { project(rot(v)) }
-            func line(_ a: CGPoint, _ b: CGPoint, _ color: Color, _ w: CGFloat) {
-                var p = Path(); p.move(to: a); p.addLine(to: b)
-                ctx.stroke(p, with: .color(color), lineWidth: w)
+
+            // Fixed south-up orthographic screen mapping for a world
+            // (north, east, down) point.
+            func screen(n: Double, e: Double, d: Double) -> CGPoint {
+                CGPoint(x: cx + (-e) * scale,
+                        y: cy - ((-n) * sel - d * cel) * scale)
             }
 
             let axis = Color(uiColor: .systemGray3)
             let side = Color(uiColor: .systemGray)
             let lid = Color(red: 0.31, green: 0.71, blue: 0.98)
             let nose = Color(red: 0.26, green: 0.63, blue: 0.28)
+            func line(_ a: CGPoint, _ b: CGPoint, _ color: Color, _ w: CGFloat) {
+                var p = Path(); p.move(to: a); p.addLine(to: b)
+                ctx.stroke(p, with: .color(color), lineWidth: w)
+            }
 
-            // Ground-plane compass cross (world frame) — all four labels
-            // so the south end can't be misread as north.
-            line(project((1.35, 0, 0)), project((-1.35, 0, 0)), axis, 1)
-            line(project((0, 1.35, 0)), project((0, -1.35, 0)), axis, 1)
+            // Ground compass cross (world frame, fixed).
+            line(screen(n: 1.35, e: 0, d: 0), screen(n: -1.35, e: 0, d: 0), axis, 1)
+            line(screen(n: 0, e: 1.35, d: 0), screen(n: 0, e: -1.35, d: 0), axis, 1)
             ctx.draw(Text("N").font(.subheadline).bold().foregroundStyle(.red),
-                     at: project((1.5, 0, 0)))
+                     at: screen(n: 1.5, e: 0, d: 0))
             ctx.draw(Text("E").font(.subheadline).foregroundStyle(.secondary),
-                     at: project((0, 1.5, 0)))
+                     at: screen(n: 0, e: 1.5, d: 0))
             ctx.draw(Text("S").font(.subheadline).foregroundStyle(.secondary),
-                     at: project((-1.5, 0, 0)))
+                     at: screen(n: -1.5, e: 0, d: 0))
             ctx.draw(Text("W").font(.subheadline).foregroundStyle(.secondary),
-                     at: project((0, -1.5, 0)))
+                     at: screen(n: 0, e: -1.5, d: 0))
 
-            // Cuboid — long side is body Y. z down in NED: lid has z = -hz.
+            // Attitude from the gyro+accel filter; flat until it seeds.
+            let r = rows ?? OriRows(n: [1, 0, 0], e: [0, 1, 0], d: [0, 0, -1])
+            func p3(_ p: [Double]) -> CGPoint {
+                let w = Triad.world(p, rows: (n: r.n, e: r.e, d: r.d), biasDeg: biasDeg)
+                return screen(n: w.n, e: w.e, d: w.d)
+            }
+
+            // Cuboid in the SENSOR frame: z points UP out of the lid
+            // (accel reads +1g on z when flat lid-up), long side = y.
             let hx = 0.62, hy = 1.0, hz = 0.28
-            let v: [(Double, Double, Double)] = [
-                (hx, hy, -hz), (hx, -hy, -hz), (-hx, -hy, -hz), (-hx, hy, -hz),  // lid
-                (hx, hy, hz), (hx, -hy, hz), (-hx, -hy, hz), (-hx, hy, hz),      // bottom
+            let v: [[Double]] = [
+                [hx, hy, hz], [hx, -hy, hz], [-hx, -hy, hz], [-hx, hy, hz],     // lid
+                [hx, hy, -hz], [hx, -hy, -hz], [-hx, -hy, -hz], [-hx, hy, -hz], // bottom
             ]
             let pts = v.map { p3($0) }
             for (a, b) in [(4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)] {
                 line(pts[a], pts[b], side, 1.3)
             }
-            // Fill the lid semi-transparently: a bare wireframe cuboid is a
-            // Necker cube — the eye flips which face is "up". The filled
-            // lid disambiguates above/below at a glance.
             var lidFace = Path()
             lidFace.move(to: pts[0])
             for i in [1, 2, 3] { lidFace.addLine(to: pts[i]) }
@@ -575,14 +487,14 @@ private struct OrientationBoxCanvas: View {
             for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0)] {
                 line(pts[a], pts[b], lid, 2)
             }
-            // Nose arrow: always the -y end — in the (possibly rotated)
-            // render frame that IS the user-confirmed front end.
-            let lidC = p3((0, 0, -hz))
-            let tip = p3((0, -hy * 1.25, -hz))
+            // Nose arrow on the user-confirmed front end, on the lid.
+            let ny = nosePlusY ? hy : -hy
+            let lidC = p3([0, 0, hz])
+            let tip = p3([0, ny * 1.25, hz])
             line(lidC, tip, nose, 2)
             let ang = atan2(tip.y - lidC.y, tip.x - lidC.x)
-            for s in [1.0, -1.0] {
-                let a2 = ang + s * 2.6
+            for sgn in [1.0, -1.0] {
+                let a2 = ang + sgn * 2.6
                 line(tip, CGPoint(x: tip.x + 12 * cos(a2), y: tip.y + 12 * sin(a2)), nose, 2)
             }
         }

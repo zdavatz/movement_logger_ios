@@ -21,6 +21,8 @@ enum AgentConfig {
     private static let kNosePlusY = "agent.nosePlusY"
     private static let kNosePlusYKnown = "agent.nosePlusYKnown"
     private static let kLateralFlip = "agent.lateralFlip"
+    private static let kDirAnchorAcc = "agent.dirAnchorAcc"
+    private static let kDirAnchorMag = "agent.dirAnchorMag"
 
     /// `CBPeripheral.identifier.uuidString` of the box the user is mirroring.
     /// Persisted on every successful `.connected` so the BG handler can
@@ -116,9 +118,9 @@ enum AgentConfig {
         }
     }
 
-    /// Lateral render sign (+1/-1) from the "tipped 90° onto its RIGHT
-    /// side — confirm" tap: the sign of ax in that pose. Same empirical
-    /// one-tap pattern as `nosePlusY`. nil = not yet confirmed.
+    /// Legacy scene-mirror sign — no longer used by the renderer (handedness
+    /// is a fixed hardware fact). Kept only so `resetMagCalibration` can wipe
+    /// a stale stored value written by older builds.
     static var lateralSign: Double? {
         get { UserDefaults.standard.object(forKey: kLateralFlip) as? Double }
         set {
@@ -127,6 +129,28 @@ enum AgentConfig {
             } else {
                 UserDefaults.standard.removeObject(forKey: kLateralFlip)
             }
+        }
+    }
+
+    /// Direction anchor: the RAW (offset-independent) acc + mag reading
+    /// captured at the "USB-C points SOUTH — set direction" tap. "South" is
+    /// defined by THIS physical pose, not by a bias number — so whenever the
+    /// hard-iron offset later refines (e.g. a backflip suddenly gives the 3D
+    /// fit full pose coverage), the bias is recomputed from this anchor and
+    /// the south reference stays locked instead of drifting. Two [Double]
+    /// arrays of 3 (ax,ay,az / mx,my,mz), or nil if never set.
+    static var directionAnchorAcc: [Double]? {
+        get { UserDefaults.standard.array(forKey: kDirAnchorAcc) as? [Double] }
+        set {
+            if let v = newValue { UserDefaults.standard.set(v, forKey: kDirAnchorAcc) }
+            else { UserDefaults.standard.removeObject(forKey: kDirAnchorAcc) }
+        }
+    }
+    static var directionAnchorMag: [Double]? {
+        get { UserDefaults.standard.array(forKey: kDirAnchorMag) as? [Double] }
+        set {
+            if let v = newValue { UserDefaults.standard.set(v, forKey: kDirAnchorMag) }
+            else { UserDefaults.standard.removeObject(forKey: kDirAnchorMag) }
         }
     }
 
