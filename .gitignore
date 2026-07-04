@@ -27,3 +27,6 @@ Carthage/Build/
 # Python caches
 __pycache__/
 *.pyc
+
+# Personal recordings synced from the box — NEVER commit
+synced/

@@ -661,8 +661,14 @@ final class BleClient: NSObject {
             if value.count == 4 {
                 var done = Int64(ackOffset(value))
                 if done > Int64(image.count) { done = Int64(image.count) }
+                // Coalesce progress emits to every `fwProgressChunkBytes`, but
+                // ONLY advance the emit-watermark when we actually emit — else
+                // `done - lastEmit` never accumulates and the bar sticks at 0 %
+                // until the final byte (each chunk bumping lastEmit to `done`).
+                var emitted = lastEmit
                 if done - lastEmit >= Self.fwProgressChunkBytes || done >= Int64(image.count) {
                     emit(.fwUploadProgress(bytesDone: done, total: Int64(image.count)))
+                    emitted = done
                 }
                 if done >= Int64(image.count) {
                     // Whole image staged — move to COMMIT.
@@ -672,7 +678,7 @@ final class BleClient: NSObject {
                     sendFwCommit()
                 } else {
                     op = .uploadingFirmware(image: image, sha256: sha, offset: done,
-                                            lastEmit: max(lastEmit, done), retries: 0,
+                                            lastEmit: emitted, retries: 0,
                                             phase: .data, lastProgress: now())
                     if !sendFwChunk() {
                         finishFwUpload(success: false, message: "not connected")
@@ -1304,17 +1310,27 @@ final class BleClient: NSObject {
     private static let progressChunkBytes: Int64 = 4 * 1024
 
     // Firmware-update tunables.
-    /// Emit a progress event at most every ~2 KB (FW chunks are ~180 B, so
-    /// this throttles the UI without losing visible motion).
-    private static let fwProgressChunkBytes: Int64 = 2 * 1024
-    /// Per-FW_DATA ACK wait before a resend. Generous — the box's flash write
-    /// + notify pacing is the bottleneck, same as a READ chunk.
-    private static let fwDataTimeoutMs: Int64 = 5_000
+    /// Emit a progress event at most every ~512 B. The box's OTA ACK path is
+    /// slow (~150 B/s on old firmware), so a coarse throttle would leave the
+    /// bar visibly frozen for many seconds — keep the step small enough that
+    /// each ACK-advance shows up.
+    private static let fwProgressChunkBytes: Int64 = 512
+    /// Per-FW_DATA ACK wait before a resend. Kept short: on old box firmware
+    /// the ACK notify is occasionally *dropped* (not merely slow), and only a
+    /// resend unsticks it — the whole transfer then paces at this timeout. A
+    /// resend is idempotent (the box re-replies its current offset, never a
+    /// bad-seq), so recovering a lost ACK in 1.5 s instead of 5 s roughly
+    /// triples throughput on a flaky link. `fwMaxRetries` is raised to keep the
+    /// same ~18 s total per-chunk tolerance before declaring the op dead.
+    private static let fwDataTimeoutMs: Int64 = 1_500
     /// FW_BEGIN bank erase and FW_COMMIT SHA-pass can each take a few seconds;
     /// allow well over that before declaring the op dead.
     private static let fwBeginCommitTimeoutMs: Int64 = 15_000
-    /// Resends of a single FW_DATA chunk before giving up.
-    private static let fwMaxRetries = 5
+    /// Resends of a single FW_DATA chunk before giving up. Paired with the
+    /// 1.5 s `fwDataTimeoutMs` this is ~18 s of total per-chunk tolerance
+    /// (matches the old 5 s × 5) so a genuine multi-second box stall still
+    /// rides through without a false abort.
+    private static let fwMaxRetries = 12
 }
 
 // MARK: - CBCentralManagerDelegate
