@@ -272,6 +272,7 @@ final class BleClient: NSObject {
         case .delete(let name): sendDelete(name: name)
         case .setLogMode(let m): sendSetMode(manual: m)
         case .getLogMode: sendGetMode()
+        case .getFirmwareVersion: sendGetFirmwareVersion()
         case .setTime(let ms): sendSetTime(epochMs: ms)
         case .uploadFirmware(let image, let sha): startFwUpload(image: image, sha256: sha)
         case .abortFirmware: abortFwUpload(reason: "cancelled by user")
@@ -343,6 +344,12 @@ final class BleClient: NSObject {
             emitErr("DELETE \(name) aborted by disconnect")
         case .modeReq(let isSet, _, _):
             emitErr("\(isSet ? "SET_MODE" : "GET_MODE") aborted by disconnect")
+        case .gettingVersion:
+            // Resolve the firmware-version query as unknown so a mid-query
+            // disconnect doesn't leave the update check hanging (mirrors the
+            // desktop's mid-query FirmwareVersion(None) path). Not an error —
+            // a lost link during the connect-time probe is benign.
+            emit(.firmwareVersion(nil))
         case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
             // A disconnect during COMMIT is the EXPECTED success path: the
             // box swaps banks + resets, dropping the link within ~200 ms.
@@ -488,6 +495,21 @@ final class BleClient: NSObject {
         }
         if !writeCmdBytes(Data([FileSyncProtocol.opGetMode])) { return }
         op = .modeReq(isSet: false, manual: false, lastProgress: now())
+    }
+
+    /// GET_VERSION (0x10) — exact twin of `sendGetMode`: self-guard on an idle
+    /// op (so it can't trample an in-flight LIST/READ — the reply is demuxed by
+    /// `op`), write the single opcode byte, and park the op. The box answers
+    /// with one FileData notify carrying the ASCII version string; legacy
+    /// firmware never replies, so the `gettingVersion` watchdog arm emits
+    /// `.firmwareVersion(nil)`.
+    private func sendGetFirmwareVersion() {
+        if case .idle = op {} else {
+            emitErr("GET_VERSION rejected — another op in flight")
+            return
+        }
+        if !writeCmdBytes(Data([FileSyncProtocol.opGetVersion])) { return }
+        op = .gettingVersion(lastProgress: now())
     }
 
     /// SET_TIME `0x08 + epoch_ms(u64-LE)`: hand the box the phone's wall
@@ -855,6 +877,8 @@ final class BleClient: NSObject {
             handleDeleteNotify(data)
         case .modeReq:
             handleModeNotify(data)
+        case .gettingVersion:
+            handleVersionNotify(data)
         case .uploadingFirmware:
             handleFwNotify(data)
         }
@@ -996,6 +1020,19 @@ final class BleClient: NSObject {
         op = .idle
     }
 
+    /// GET_VERSION reply: the firmware sends the ASCII version string with no
+    /// NUL terminator, e.g. `"0.0.29"`. Decode UTF-8 and trim; an empty or
+    /// garbled decode yields `nil` so a bad reply reads as "unknown" (→ offer
+    /// update) rather than a bogus version. Mirrors the desktop `ble.rs`
+    /// GettingVersion notify arm.
+    private func handleVersionNotify(_ value: Data) {
+        guard case .gettingVersion = op else { return }
+        let v = String(decoding: value, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        emit(.firmwareVersion(v.isEmpty ? nil : v))
+        op = .idle
+    }
+
     private func parseListRow(_ line: String) -> (String, Int64)? {
         guard let commaIdx = line.lastIndex(of: ",") else { return nil }
         let name = String(line[..<commaIdx])
@@ -1108,6 +1145,7 @@ final class BleClient: NSObject {
         case .reading(_, _, _, _, _, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .deleting(_, let lp): stale = n - lp > Self.opIdleTimeoutMs
         case .modeReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
+        case .gettingVersion(let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .uploadingFirmware(_, _, _, _, _, _, let lp): stale = n - lp > Self.fwBeginCommitTimeoutMs
         case .idle: stale = false
         }
@@ -1125,6 +1163,12 @@ final class BleClient: NSObject {
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
         case .modeReq(let isSet, _, _):
             emitErr("\(isSet ? "SET_MODE" : "GET_MODE") timed out — no reply for \(Self.modeReqTimeoutMs / 1000) s (firmware may not support this opcode)")
+        case .gettingVersion:
+            // Legacy firmware (≤ v0.0.28) never replies to GET_VERSION. Emit
+            // nil (unknown → the check offers the update) rather than an error:
+            // a non-answer is expected legacy behaviour, not a fault. Never
+            // reconnects — the link is fine.
+            emit(.firmwareVersion(nil))
         case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
             // FW_BEGIN (bank erase can take ~1 s but not 30 s) or FW_COMMIT
             // (SHA pass) never answered. FW_DATA is resent above, not here.
@@ -1177,6 +1221,11 @@ final class BleClient: NSObject {
         /// `isSet` true = SET (reply is a status byte; on OK the box is
         /// now in `manual`), false = GET (reply is 0/1 = the mode).
         case modeReq(isSet: Bool, manual: Bool, lastProgress: Int64)
+        /// GET_VERSION: the box replies with one FileData notify carrying the
+        /// ASCII firmware version. Legacy firmware never answers → the watchdog
+        /// times it out (same bound as GET_MODE) and emits
+        /// `.firmwareVersion(nil)`. Never reconnects (the link is fine).
+        case gettingVersion(lastProgress: Int64)
         /// Firmware OTA in flight. `offset` is the next byte to send (==
         /// the box's last ACK), `phase` tracks the FW_BEGIN → FW_DATA →
         /// FW_COMMIT handshake. ACK-gated: one chunk outstanding at a time,

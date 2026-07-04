@@ -67,6 +67,14 @@ enum FileSyncProtocol {
     /// to the u-blox UART. Replies arrive as bridged FileData notifies.
     static let opUbxPoll: UInt8 = 0x0E
 
+    /// GET_VERSION: box replies with ONE FileData notify carrying the ASCII
+    /// firmware version string (e.g. `"0.0.29"`, no NUL terminator). Exact
+    /// send/reply shape as GET_MODE (0x07). Firmware v0.0.29+; legacy firmware
+    /// (≤ v0.0.28) doesn't implement 0x10 and sends no reply → the query times
+    /// out (same bound as GET_MODE) and the box version reads as unknown, which
+    /// the firmware-update check treats as "older than the latest release".
+    static let opGetVersion: UInt8 = 0x10
+
     // Status bytes returned in single-byte FileData notifies.
     static let statusOK: UInt8 = 0x00
     static let statusBusy: UInt8 = 0xB0
@@ -135,6 +143,12 @@ enum BleCmd {
     case setLogMode(manual: Bool)
     /// Query the box's current log-mode; reply arrives as `.logMode`.
     case getLogMode
+    /// Query the box's firmware version (0x10). Reply arrives as
+    /// `.firmwareVersion(String?)`; legacy firmware (≤ v0.0.28) never replies
+    /// so the op times out and emits `.firmwareVersion(nil)` (unknown). Exact
+    /// twin of `getLogMode` — a single-byte FileCmd whose one-notify reply is
+    /// demuxed by the worker's `op` state machine.
+    case getFirmwareVersion
     /// Push the phone's current wall-clock millis to the box so it stamps a
     /// time-sync anchor into the open Sens/Gps CSVs. Fire-and-forget — no
     /// tracked reply (so legacy firmware that ignores 0x08 never stalls us).
@@ -190,6 +204,12 @@ enum BleEvent {
     /// SET_MODE. `manual == false` → auto (logs on boot), `true` →
     /// manual (idle until START_LOG).
     case logMode(manual: Bool)
+    /// The box's firmware version from a GET_VERSION (0x10) reply, trimmed
+    /// ASCII (e.g. `"0.0.29"`), or `nil` when the box is legacy firmware that
+    /// never answered (the query timed out) or sent a garbled reply. `nil` is
+    /// "unknown" and the firmware-update check treats it as older than the
+    /// latest release.
+    case firmwareVersion(String?)
     case error(String)
     /// One decoded SensorStream snapshot (0.5 Hz). Only emitted while
     /// connected to PumpLogger firmware that exposes the SensorStream

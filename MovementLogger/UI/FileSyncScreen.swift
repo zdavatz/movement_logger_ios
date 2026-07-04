@@ -17,6 +17,12 @@ struct FileSyncScreen: View {
                         SessionBanner(running: s, onCleared: vm.clearSession)
                     }
                     ConnectionBar(vm: vm)
+                    if vm.connection == .connected, let rel = vm.firmwareUpdateAvailable {
+                        FirmwareUpdateBanner(
+                            version: rel.version,
+                            onUpdate: vm.applyFirmwareUpdate,
+                            onDismiss: { vm.firmwareUpdateAvailable = nil })
+                    }
                     if vm.transferInterrupted && vm.connection != .connected {
                         TransferInterruptedBanner()
                     }
@@ -466,6 +472,49 @@ private struct FilesPanel: View {
                 }
             }
         }
+    }
+}
+
+/// Blue banner shown while connected when a newer box firmware is available on
+/// GitHub than the box currently runs (or the box is legacy and can't report
+/// its version). "Update box" downloads the `.bin` and runs the existing OTA
+/// flow; ✕ dismisses it until the next connect. No auto-flash — the user taps.
+private struct FirmwareUpdateBanner: View {
+    let version: String
+    let onUpdate: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("🔄 New box firmware v\(version) available")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(Color(red: 0.10, green: 0.32, blue: 0.60))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.footnote.weight(.bold))
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Dismiss")
+            }
+            HStack {
+                Button(action: onUpdate) {
+                    Label("Update box", systemImage: "arrow.up.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                Spacer()
+            }
+            Text("Downloads the new firmware and installs it over Bluetooth. Keep the box close and powered during the update.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(Color(red: 0.90, green: 0.95, blue: 1.0),
+                    in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12)
+            .stroke(Color(red: 0.40, green: 0.60, blue: 0.85), lineWidth: 1))
     }
 }
 

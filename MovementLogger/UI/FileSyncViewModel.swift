@@ -331,6 +331,31 @@ final class FileSyncViewModel {
     /// green vs red styling of `fwUploadStatus`).
     var fwUploadSucceeded: Bool = false
 
+    // ---- Box-firmware auto-update check (desktop `sync_core` fw-check) --------
+    //
+    // On every connect the app queries the box's firmware version over BLE
+    // (GET_VERSION 0x10) AND fetches the latest firmware release from GitHub.
+    // When both land, `fwMaybeDecide` compares them: if the latest is newer
+    // (or the box is legacy/unknown) it surfaces `firmwareUpdateAvailable`,
+    // which drives the "New box firmware" banner. Tapping the banner's
+    // "Update box" downloads the .bin and runs the EXISTING OTA flow — there
+    // is no auto-flash.
+
+    /// Box firmware version from the connect-time GET_VERSION query. `nil` =
+    /// legacy firmware / no reply yet (treated as "older than the latest").
+    private(set) var boxFirmwareVersion: String? = nil
+    /// Set once a newer box firmware is available. `nil` = up to date / not yet
+    /// checked. Drives the update banner; cleared by dismiss, on disconnect,
+    /// and once an update starts.
+    var firmwareUpdateAvailable: FirmwareRelease? = nil
+    /// Guards a single in-flight connect-time check.
+    private var fwCheckActive = false
+    /// The GitHub half of the check, once it lands.
+    private var fwLatestRelease: FirmwareRelease? = nil
+    /// The box half of the check has resolved (a GET_VERSION reply arrived, or
+    /// the query timed out / the box was too busy → version stays `nil`).
+    private var fwBoxVersionKnown = false
+
     /// First-sample box-timestamp; sparkline X axis is
     /// `(s.timestampMs - liveT0Ms) / 1000`. Tracked outside `LiveState` so
     /// SwiftUI doesn't re-render when only this internal anchor changes.
@@ -730,19 +755,175 @@ final class FileSyncViewModel {
             logLine("ERROR: firmware read \(url.lastPathComponent): \(error.localizedDescription)")
             return
         }
+        startFirmwareUpload(data: data, fileName: url.lastPathComponent)
+    }
+
+    /// Start the OTA upload from in-memory bytes. Shared by the file-picker
+    /// path (`uploadFirmware(url:)`) and the auto-update banner
+    /// (`applyFirmwareUpdate`), which feeds it the downloaded release `.bin`.
+    /// Computes the SHA-256, seeds the progress card, and kicks the
+    /// FW_BEGIN → FW_DATA… → FW_COMMIT handshake in `BleClient`. Mirrors the
+    /// desktop's `start_firmware_upload_bytes`.
+    private func startFirmwareUpload(data: Data, fileName: String) {
+        guard connection == .connected else {
+            fwUploadSucceeded = false
+            fwUploadStatus = "Connect to the box before uploading firmware."
+            return
+        }
         guard !data.isEmpty else {
             fwUploadSucceeded = false
-            fwUploadStatus = "\(url.lastPathComponent) is empty."
+            fwUploadStatus = "\(fileName) is empty."
             return
         }
         let digest = SHA256.hash(data: data)
         let shaBytes = Data(digest)
         fwUploadStatus = nil
         fwUploadSucceeded = false
-        fwUpload = FwUploadState(fileName: url.lastPathComponent,
+        fwUpload = FwUploadState(fileName: fileName,
                                  bytesDone: 0, total: Int64(data.count))
-        logLine("FW upload \(url.lastPathComponent) (\(data.count) B, sha256 \(shaBytes.prefix(4).map { String(format: "%02x", $0) }.joined())…)")
+        logLine("FW upload \(fileName) (\(data.count) B, sha256 \(shaBytes.prefix(4).map { String(format: "%02x", $0) }.joined())…)")
         ble.send(.uploadFirmware(image: data, sha256: shaBytes))
+    }
+
+    // ---- Box-firmware auto-update check --------------------------------------
+
+    /// Kick off the automatic connect-time firmware check: fetch the latest
+    /// release from GitHub (off the BLE worker) and query the box's firmware
+    /// version over BLE (GET_VERSION). `fwMaybeDecide` compares them once both
+    /// halves land and, if the box is behind (or legacy/unknown), surfaces the
+    /// `firmwareUpdateAvailable` banner. No auto-flash — the banner's "Update
+    /// box" button drives the existing OTA flow via `applyFirmwareUpdate`.
+    /// Mirrors the desktop's `start_fw_check`, but auto-triggered on connect
+    /// and banner-gated instead of button-triggered + auto-flashing.
+    private func startFirmwareCheck() {
+        guard connection == .connected, !fwCheckActive else { return }
+        fwCheckActive = true
+        fwLatestRelease = nil
+        fwBoxVersionKnown = false
+        boxFirmwareVersion = nil
+        firmwareUpdateAvailable = nil
+        logLine("fw-check: querying box version + latest firmware release")
+        // GitHub half — off the BLE worker; result lands back on the main actor.
+        Task { [weak self] in
+            let latest = await FirmwareUpdate.checkLatest()
+            await MainActor.run {
+                guard let self, self.fwCheckActive else { return }
+                if let latest {
+                    self.fwLatestRelease = latest
+                    self.logLine("fw-check: latest firmware v\(latest.version)")
+                } else {
+                    // Couldn't reach GitHub — abandon the check silently (no
+                    // banner). A later connect re-tries.
+                    self.fwCheckActive = false
+                    self.logLine("fw-check: couldn't reach GitHub for latest firmware")
+                    return
+                }
+                self.fwMaybeDecide()
+            }
+        }
+        // Box half — GET_VERSION, retried until the single-op worker is idle
+        // enough to accept it (mirrors the desktop's transient-rejection retry).
+        queryBoxFirmwareVersion(attempt: 0)
+    }
+
+    /// Send GET_VERSION once the BLE worker is quiet. GET_VERSION takes the
+    /// single-op slot, so firing it while a LIST/READ/mode-query/sync/upload is
+    /// in flight would just be rejected — instead we wait for an idle window and
+    /// retry a bounded number of times. If the box stays busy (a long sync), we
+    /// give up and record the version as unknown so the check still resolves
+    /// (unknown → the banner offers the update).
+    private func queryBoxFirmwareVersion(attempt: Int) {
+        guard fwCheckActive, !fwBoxVersionKnown, connection == .connected else { return }
+        let workerIdle = !listing && !syncing && downloads.isEmpty
+            && syncInFlight == nil && fwUpload == nil && !briefOpInFlight
+            && !reconnecting && !gpsSurveyActive && !clockSyncing
+        if workerIdle {
+            briefOpInFlight = true
+            logLine("fw-check: GET_VERSION")
+            ble.send(.getFirmwareVersion)
+            return
+        }
+        guard attempt < 20 else {
+            logLine("fw-check: box stayed busy — firmware version unknown")
+            fwBoxVersionKnown = true
+            fwMaybeDecide()
+            return
+        }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            await MainActor.run { self?.queryBoxFirmwareVersion(attempt: attempt + 1) }
+        }
+    }
+
+    /// Once BOTH the GitHub latest and the box version are known, compare and
+    /// surface the banner. If the latest is newer — or the box is
+    /// legacy/unknown/unparseable — set `firmwareUpdateAvailable`; otherwise
+    /// clear it (up to date). Idempotent: returns early until both halves land,
+    /// clears `fwCheckActive` when it fires. Mirrors the desktop `fw_maybe_decide`
+    /// but shows a banner instead of auto-flashing. Semver compare via
+    /// `FirmwareUpdate.parseVersion`.
+    private func fwMaybeDecide() {
+        guard fwCheckActive else { return }
+        guard let latest = fwLatestRelease, fwBoxVersionKnown else { return }
+        fwCheckActive = false
+
+        let latestParsed = FirmwareUpdate.parseVersion(latest.version)
+        let needsUpdate: Bool
+        switch (boxFirmwareVersion, latestParsed) {
+        case (_, nil):
+            needsUpdate = false            // couldn't parse the latest tag — be safe
+        case (nil, .some):
+            needsUpdate = true             // legacy box, no reply → offer update
+        case let (.some(bv), .some(lv)):
+            if let bvp = FirmwareUpdate.parseVersion(bv) {
+                needsUpdate = lv > bvp
+            } else {
+                needsUpdate = true         // unparseable box version → treat as older
+            }
+        }
+
+        if needsUpdate {
+            firmwareUpdateAvailable = latest
+            logLine("fw-check: box=\(boxFirmwareVersion ?? "unknown") latest=v\(latest.version) → update available")
+        } else {
+            firmwareUpdateAvailable = nil
+            logLine("fw-check: box firmware up to date (v\(latest.version))")
+        }
+    }
+
+    /// User tapped "Update box" on the firmware banner: download the release
+    /// `.bin` and hand its bytes to the EXISTING OTA flow. Clears the banner
+    /// immediately so it can't be double-tapped; surfaces download failures in
+    /// the same `fwUploadStatus` line the OTA flow uses.
+    func applyFirmwareUpdate() {
+        guard let rel = firmwareUpdateAvailable else { return }
+        guard connection == .connected else {
+            fwUploadSucceeded = false
+            fwUploadStatus = "Connect to the box before updating firmware."
+            return
+        }
+        firmwareUpdateAvailable = nil
+        fwUploadStatus = nil
+        fwUploadSucceeded = false
+        logLine("fw-update: downloading firmware v\(rel.version)…")
+        Task { [weak self] in
+            let data = await FirmwareUpdate.download(rel.downloadURL)
+            await MainActor.run {
+                guard let self else { return }
+                guard self.connection == .connected else {
+                    self.fwUploadSucceeded = false
+                    self.fwUploadStatus = "Lost connection before the firmware download finished."
+                    return
+                }
+                guard let data, !data.isEmpty else {
+                    self.fwUploadSucceeded = false
+                    self.fwUploadStatus = "Couldn't download firmware v\(rel.version)."
+                    self.logLine("fw-update: download failed")
+                    return
+                }
+                self.startFirmwareUpload(data: data, fileName: "firmware-v\(rel.version).bin")
+            }
+        }
     }
 
     /// Cancel an in-flight firmware upload (best-effort FW_ABORT on the box).
@@ -912,6 +1093,11 @@ final class FileSyncViewModel {
                 guard self.connection == .connected, !self.syncing else { return }
                 self.startSyncPass(reason: why)
             }
+            // Box-firmware auto-update check: query the box's version + fetch
+            // the latest GitHub release, then (if the box is behind) show the
+            // "New box firmware" banner. Independent of the sync flow above;
+            // the GET_VERSION half self-defers until the worker is idle.
+            startFirmwareCheck()
         case .disconnected:
             connection = .disconnected
             reconnecting = false
@@ -921,6 +1107,13 @@ final class FileSyncViewModel {
             connectedBoxId = nil
             deleteError = nil
             briefOpInFlight = false
+            // Reset the firmware-update check so the next connect re-runs it
+            // cleanly and a stale banner doesn't linger after disconnect.
+            fwCheckActive = false
+            fwLatestRelease = nil
+            fwBoxVersionKnown = false
+            boxFirmwareVersion = nil
+            firmwareUpdateAvailable = nil
             manualQueue = []
             queuedDownloads = []
             syncing = false
@@ -1017,6 +1210,16 @@ final class FileSyncViewModel {
             AgentConfig.logModeManual = manual
             BackgroundSync.refresh()
             logLine("box log mode: \(manual ? "manual" : "auto")")
+            pumpManualQueue()
+        case .firmwareVersion(let v):
+            // GET_VERSION reply (or its legacy timeout → nil). Record the box
+            // half of the firmware check and try to decide (the GitHub half may
+            // already be in). Releases the worker like `.logMode` does.
+            briefOpInFlight = false
+            boxFirmwareVersion = v
+            fwBoxVersionKnown = true
+            logLine("box firmware version: \(v ?? "unknown (legacy / no reply)")")
+            fwMaybeDecide()
             pumpManualQueue()
         case .sample(let s):
             onSample(s)

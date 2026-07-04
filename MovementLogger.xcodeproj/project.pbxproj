@@ -15,6 +15,7 @@
 		A10000000000000000000301 /* AgentConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000311 /* AgentConfig.swift */; };
 		A10000000000000000000302 /* BackgroundSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000312 /* BackgroundSync.swift */; };
 		A10000000000000000000303 /* SyncTaskHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000313 /* SyncTaskHandler.swift */; };
+		A10000000000000000000304 /* FirmwareUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000314 /* FirmwareUpdate.swift */; };
 		A100000000000000000000AE /* FileSyncScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F4 /* FileSyncScreen.swift */; };
 		A100000000000000000000AF /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F6 /* Assets.xcassets */; };
 		A10000000000000000000101 /* CsvParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000201 /* CsvParsers.swift */; };
@@ -47,6 +48,7 @@
 		A10000000000000000000311 /* AgentConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentConfig.swift; sourceTree = "<group>"; };
 		A10000000000000000000312 /* BackgroundSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundSync.swift; sourceTree = "<group>"; };
 		A10000000000000000000313 /* SyncTaskHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncTaskHandler.swift; sourceTree = "<group>"; };
+		A10000000000000000000314 /* FirmwareUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirmwareUpdate.swift; sourceTree = "<group>"; };
 		A100000000000000000000F4 /* FileSyncScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncScreen.swift; sourceTree = "<group>"; };
 		A100000000000000000000F5 /* MovementLogger.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MovementLogger.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A100000000000000000000F6 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -119,6 +121,7 @@
 				A10000000000000000000311 /* AgentConfig.swift */,
 				A10000000000000000000312 /* BackgroundSync.swift */,
 				A10000000000000000000313 /* SyncTaskHandler.swift */,
+				A10000000000000000000314 /* FirmwareUpdate.swift */,
 			);
 			path = Sync;
 			sourceTree = "<group>";
@@ -275,6 +278,7 @@
 				A10000000000000000000301 /* AgentConfig.swift in Sources */,
 				A10000000000000000000302 /* BackgroundSync.swift in Sources */,
 				A10000000000000000000303 /* SyncTaskHandler.swift in Sources */,
+				A10000000000000000000304 /* FirmwareUpdate.swift in Sources */,
 				A10000000000000000000401 /* GpsCore.swift in Sources */,
 				A10000000000000000000402 /* GpsScreen.swift in Sources */,
 				A10000000000000000000D01 /* GpsDebugModel.swift in Sources */,
