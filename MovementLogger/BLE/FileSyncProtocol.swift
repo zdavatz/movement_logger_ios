@@ -17,6 +17,11 @@ enum FileSyncProtocol {
     /// only PumpLogger firmware exposes it. Subscribing is enough to start
     /// the stream; the box has no STREAM_START opcode.
     static let streamUUID: CBUUID = CBUUID(string: "00000100-0010-11e1-ac36-0002a5d5c51b")
+    /// BatteryStatus — 8-byte fuel-gauge snapshot (voltage / SoC / current /
+    /// flags) from the STC3115. Read + notify; box notifies ~once/min and
+    /// immediately on a low-batt transition. Optional, same as SensorStream —
+    /// legacy PumpTsueri firmware doesn't expose it, so absence is tolerated.
+    static let batteryUUID: CBUUID = CBUUID(string: "00000200-0010-11e1-ac36-0002a5d5c51b")
 
     // Opcodes (first byte of FileCmd write).
     static let opList: UInt8 = 0x01
@@ -215,6 +220,10 @@ enum BleEvent {
     /// connected to PumpLogger firmware that exposes the SensorStream
     /// characteristic; legacy PumpTsueri builds never produce this event.
     case sample(LiveSample)
+    /// One decoded BatteryStatus snapshot (~1/min, plus one on-connect READ
+    /// seed). Only emitted on firmware exposing the BatteryStatus
+    /// characteristic; legacy PumpTsueri builds never produce this.
+    case battery(BatterySample)
     /// A firmware upload started; `total` is the image byte length.
     case fwUploadStarted(total: Int64)
     /// Firmware-upload progress — `bytesDone` of `total` staged so far.

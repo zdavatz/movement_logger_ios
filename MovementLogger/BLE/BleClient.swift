@@ -54,6 +54,7 @@ final class BleClient: NSObject {
     private var cmdChar: CBCharacteristic?
     private var dataChar: CBCharacteristic?
     private var streamChar: CBCharacteristic?
+    private var battChar: CBCharacteristic?
     /// True while the u-blox GPS bridge (opcode 0x0D) is active. FileData
     /// notifies then carry raw UBX frames for the GPS Debug survey instead of
     /// FileSync payloads, so they bypass the `op` state machine. Reset on
@@ -64,6 +65,9 @@ final class BleClient: NSObject {
     /// fires once per discovered service) idempotent — it can be called
     /// multiple times during connect.
     private var streamSubscribeKicked: Bool = false
+    /// True once we've kicked off the BatteryStatus subscribe + one-shot read.
+    /// Reset on disconnect; keeps `onCharacteristicsDiscovered` idempotent.
+    private var battSubscribeKicked: Bool = false
     private var op: CurrentOp = .idle
     private var scanning: Bool = false
     /// Monotonic deadline (`now()` clock, ms) until which file commands must
@@ -372,6 +376,8 @@ final class BleClient: NSObject {
         dataChar = nil
         streamChar = nil
         streamSubscribeKicked = false
+        battChar = nil
+        battSubscribeKicked = false
         streamAsm.removeAll(keepingCapacity: true)
         streamAsmNext = 0
         bridgeActive = false
@@ -804,6 +810,7 @@ final class BleClient: NSObject {
                 if ch.uuid == FileSyncProtocol.fileCmdUUID { cmdChar = ch }
                 if ch.uuid == FileSyncProtocol.fileDataUUID { dataChar = ch }
                 if ch.uuid == FileSyncProtocol.streamUUID { streamChar = ch }
+                if ch.uuid == FileSyncProtocol.batteryUUID { battChar = ch }
             }
         }
         // Wait until both required characteristics are found across all
@@ -823,6 +830,18 @@ final class BleClient: NSObject {
             p.setNotifyValue(true, for: s)
         } else if streamChar == nil {
             emitStatus("SensorStream characteristic not advertised — legacy firmware, Live tab will be empty")
+        }
+
+        // BatteryStatus is optional (same soft-fail contract as SensorStream).
+        // Subscribe for the ~1/min + on-transition notifies AND fire one
+        // readValue so the meter isn't blank for up to a minute after connect.
+        // The read reply arrives on the SAME didUpdateValueFor path as a notify.
+        if let b = battChar, !battSubscribeKicked {
+            battSubscribeKicked = true
+            p.setNotifyValue(true, for: b)
+            p.readValue(for: b)
+        } else if battChar == nil {
+            emitStatus("BatteryStatus characteristic not advertised — legacy firmware, battery meter will be empty")
         }
     }
 
@@ -855,6 +874,12 @@ final class BleClient: NSObject {
             } else {
                 emitStatus("SensorStream subscribed (live data at 0.5 Hz)")
             }
+        case FileSyncProtocol.batteryUUID:
+            if let error = error {
+                emitStatus("BatteryStatus subscribe failed (\(error.localizedDescription)) — battery meter will be empty")
+            } else {
+                emitStatus("BatteryStatus subscribed (~1/min)")
+            }
         default:
             break
         }
@@ -863,6 +888,10 @@ final class BleClient: NSObject {
     private func onNotification(charUUID: CBUUID, data: Data) {
         if charUUID == FileSyncProtocol.streamUUID {
             handleStreamNotify(data)
+            return
+        }
+        if charUUID == FileSyncProtocol.batteryUUID {
+            handleBatteryNotify(data)
             return
         }
         // GPS-bridge mode: FileData notifies carry raw u-blox UBX frames, not
@@ -933,6 +962,15 @@ final class BleClient: NSObject {
             streamAsm.removeAll(keepingCapacity: true); streamAsmNext = 0
         default:
             streamAsm.removeAll(keepingCapacity: true); streamAsmNext = 0
+        }
+    }
+
+    /// BatteryStatus notify/read handler — always a single 8-byte packet
+    /// (well under any MTU, so no chunked path). Same handler for the
+    /// on-connect one-shot READ result and the ~1/min notifies.
+    private func handleBatteryNotify(_ bytes: Data) {
+        if let b = BatterySample.parse(bytes) {
+            emit(.battery(b))
         }
     }
 
@@ -1362,6 +1400,7 @@ extension BleClient: CBCentralManagerDelegate {
                 if ch.uuid == FileSyncProtocol.fileCmdUUID { cmdChar = ch }
                 if ch.uuid == FileSyncProtocol.fileDataUUID { dataChar = ch }
                 if ch.uuid == FileSyncProtocol.streamUUID { streamChar = ch }
+                if ch.uuid == FileSyncProtocol.batteryUUID { battChar = ch }
             }
         }
         // If we got the link back already connected (the usual case for
@@ -1430,7 +1469,8 @@ extension BleClient: CBPeripheralDelegate {
         // route the ack by characteristic UUID so the worker can update the
         // right state-machine slot.
         let u = characteristic.uuid
-        guard u == FileSyncProtocol.fileDataUUID || u == FileSyncProtocol.streamUUID else { return }
+        guard u == FileSyncProtocol.fileDataUUID || u == FileSyncProtocol.streamUUID
+              || u == FileSyncProtocol.batteryUUID else { return }
         workerCont.yield(.raw(.notifyStateUpdated(charUUID: u, error: error)))
     }
 
@@ -1438,7 +1478,8 @@ extension BleClient: CBPeripheralDelegate {
                     didUpdateValueFor characteristic: CBCharacteristic,
                     error: Error?) {
         let u = characteristic.uuid
-        guard u == FileSyncProtocol.fileDataUUID || u == FileSyncProtocol.streamUUID,
+        guard u == FileSyncProtocol.fileDataUUID || u == FileSyncProtocol.streamUUID
+              || u == FileSyncProtocol.batteryUUID,
               let value = characteristic.value else { return }
         workerCont.yield(.raw(.notification(charUUID: u, data: value)))
     }

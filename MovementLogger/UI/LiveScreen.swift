@@ -31,6 +31,7 @@ struct LiveScreen: View {
                             ReadoutGrid(sample: sample, magOffset: vm.magOffsetMg,
                                         headingBias: vm.headingBiasDeg)
                             Spacer().frame(height: 8)
+                            BatterySection(vm: vm)
                             OrientationSection(live: vm.live, sample: sample,
                                                oriRows: vm.oriRows,
                                                magOffset: $vm.magOffsetMg,
@@ -534,5 +535,51 @@ private struct Sparkline: View {
             ctx.stroke(path, with: .color(color), lineWidth: 2)
         }
         .frame(height: 56)
+    }
+}
+
+// MARK: - Battery (dedicated BatteryStatus characteristic)
+
+/// Live pack meter driven by the box's …0200… BatteryStatus characteristic
+/// (STC3115 fuel gauge). Desktop parity: stbox-viz-gui main.rs battery meter.
+/// Hidden on legacy firmware that never sends a BatterySample (`latestBattery
+/// == nil`). The SensorStream `low_batt` flagChip in ReadoutGrid stays — it's
+/// a different source (SensorStream flags bit1) and cadence (0.5 Hz vs 1/min).
+private struct BatterySection: View {
+    @Bindable var vm: FileSyncViewModel
+    @State private var now = Date()
+    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        if let b = vm.latestBattery {
+            let pct = b.socPct
+            let stale = vm.latestBatteryAt.map { now.timeIntervalSince($0) > 90 } ?? true
+            let ramp: Color = pct < 20 ? .red : (pct < 40 ? .yellow : .green)
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Battery").fontWeight(.semibold)
+                        .frame(width: 104, alignment: .leading)
+                    Spacer()
+                    Text("\(pct)%")
+                        .font(.footnote.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(ramp)
+                }
+                ProgressView(value: Double(pct) / 100.0)
+                    .tint(ramp)
+                Text(String(format: "%d%%  ·  %.2f V  ·  %+.2f A%@",
+                            pct, b.volts, b.amps, stale ? "  · stale" : ""))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if b.lowBatt {
+                    Text("⚠ low battery (< 10 %) — charge the box; GPS may lose fix")
+                        .font(.caption).foregroundStyle(.red)
+                }
+            }
+            .padding(12)
+            .background(Color(uiColor: .secondarySystemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .onReceive(tick) { now = $0 }
+        }
     }
 }

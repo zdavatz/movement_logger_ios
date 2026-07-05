@@ -322,6 +322,14 @@ final class FileSyncViewModel {
     var sessionRunning: SessionRunning? = nil
     var live: LiveState = LiveState()
 
+    /// Latest BatteryStatus snapshot from the box's dedicated …0200…
+    /// characteristic (STC3115 fuel gauge). `nil` on legacy firmware or
+    /// before the first read/notify ⇒ the Live-tab meter is simply hidden.
+    /// Standalone (not in `LiveState`) — `onSample` rebuilds `LiveState`
+    /// every 0.5 s and would otherwise wipe this ~1/min value.
+    var latestBattery: BatterySample? = nil
+    var latestBatteryAt: Date? = nil
+
     /// In-flight firmware OTA — drives the progress card. nil = none running.
     var fwUpload: FwUploadState? = nil
     /// One-line firmware-update result banner. Set on completion (success or
@@ -1134,6 +1142,8 @@ final class FileSyncViewModel {
             // its monotonic timestamp axis on reboot).
             live = LiveState()
             liveT0Ms = nil
+            latestBattery = nil
+            latestBatteryAt = nil
             logLine("disconnected")
         case .listEntry(let name, let size):
             files.append(RemoteFile(name: name, size: size))
@@ -1223,6 +1233,9 @@ final class FileSyncViewModel {
             pumpManualQueue()
         case .sample(let s):
             onSample(s)
+        case .battery(let b):
+            latestBattery = b
+            latestBatteryAt = Date()
         case .fwUploadStarted(let total):
             if var u = fwUpload {
                 u.bytesDone = 0

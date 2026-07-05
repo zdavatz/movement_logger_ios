@@ -185,6 +185,47 @@ struct LiveSample: Equatable {
     }
 }
 
+/// One decoded BatteryStatus snapshot. 8-byte packed little-endian layout
+/// (firmware `Src/battery.c`; desktop `stbox-viz-gui/src/ble.rs` BatterySample).
+/// NOTE its flags byte differs from `LiveSample`'s: here bit0 = low_batt,
+/// bit1 = logging. 8 B is well under any MTU — single-notify only, no
+/// chunk reassembly (unlike SensorStream).
+struct BatterySample: Equatable {
+    static let wireSize: Int = 8
+
+    let voltageMv: UInt16      // @0  pack voltage, mV
+    let socX10: UInt16         // @2  SoC% × 10
+    let currentX100uA: Int16   // @4  signed: + charging / − draining
+    let lowBatt: Bool          // flags @6 bit0 (raised at SoC < 10 %)
+    let logging: Bool          // flags @6 bit1
+    // byte 7 reserved
+
+    /// SoC as a 0…1 fraction for a ProgressView.
+    var socFrac: Double { min(max(Double(socX10) / 1000.0, 0), 1) }
+    /// SoC as whole percent (rounded, matches desktop `soc_pct`).
+    var socPct: Int { (Int(socX10) + 5) / 10 }
+    /// Pack voltage in volts.
+    var volts: Double { Double(voltageMv) / 1000.0 }
+    /// Current in amps (+ charging / − draining).
+    var amps: Double { Double(currentX100uA) / 10_000.0 }
+
+    static func parse(_ data: Data) -> BatterySample? {
+        guard data.count == wireSize else { return nil }
+        return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> BatterySample in
+            func u16(_ o: Int) -> UInt16 { raw.loadUnaligned(fromByteOffset: o, as: UInt16.self) }
+            func i16(_ o: Int) -> Int16  { raw.loadUnaligned(fromByteOffset: o, as: Int16.self) }
+            let flags = raw[6]
+            return BatterySample(
+                voltageMv:     UInt16(littleEndian: u16(0)),
+                socX10:        UInt16(littleEndian: u16(2)),
+                currentX100uA: Int16(littleEndian: i16(4)),
+                lowBatt:       flags & 0x01 != 0,
+                logging:       flags & 0x02 != 0
+            )
+        }
+    }
+}
+
 
 // MARK: - TRIAD full-attitude estimation
 
