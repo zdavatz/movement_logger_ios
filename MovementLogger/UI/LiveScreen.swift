@@ -28,6 +28,8 @@ struct LiveScreen: View {
                         FreshnessStrip(live: vm.live)
                         Divider()
                         if let sample = vm.live.latestSample {
+                            BoardAnglesCard(vm: vm)
+                            Spacer().frame(height: 8)
                             ReadoutGrid(sample: sample, magOffset: vm.magOffsetMg,
                                         headingBias: vm.headingBiasDeg)
                             Spacer().frame(height: 8)
@@ -143,11 +145,9 @@ private struct ReadoutGrid: View {
                        a: String(format: "X %+d", Int(s.magMg.0)),
                        b: String(format: "Y %+d", Int(s.magMg.1)),
                        c: String(format: "Z %+d", Int(s.magMg.2)))
-            ReadoutRow(label: "Angles (°)",
-                       a: String(format: "Roll %+6.1f", s.rollDeg()),
-                       b: String(format: "Pitch %+6.1f", s.pitchDeg()),
-                       c: String(format: "Yaw %5.1f",
-                                 normDeg(s.headingDeg(magOffMg: magOffset) - headingBias)))
+            // (Pitch/Roll/Yaw now live in the dedicated BoardAnglesCard above —
+            // computed about the box's physical axes, not the phone-style accel
+            // frame that swapped pitch and roll on this Y-nose box.)
             let accA = s.accAxisAnglesDeg()
             ReadoutRow(label: "Acc∠grav (°)",
                        a: String(format: "X %5.1f", accA.0),
@@ -535,6 +535,112 @@ private struct Sparkline: View {
             ctx.stroke(path, with: .color(color), lineWidth: 2)
         }
         .frame(height: 56)
+    }
+}
+
+// MARK: - Board angles (pitch / roll / yaw, absolute + zeroable)
+
+/// Prominent attitude readout for the Live tab. Two sets, both from the
+/// drift-free gyro+accel filter (NOT the raw accel formulas — those assume a
+/// phone-style frame where the long axis is X, so on this box, whose nose is
+/// the Y axis, they swap pitch and roll). `BoardAngles` decouples the three
+/// about the box's physical axes so the labels are literally what they say:
+///
+///   • Pitch — nose up / down  (going uphill vs downhill)
+///   • Roll  — lean onto the left / right side (bank about the nose)
+///   • Yaw   — heading / turn
+///
+/// Absolute yaw is a compass heading (render bias applied). "Zero here" tares
+/// all three to the current pose; the calibrated set then shows deviation from
+/// that mounted reference. Hidden math note: the tared yaw is sampled at bias 0
+/// so it measures turn-since-zero independent of the direction calibration.
+private struct BoardAnglesCard: View {
+    @Bindable var vm: FileSyncViewModel
+    @State private var now = Date()
+    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Board angles").font(.subheadline).fontWeight(.semibold)
+
+            if let rows = vm.oriRows {
+                let abs = BoardAngles.from(rows: rows, nosePlusY: vm.nosePlusY ?? false,
+                                           biasDeg: vm.headingBiasDeg)
+                let rel = BoardAngles.from(rows: rows, nosePlusY: vm.nosePlusY ?? false,
+                                           biasDeg: 0)
+
+                // --- Absolute ---
+                Text("Absolute — vs level & north")
+                    .font(.caption).foregroundStyle(.secondary)
+                angleRow(pitch: abs.pitchDeg, roll: abs.rollDeg,
+                         yaw: String(format: "%5.1f°", abs.yawDeg))
+
+                Divider().padding(.vertical, 2)
+
+                // --- Calibrated (tared) ---
+                HStack {
+                    Text("Calibrated — vs zero pose")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Zero here") { vm.zeroBoardAngles() }
+                        .font(.caption.weight(.semibold))
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+                if let ref = vm.angleZeroRef {
+                    angleRow(pitch: rel.pitchDeg - ref[0],
+                             roll: rel.rollDeg - ref[1],
+                             yaw: String(format: "%+5.1f°", normDeltaDeg(rel.yawDeg - ref[2])))
+                    HStack {
+                        if let at = vm.angleZeroAt {
+                            Text("zeroed \(agoText(now.timeIntervalSince(at))) ago")
+                                .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                        }
+                        Spacer()
+                        Button("Clear") { vm.clearBoardAngleZero() }
+                            .font(.caption2).controlSize(.mini)
+                    }
+                } else {
+                    Text("Tap “Zero here” with the board in its reference pose "
+                         + "(e.g. sitting level) to read deviation from it.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Move the box a little to seed the orientation filter…")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .onReceive(tick) { now = $0 }
+    }
+
+    /// One pitch / roll / yaw line with fixed-width monospaced values and the
+    /// plain-language axis hints underneath.
+    @ViewBuilder
+    private func angleRow(pitch: Double, roll: Double, yaw: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            angleCell("Pitch", String(format: "%+5.1f°", pitch), "up / down hill")
+            angleCell("Roll", String(format: "%+5.1f°", roll), "lean L / R")
+            angleCell("Yaw", yaw, "heading")
+        }
+    }
+
+    private func angleCell(_ name: String, _ value: String, _ hint: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(name).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.system(.title3, design: .monospaced).weight(.semibold))
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Text(hint).font(.system(size: 9)).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func agoText(_ s: TimeInterval) -> String {
+        let t = Int(max(0, s))
+        return t < 60 ? String(format: "0:%02d", t)
+                      : String(format: "%d:%02d", t / 60, t % 60)
     }
 }
 

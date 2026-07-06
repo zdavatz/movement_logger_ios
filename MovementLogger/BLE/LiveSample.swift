@@ -466,3 +466,78 @@ final class OrientationFilter {
         return m > 1e-9 ? [v[0] / m, v[1] / m, v[2] / m] : v
     }
 }
+
+// MARK: - Board angles (pitch / roll / yaw in degrees, for the Live readout)
+
+/// Intuitive board attitude in degrees, derived from the gyro+accel filter's
+/// `OriRows` (drift-free tilt from the accelerometer, heading carried by the
+/// gyroscope) and expressed about the box's PHYSICAL axes as the 3D preview
+/// defines them — nose = long axis (y), up = out of the lid (z):
+///
+///   • `pitch` — nose up (+) / down (−): elevation of the nose above horizontal.
+///   • `roll`  — bank right/starboard (+) / left (−) about the nose axis.
+///   • `yaw`   — compass azimuth [0,360) the nose points to (render bias applied).
+///
+/// Each is a single decoupled physical quantity — NOT a coupled Euler triple —
+/// so the signs are individually predictable and the numbers stay intuitive at
+/// the modest angles a foil sees (this side-steps the gimbal / axis-order
+/// pitfalls that a matrix→Euler decomposition would reintroduce). The absolute
+/// readout passes the real heading bias so yaw is a compass heading; the
+/// calibrated (tared) readout passes `biasDeg: 0` so "how far I've turned since
+/// I zeroed" is independent of the direction calibration. Pitch and roll are
+/// invariant to the vertical bias, so both readouts agree on them.
+struct BoardAngles {
+    let pitchDeg: Double
+    let rollDeg: Double
+    let yawDeg: Double
+
+    static func from(rows: OriRows, nosePlusY: Bool, biasDeg: Double) -> BoardAngles {
+        let s = nosePlusY ? 1.0 : -1.0
+        func world(_ p: [Double]) -> [Double] {
+            let w = Triad.world(p, rows: (n: rows.n, e: rows.e, d: rows.d), biasDeg: biasDeg)
+            return [w.n, w.e, w.d]
+        }
+        let nose = world([0, s, 0])          // nose axis in world (north, east, down)
+        let up = world([0, 0, 1])            // lid-up axis in world
+
+        // Pitch: elevation of the nose above the horizon (−Down is up).
+        let pitch = asin(min(max(-nose[2], -1), 1)) * 180 / .pi
+
+        // Yaw: compass azimuth of the nose, [0, 360).
+        var yaw = atan2(nose[1], nose[0]) * 180 / .pi
+        if yaw < 0 { yaw += 360 }
+
+        // Roll (bank about the nose): angle of the box-up axis away from the
+        // vertical plane through the nose. Reference frame in the plane ⟂ nose:
+        // levelUp = world-up projected ⟂ nose; right = nose × levelUp (starboard).
+        let worldUp = [0.0, 0.0, -1.0]                       // up = −Down
+        let nHat = normalize3(nose)
+        let dun = dot3(worldUp, nHat)
+        let levelUp = normalize3([worldUp[0] - dun * nHat[0],
+                                  worldUp[1] - dun * nHat[1],
+                                  worldUp[2] - dun * nHat[2]])
+        let right = cross3(nHat, levelUp)
+        let roll = atan2(dot3(up, right), dot3(up, levelUp)) * 180 / .pi
+
+        return BoardAngles(pitchDeg: pitch, rollDeg: roll, yawDeg: yaw)
+    }
+
+    private static func dot3(_ a: [Double], _ b: [Double]) -> Double {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    private static func cross3(_ a: [Double], _ b: [Double]) -> [Double] {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    }
+    private static func normalize3(_ v: [Double]) -> [Double] {
+        let m = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).squareRoot()
+        return m > 1e-9 ? [v[0] / m, v[1] / m, v[2] / m] : [0, 0, 1]
+    }
+}
+
+/// Wrap a signed degree delta into (−180, 180] — used for the tared yaw.
+func normDeltaDeg(_ d: Double) -> Double {
+    var v = d.truncatingRemainder(dividingBy: 360)
+    if v > 180 { v -= 360 }
+    if v <= -180 { v += 360 }
+    return v
+}

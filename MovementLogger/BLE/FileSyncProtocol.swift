@@ -80,6 +80,16 @@ enum FileSyncProtocol {
     /// the firmware-update check treats as "older than the latest release".
     static let opGetVersion: UInt8 = 0x10
 
+    /// GPS_POWER `<u8>` 1 = on, 0 = off. Turns the box's u-blox receiver on or
+    /// off to save battery when GPS is faulty/unused — off drops it into
+    /// UBX-RXM-PMREQ backup (~tens of µA vs ~25 mA). Persisted on the box and
+    /// re-applied at boot. Reply is one status byte, exactly like SET_MODE.
+    /// Firmware v0.0.35+; legacy firmware ignores 0x11 → the op times out and
+    /// the toggle stays at its last-known state.
+    static let opGpsPower: UInt8 = 0x11
+    /// GPS_GET_POWER: box replies one byte 1 = on, 0 = off. Twin of GET_MODE.
+    static let opGpsGetPower: UInt8 = 0x12
+
     // Status bytes returned in single-byte FileData notifies.
     static let statusOK: UInt8 = 0x00
     static let statusBusy: UInt8 = 0xB0
@@ -173,6 +183,13 @@ enum BleCmd {
     case gpsBridge(on: Bool)
     /// Forward one raw UBX poll frame to the u-blox over the bridge (0x0E).
     case ubxPoll(Data)
+    /// Turn the box's GPS receiver on/off to save battery (0x11). Persisted on
+    /// the box. Reply arrives as `.gpsPower`; a single-byte op demuxed by the
+    /// worker like `setLogMode`.
+    case setGpsPower(on: Bool)
+    /// Query the box's current GPS power state (0x12); reply arrives as
+    /// `.gpsPower`. Legacy firmware never answers → the op times out (unknown).
+    case getGpsPower
 }
 
 enum BleEvent {
@@ -215,6 +232,10 @@ enum BleEvent {
     /// "unknown" and the firmware-update check treats it as older than the
     /// latest release.
     case firmwareVersion(String?)
+    /// The box's GPS power state, from a GET (0x12) reply or a confirmed SET
+    /// (0x11). `on == true` → receiver active, `false` → in backup mode to save
+    /// battery. Legacy firmware that never answers leaves the toggle unknown.
+    case gpsPower(on: Bool)
     case error(String)
     /// One decoded SensorStream snapshot (0.5 Hz). Only emitted while
     /// connected to PumpLogger firmware that exposes the SensorStream

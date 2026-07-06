@@ -103,6 +103,35 @@ final class FileSyncViewModel {
     let orientationFilter = OrientationFilter()
     var oriRows: OriRows? = nil
 
+    /// Calibrated-angle zero reference [pitch, roll, yaw]° from "Zero here".
+    /// `nil` = not zeroed (calibrated readout shows a prompt instead).
+    var angleZeroRef: [Double]? = AgentConfig.angleZeroRef
+    /// When the tare was last captured — drives the "zeroed N ago" note.
+    var angleZeroAt: Date? = AgentConfig.angleZeroAtEpoch.map { Date(timeIntervalSince1970: $0) }
+
+    /// "Zero here": capture the current board attitude as the calibrated
+    /// reference. Yaw is sampled at bias 0 so the tared heading measures turn
+    /// since zero, independent of the "USB-C south" direction cal. No-op until
+    /// the gyro+accel filter has seeded (needs a first SensorStream sample).
+    func zeroBoardAngles() {
+        guard let rows = oriRows else { return }
+        let a = BoardAngles.from(rows: rows, nosePlusY: nosePlusY ?? false, biasDeg: 0)
+        let ref = [a.pitchDeg, a.rollDeg, a.yawDeg]
+        angleZeroRef = ref
+        AgentConfig.angleZeroRef = ref
+        let now = Date()
+        angleZeroAt = now
+        AgentConfig.angleZeroAtEpoch = now.timeIntervalSince1970
+    }
+
+    /// Clear the calibrated-angle reference (back to absolute-only).
+    func clearBoardAngleZero() {
+        angleZeroRef = nil
+        AgentConfig.angleZeroRef = nil
+        angleZeroAt = nil
+        AgentConfig.angleZeroAtEpoch = nil
+    }
+
     /// "USB-C points SOUTH — set direction": define the current filter yaw
     /// as south. Reads the gyro/accel attitude (drift-free tilt, gyro-tracked
     /// heading), sets the render bias so the nose reads 180°.
@@ -443,6 +472,14 @@ final class FileSyncViewModel {
     /// that ignores GET_MODE), false = auto (logs on boot), true =
     /// manual (idle until START_LOG).
     private(set) var logModeManual: Bool? = nil
+
+    /// Box GPS power (0x11/0x12): nil = unknown (not queried / legacy firmware
+    /// < v0.0.35 that ignores GPS on/off), true = receiver on, false = off
+    /// (backup mode, saving battery). Queried on connect; toggled by the user.
+    private(set) var gpsPowerOn: Bool? = nil
+    /// While a connect-time GPS-power query is still trying to reach an idle
+    /// worker. Stops the retry chain once the query has been sent (or given up).
+    private var gpsPowerQueryPending = false
     private static let syncPollSeconds: UInt64 = 30
 
     private let ble: BleClient
@@ -962,6 +999,46 @@ final class FileSyncViewModel {
         ble.send(.setLogMode(manual: manual))
     }
 
+    /// User toggled the box's GPS on/off (0x11). Optimistically reflect the
+    /// target so the switch doesn't snap back before the box confirms; the
+    /// `.gpsPower` reply reconciles it. On legacy firmware that never answers,
+    /// the optimistic value stays (harmless — the write was ignored, but the
+    /// user sees their intent; a reconnect + GET would correct a wrong guess).
+    func setGpsPower(_ on: Bool) {
+        briefOpInFlight = true
+        gpsPowerOn = on
+        logLine("GPS_POWER \(on ? "on" : "off")")
+        ble.send(.setGpsPower(on: on))
+    }
+
+    /// Query the box's GPS power state (0x12) once the single-op worker is idle,
+    /// retrying a bounded number of times — the GET takes the op slot, so firing
+    /// it during the connect-time GET_MODE / GET_VERSION / a LIST would just be
+    /// rejected. If the box stays busy or is legacy firmware that never answers,
+    /// the toggle stays at its last-known state. Mirrors `queryBoxFirmwareVersion`.
+    private func queryGpsPower(attempt: Int) {
+        guard connection == .connected, gpsPowerQueryPending else { return }
+        let workerIdle = !listing && !syncing && downloads.isEmpty
+            && syncInFlight == nil && fwUpload == nil && !briefOpInFlight
+            && !reconnecting && !gpsSurveyActive && !clockSyncing
+        if workerIdle {
+            gpsPowerQueryPending = false
+            briefOpInFlight = true
+            logLine("GPS_GET_POWER")
+            ble.send(.getGpsPower)
+            return
+        }
+        guard attempt < 20 else {
+            gpsPowerQueryPending = false
+            logLine("GPS power query: box stayed busy — GPS state unknown")
+            return
+        }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            await MainActor.run { self?.queryGpsPower(attempt: attempt + 1) }
+        }
+    }
+
     func clearSession() {
         if sessionRunning != nil {
             logLine("LOG session duration reached — box is idle again (manual mode)")
@@ -1106,6 +1183,10 @@ final class FileSyncViewModel {
             // "New box firmware" banner. Independent of the sync flow above;
             // the GET_VERSION half self-defers until the worker is idle.
             startFirmwareCheck()
+            // Reflect the box's GPS on/off state in the toggle. Self-defers
+            // until the worker is idle, same as the version query above.
+            gpsPowerQueryPending = true
+            queryGpsPower(attempt: 0)
         case .disconnected:
             connection = .disconnected
             reconnecting = false
@@ -1115,6 +1196,7 @@ final class FileSyncViewModel {
             connectedBoxId = nil
             deleteError = nil
             briefOpInFlight = false
+            gpsPowerQueryPending = false
             // Reset the firmware-update check so the next connect re-runs it
             // cleanly and a stale banner doesn't linger after disconnect.
             fwCheckActive = false
@@ -1230,6 +1312,12 @@ final class FileSyncViewModel {
             fwBoxVersionKnown = true
             logLine("box firmware version: \(v ?? "unknown (legacy / no reply)")")
             fwMaybeDecide()
+            pumpManualQueue()
+        case .gpsPower(let on):
+            // GET/SET_POWER reply — reflect the box's GPS state in the toggle.
+            briefOpInFlight = false
+            gpsPowerOn = on
+            logLine("box GPS: \(on ? "on" : "off (battery-save)")")
             pumpManualQueue()
         case .sample(let s):
             onSample(s)

@@ -255,7 +255,7 @@ final class BleClient: NSObject {
         // `setTimeSettleUntil`). Connection-control + the time write itself
         // never wait — only the FileCmd ops the box would otherwise drop.
         switch cmd {
-        case .list, .read, .delete, .setLogMode, .getLogMode:
+        case .list, .read, .delete, .setLogMode, .getLogMode, .setGpsPower, .getGpsPower:
             await awaitCmdSettle()
         default: break
         }
@@ -282,6 +282,8 @@ final class BleClient: NSObject {
         case .abortFirmware: abortFwUpload(reason: "cancelled by user")
         case .gpsBridge(let on): sendGpsBridge(on: on)
         case .ubxPoll(let frame): sendUbxPoll(frame: frame)
+        case .setGpsPower(let on): sendSetGpsPower(on: on)
+        case .getGpsPower: sendGetGpsPower()
         }
     }
 
@@ -348,6 +350,8 @@ final class BleClient: NSObject {
             emitErr("DELETE \(name) aborted by disconnect")
         case .modeReq(let isSet, _, _):
             emitErr("\(isSet ? "SET_MODE" : "GET_MODE") aborted by disconnect")
+        case .gpsPwrReq(let isSet, _, _):
+            emitErr("\(isSet ? "GPS_POWER" : "GPS_GET_POWER") aborted by disconnect")
         case .gettingVersion:
             // Resolve the firmware-version query as unknown so a mid-query
             // disconnect doesn't leave the update check hanging (mirrors the
@@ -501,6 +505,29 @@ final class BleClient: NSObject {
         }
         if !writeCmdBytes(Data([FileSyncProtocol.opGetMode])) { return }
         op = .modeReq(isSet: false, manual: false, lastProgress: now())
+    }
+
+    /// GPS_POWER (0x11) — twin of `sendSetMode`. One status-byte reply demuxed
+    /// by the `.gpsPwrReq` op; on OK the box is now in the requested state.
+    private func sendSetGpsPower(on: Bool) {
+        if case .idle = op {} else {
+            emitErr("GPS_POWER rejected — another op in flight")
+            return
+        }
+        let payload = Data([FileSyncProtocol.opGpsPower, on ? 1 : 0])
+        if !writeCmdBytes(payload) { return }
+        op = .gpsPwrReq(isSet: true, on: on, lastProgress: now())
+        emitStatus("GPS_POWER \(on ? "on" : "off") sent")
+    }
+
+    /// GPS_GET_POWER (0x12) — twin of `sendGetMode`. Reply is one byte 0/1.
+    private func sendGetGpsPower() {
+        if case .idle = op {} else {
+            emitErr("GPS_GET_POWER rejected — another op in flight")
+            return
+        }
+        if !writeCmdBytes(Data([FileSyncProtocol.opGpsGetPower])) { return }
+        op = .gpsPwrReq(isSet: false, on: false, lastProgress: now())
     }
 
     /// GET_VERSION (0x10) — exact twin of `sendGetMode`: self-guard on an idle
@@ -912,6 +939,8 @@ final class BleClient: NSObject {
             handleDeleteNotify(data)
         case .modeReq:
             handleModeNotify(data)
+        case .gpsPwrReq:
+            handleGpsPwrNotify(data)
         case .gettingVersion:
             handleVersionNotify(data)
         case .uploadingFirmware:
@@ -1064,6 +1093,25 @@ final class BleClient: NSObject {
         op = .idle
     }
 
+    private func handleGpsPwrNotify(_ value: Data) {
+        guard case .gpsPwrReq(let isSet, let on, _) = op else { return }
+        guard let b = value.first else { return }
+        if isSet {
+            // Reply is a status byte. OK ⇒ the box is now in the requested state.
+            if b == FileSyncProtocol.statusOK {
+                emit(.gpsPower(on: on))
+                emitStatus("GPS turned \(on ? "on" : "off")")
+            } else {
+                emitErr("GPS_POWER: \(FileSyncProtocol.statusMessage(b)) " +
+                    "(0x\(String(format: "%02X", b)))")
+            }
+        } else {
+            // GET reply: 0 = off, 1 = on.
+            emit(.gpsPower(on: b != 0))
+        }
+        op = .idle
+    }
+
     /// GET_VERSION reply: the firmware sends the ASCII version string with no
     /// NUL terminator, e.g. `"0.0.29"`. Decode UTF-8 and trim; an empty or
     /// garbled decode yields `nil` so a bad reply reads as "unknown" (→ offer
@@ -1189,6 +1237,7 @@ final class BleClient: NSObject {
         case .reading(_, _, _, _, _, let lp, _): stale = n - lp > Self.opIdleTimeoutMs
         case .deleting(_, let lp): stale = n - lp > Self.opIdleTimeoutMs
         case .modeReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
+        case .gpsPwrReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .gettingVersion(let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .uploadingFirmware(_, _, _, _, _, _, let lp): stale = n - lp > Self.fwBeginCommitTimeoutMs
         case .idle: stale = false
@@ -1207,6 +1256,8 @@ final class BleClient: NSObject {
         case .deleting(let name, _): emitErr("DELETE \(name) timed out — no notify for 20 s")
         case .modeReq(let isSet, _, _):
             emitErr("\(isSet ? "SET_MODE" : "GET_MODE") timed out — no reply for \(Self.modeReqTimeoutMs / 1000) s (firmware may not support this opcode)")
+        case .gpsPwrReq(let isSet, _, _):
+            emitErr("\(isSet ? "GPS_POWER" : "GPS_GET_POWER") timed out — no reply for \(Self.modeReqTimeoutMs / 1000) s (firmware may not support GPS on/off)")
         case .gettingVersion:
             // Legacy firmware (≤ v0.0.28) never replies to GET_VERSION. Emit
             // nil (unknown → the check offers the update) rather than an error:
@@ -1265,6 +1316,10 @@ final class BleClient: NSObject {
         /// `isSet` true = SET (reply is a status byte; on OK the box is
         /// now in `manual`), false = GET (reply is 0/1 = the mode).
         case modeReq(isSet: Bool, manual: Bool, lastProgress: Int64)
+        /// GPS_POWER / GPS_GET_POWER: both get one FileData reply byte, exactly
+        /// like `modeReq`. `isSet` true = SET (reply is a status byte; on OK the
+        /// box is now `on`), false = GET (reply is 0/1 = the power state).
+        case gpsPwrReq(isSet: Bool, on: Bool, lastProgress: Int64)
         /// GET_VERSION: the box replies with one FileData notify carrying the
         /// ASCII firmware version. Legacy firmware never answers → the watchdog
         /// times it out (same bound as GET_MODE) and emits

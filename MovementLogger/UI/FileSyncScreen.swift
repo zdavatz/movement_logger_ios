@@ -139,6 +139,7 @@ private struct ConnectionBar: View {
                 if vm.logModeManual == true {
                     SessionStarter(vm: vm)
                 }
+                GpsPowerSelector(vm: vm)
                 Divider()
                 FirmwareUpdateSection(vm: vm)
             }
@@ -344,6 +345,51 @@ private struct LogModeSelector: View {
         case .some(false): return "Box records automatically on power-on."
         case .some(true):  return "Box stays idle on power-on — start a session below."
         case .none:        return "Querying box… (legacy firmware can't report this)"
+        }
+    }
+}
+
+/// GPS on/off for the box (firmware v0.0.35+). OFF puts the u-blox receiver
+/// into backup mode (~tens of µA vs ~25 mA) to save battery when GPS is
+/// faulty/unused — logging keeps running (IMU + baro) and Replay still
+/// time-aligns via the phone-clock `# SYNC` anchor. Persisted on the box.
+/// `nil` = not yet known (querying, or legacy firmware that ignores 0x12);
+/// neither button highlights until the box answers.
+private struct GpsPowerSelector: View {
+    @Bindable var vm: FileSyncViewModel
+
+    private var busy: Bool {
+        vm.listing || vm.syncing || !vm.downloads.isEmpty || vm.firmwareUploading
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("GPS").font(.footnote)
+                Button {
+                    vm.setGpsPower(true)
+                } label: { Text("On") }
+                .buttonStyle(.bordered)
+                .tint(vm.gpsPowerOn == true ? .accentColor : .secondary)
+                Button {
+                    vm.setGpsPower(false)
+                } label: { Text("Off") }
+                .buttonStyle(.bordered)
+                .tint(vm.gpsPowerOn == false ? .orange : .secondary)
+                Spacer()
+            }
+            .disabled(busy)
+            Text(gpsHint)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var gpsHint: String {
+        switch vm.gpsPowerOn {
+        case .some(true):  return "GPS receiver on. Turn off to save battery if GPS is faulty — IMU + baro keep logging."
+        case .some(false): return "GPS off (backup mode) — saving battery. Replay still time-aligns; speed + track need GPS on."
+        case .none:        return "Querying box… (firmware older than v0.0.35 can't switch GPS)."
         }
     }
 }

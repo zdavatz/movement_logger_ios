@@ -23,6 +23,8 @@ enum AgentConfig {
     private static let kLateralFlip = "agent.lateralFlip"
     private static let kDirAnchorAcc = "agent.dirAnchorAcc"
     private static let kDirAnchorMag = "agent.dirAnchorMag"
+    private static let kAngleZeroRef = "agent.angleZeroRef"
+    private static let kAngleZeroAt = "agent.angleZeroAt"
 
     /// `CBPeripheral.identifier.uuidString` of the box the user is mirroring.
     /// Persisted on every successful `.connected` so the BG handler can
@@ -151,6 +153,35 @@ enum AgentConfig {
         set {
             if let v = newValue { UserDefaults.standard.set(v, forKey: kDirAnchorMag) }
             else { UserDefaults.standard.removeObject(forKey: kDirAnchorMag) }
+        }
+    }
+
+    /// Calibrated-angle zero reference: [pitch, roll, yaw] in degrees captured
+    /// at the Live tab's "Zero here" tap (yaw sampled at bias 0, so the tared
+    /// heading is direction-cal independent). `nil` = not zeroed. Persisted so
+    /// a mounted-box tare survives reconnect / app restart.
+    static var angleZeroRef: [Double]? {
+        get {
+            guard let a = UserDefaults.standard.array(forKey: kAngleZeroRef) as? [Double],
+                  a.count == 3 else { return nil }
+            return a
+        }
+        set {
+            if let v = newValue, v.count == 3 {
+                UserDefaults.standard.set(v, forKey: kAngleZeroRef)
+            } else {
+                UserDefaults.standard.removeObject(forKey: kAngleZeroRef)
+            }
+        }
+    }
+
+    /// Wall-clock (epoch seconds) of the last "Zero here" tap — drives the
+    /// "zeroed N ago" note. `nil` when never zeroed / after Clear.
+    static var angleZeroAtEpoch: Double? {
+        get { UserDefaults.standard.object(forKey: kAngleZeroAt) as? Double }
+        set {
+            if let v = newValue { UserDefaults.standard.set(v, forKey: kAngleZeroAt) }
+            else { UserDefaults.standard.removeObject(forKey: kAngleZeroAt) }
         }
     }
 
