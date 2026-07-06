@@ -23,7 +23,6 @@ struct GpsDebugScreen: View {
                     if let latest = vm.gps.log.last, vm.gps.running {
                         summaryCard(latest)
                     }
-                    logCard
                     if let p = vm.gps.epochCsvPath {
                         filesCard(epoch: p, signals: vm.gps.signalsCsvPath)
                     }
@@ -96,20 +95,13 @@ struct GpsDebugScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    private var logCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Survey log").font(.caption).foregroundStyle(.secondary)
-            if vm.gps.log.isEmpty {
-                Text("No output yet. Start a survey to poll the receiver.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            } else {
-                // Newest last; show the tail.
-                ForEach(Array(vm.gps.log.suffix(40).enumerated()), id: \.offset) { _, line in
-                    Text(line)
-                        .font(.system(.caption2, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .foregroundStyle(line.hasPrefix("(no NAV-PVT") ? Color.orange : Color.primary)
-                }
+    private func filesCard(epoch: String, signals: String?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("CSV output (Files app → On My iPhone → Movement Logger)")
+                .font(.caption).foregroundStyle(.secondary)
+            GpsOutputFileRow(path: epoch)
+            if let signals {
+                GpsOutputFileRow(path: signals)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -117,21 +109,39 @@ struct GpsDebugScreen: View {
         .background(Color.secondary.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
+}
 
-    private func filesCard(epoch: String, signals: String?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("CSV output (Files app → On My iPhone → Movement Logger)")
-                .font(.caption).foregroundStyle(.secondary)
-            Text((epoch as NSString).lastPathComponent)
-                .font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
-            if let signals {
-                Text((signals as NSString).lastPathComponent)
-                    .font(.system(.caption2, design: .monospaced)).textSelection(.enabled)
+/// One CSV output file: filename + a **View** button (opens the same
+/// `DownloadedFileViewer` sheet the Sync tab's sensor files use) and a
+/// **Share** button (system share sheet). Both work mid-survey — the file is
+/// written incrementally, so View/Share reflect whatever's on disk so far.
+private struct GpsOutputFileRow: View {
+    let path: String
+    @State private var viewing = false
+
+    private var url: URL { URL(fileURLWithPath: path) }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text((path as NSString).lastPathComponent)
+                .font(.system(.caption2, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                viewing = true
+            } label: {
+                Label("View", systemImage: "doc.text")
             }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            ShareLink(item: url) {
+                Label("Share", systemImage: "square.and.arrow.up")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(Color.secondary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .sheet(isPresented: $viewing) {
+            DownloadedFileViewer(url: url)
+        }
     }
 }

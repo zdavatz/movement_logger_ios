@@ -655,8 +655,9 @@ private struct FileRow: View {
 /// inline preview capped at ~256 KB; everything else falls back to a
 /// summary + Share. The ShareLink in the toolbar always exports the
 /// real file so AirDrop / Mail / Files all work regardless of the
-/// content type. Mirrors `LogFileViewer` below.
-private struct DownloadedFileViewer: View {
+/// content type. Mirrors `LogFileViewer` below. Internal (not `private`) so the
+/// GPS Debug tab reuses the exact same viewer for its `*_gnss_*.csv` output.
+struct DownloadedFileViewer: View {
     let url: URL
     @Environment(\.dismiss) private var dismiss
     @State private var preview: String = ""
