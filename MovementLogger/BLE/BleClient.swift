@@ -255,7 +255,8 @@ final class BleClient: NSObject {
         // `setTimeSettleUntil`). Connection-control + the time write itself
         // never wait — only the FileCmd ops the box would otherwise drop.
         switch cmd {
-        case .list, .read, .delete, .setLogMode, .getLogMode, .setGpsPower, .getGpsPower:
+        case .list, .read, .delete, .setLogMode, .getLogMode, .setGpsPower, .getGpsPower,
+             .getCalibration, .setCalibration:
             await awaitCmdSettle()
         default: break
         }
@@ -284,6 +285,8 @@ final class BleClient: NSObject {
         case .ubxPoll(let frame): sendUbxPoll(frame: frame)
         case .setGpsPower(let on): sendSetGpsPower(on: on)
         case .getGpsPower: sendGetGpsPower()
+        case .getCalibration: sendGetCalibration()
+        case .setCalibration(let blob): sendSetCalibration(blob: blob)
         }
     }
 
@@ -352,6 +355,13 @@ final class BleClient: NSObject {
             emitErr("\(isSet ? "SET_MODE" : "GET_MODE") aborted by disconnect")
         case .gpsPwrReq(let isSet, _, _):
             emitErr("\(isSet ? "GPS_POWER" : "GPS_GET_POWER") aborted by disconnect")
+        case .calibrationReq(let isSet, _, _):
+            // A mid-CAL_GET/CAL_SET link drop is benign: the client keeps its
+            // local AgentConfig, and the next connect's chain re-runs GET_CAL
+            // (and any queued SET from a local calibration change re-sends
+            // itself when the user next touches it). Log only — no error
+            // banner about a mid-teardown calibration RPC.
+            emitStatus("\(isSet ? "CAL_SET" : "CAL_GET") aborted by disconnect")
         case .gettingVersion:
             // Resolve the firmware-version query as unknown so a mid-query
             // disconnect doesn't leave the update check hanging (mirrors the
@@ -528,6 +538,45 @@ final class BleClient: NSObject {
         }
         if !writeCmdBytes(Data([FileSyncProtocol.opGpsGetPower])) { return }
         op = .gpsPwrReq(isSet: false, on: false, lastProgress: now())
+    }
+
+    /// CAL_GET (0x13). Fetch the box's persisted board-orientation calibration
+    /// blob so a "Zero here" / nosePlusY / heading-bias set on ANY host is
+    /// visible to this one on the next connect. Firmware v0.0.37+; legacy
+    /// silently ignores it → the `.calibrationReq` op times out and emits
+    /// `.calibration(nil)`. Best-effort like `sendGetGpsPower`: self-guards on
+    /// `op == .idle`, never trampling a LIST/READ; the caller re-queues after
+    /// the current op completes. Reply is a single 32-byte FileData notify.
+    private func sendGetCalibration() {
+        if case .idle = op {} else {
+            emitErr("CAL_GET rejected — another op in flight")
+            return
+        }
+        if !writeCmdBytes(Data([FileSyncProtocol.opCalGet])) { return }
+        op = .calibrationReq(isSet: false, blob: Data(count: 32), lastProgress: now())
+    }
+
+    /// CAL_SET (0x14 + 32-byte blob). Push the per-field-encoded blob (see
+    /// `Calibration.encode`) to the box for merge into `CAL.CFG`. Box replies
+    /// one status byte; the `.calibrationReq` op demuxes it and, on OK,
+    /// re-emits `.calibration(blob)` with the just-pushed blob so the client
+    /// mirrors the values as authoritative without a second GET round-trip.
+    /// Rejected while another op is in flight — same as `sendSetGpsPower`.
+    private func sendSetCalibration(blob: Data) {
+        guard blob.count == 32 else {
+            emitErr("CAL_SET: internal — blob must be 32 bytes")
+            return
+        }
+        if case .idle = op {} else {
+            emitErr("CAL_SET rejected — another op in flight")
+            return
+        }
+        var payload = Data([FileSyncProtocol.opCalSet])
+        payload.append(blob)
+        if !writeCmdBytes(payload) { return }
+        let mask = blob.count >= 2 ? blob[blob.startIndex + 1] : 0
+        emitStatus(String(format: "CAL_SET sent (mask=0x%02X)", mask))
+        op = .calibrationReq(isSet: true, blob: blob, lastProgress: now())
     }
 
     /// GET_VERSION (0x10) — exact twin of `sendGetMode`: self-guard on an idle
@@ -943,6 +992,8 @@ final class BleClient: NSObject {
             handleGpsPwrNotify(data)
         case .gettingVersion:
             handleVersionNotify(data)
+        case .calibrationReq:
+            handleCalibrationNotify(data)
         case .uploadingFirmware:
             handleFwNotify(data)
         }
@@ -1112,6 +1163,42 @@ final class BleClient: NSObject {
         op = .idle
     }
 
+    /// CAL_GET / CAL_SET reply — demuxed by the `.calibrationReq` op's
+    /// `isSet`:
+    /// - GET (0x13): expect a 32-byte blob → emit `.calibration(replyBytes)`.
+    ///   Anything shorter/longer → treat as `nil` (a firmware bug or wire
+    ///   desync) so a stray notify doesn't lock the op; the client falls back
+    ///   to its local AgentConfig.
+    /// - SET (0x14): expect a single status byte. 0x00 OK ⇒ re-emit
+    ///   `.calibration(sentBlob)` with the just-pushed blob so the receiver
+    ///   mirrors it as authoritative without a second GET round-trip.
+    ///   Anything else surfaces as an error and the client keeps its
+    ///   optimistic local update (the state on the box is unchanged).
+    private func handleCalibrationNotify(_ value: Data) {
+        guard case .calibrationReq(let isSet, let sent, _) = op else { return }
+        if isSet {
+            if let b = value.first {
+                if b == FileSyncProtocol.statusOK {
+                    emit(.calibration(sent))
+                    let mask = sent.count >= 2 ? sent[sent.startIndex + 1] : 0
+                    emitStatus(String(format: "CAL_SET OK (mask=0x%02X)", mask))
+                } else {
+                    let msg = FileSyncProtocol.statusMessage(b)
+                    emitErr("CAL_SET: \(msg) (0x\(String(format: "%02X", b)))")
+                }
+            }
+        } else {
+            if value.count == 32 {
+                emit(.calibration(value))
+            } else {
+                // Wire desync or firmware bug — treat like the timeout: the
+                // client falls back to its local AgentConfig.
+                emit(.calibration(nil))
+            }
+        }
+        op = .idle
+    }
+
     /// GET_VERSION reply: the firmware sends the ASCII version string with no
     /// NUL terminator, e.g. `"0.0.29"`. Decode UTF-8 and trim; an empty or
     /// garbled decode yields `nil` so a bad reply reads as "unknown" (→ offer
@@ -1239,6 +1326,7 @@ final class BleClient: NSObject {
         case .modeReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .gpsPwrReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .gettingVersion(let lp): stale = n - lp > Self.modeReqTimeoutMs
+        case .calibrationReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .uploadingFirmware(_, _, _, _, _, _, let lp): stale = n - lp > Self.fwBeginCommitTimeoutMs
         case .idle: stale = false
         }
@@ -1264,6 +1352,14 @@ final class BleClient: NSObject {
             // a non-answer is expected legacy behaviour, not a fault. Never
             // reconnects — the link is fine.
             emit(.firmwareVersion(nil))
+        case .calibrationReq(let isSet, _, _):
+            // Legacy firmware (< v0.0.37) never replies to CAL_GET / CAL_SET.
+            // Drop to Idle without reconnecting; on a GET-side timeout emit
+            // `.calibration(nil)` so the client stops waiting and falls back
+            // to its local AgentConfig. On a SET-side timeout stay silent —
+            // the client keeps its optimistic local update, and re-sending
+            // it later is a normal path (not an error to surface).
+            if !isSet { emit(.calibration(nil)) }
         case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
             // FW_BEGIN (bank erase can take ~1 s but not 30 s) or FW_COMMIT
             // (SHA pass) never answered. FW_DATA is resent above, not here.
@@ -1320,6 +1416,13 @@ final class BleClient: NSObject {
         /// like `modeReq`. `isSet` true = SET (reply is a status byte; on OK the
         /// box is now `on`), false = GET (reply is 0/1 = the power state).
         case gpsPwrReq(isSet: Bool, on: Bool, lastProgress: Int64)
+        /// CAL_GET (0x13) or CAL_SET (0x14) in flight — waiting for the FileData
+        /// reply. `isSet` true = SET (reply is one status byte; on OK the box
+        /// merged our blob into `CAL.CFG` and we re-emit `.calibration(blob)`
+        /// with the just-pushed bytes as authoritative), false = GET (reply is
+        /// the 32-byte blob → `.calibration(replyBytes)`). `blob` carries the
+        /// sent bytes for the SET path so the reply handler can echo them back.
+        case calibrationReq(isSet: Bool, blob: Data, lastProgress: Int64)
         /// GET_VERSION: the box replies with one FileData notify carrying the
         /// ASCII firmware version. Legacy firmware never answers → the watchdog
         /// times it out (same bound as GET_MODE) and emits

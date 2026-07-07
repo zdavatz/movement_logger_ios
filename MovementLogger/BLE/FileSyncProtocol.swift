@@ -90,6 +90,19 @@ enum FileSyncProtocol {
     /// GPS_GET_POWER: box replies one byte 1 = on, 0 = off. Twin of GET_MODE.
     static let opGpsGetPower: UInt8 = 0x12
 
+    /// CAL_GET (firmware v0.0.37+). Fetch the box's persisted board-orientation
+    /// calibration blob so a "Zero here" / nosePlusY / heading-bias set on any
+    /// host survives on the next connect from a different one. Box replies with
+    /// a single 32-byte FileData notify carrying the blob (layout in
+    /// `Calibration.swift`). Legacy firmware silently ignores 0x13.
+    static let opCalGet: UInt8 = 0x13
+    /// CAL_SET `[32-byte blob]` (firmware v0.0.37+). Push a per-field-encoded
+    /// blob (see `Calibration.encode`) — only fields whose `valid_mask` bit is
+    /// set have their box-side value overwritten; the merge leaves everything
+    /// else alone. Box replies one status byte (0x00 = OK). Legacy firmware
+    /// silently ignores 0x14.
+    static let opCalSet: UInt8 = 0x14
+
     // Status bytes returned in single-byte FileData notifies.
     static let statusOK: UInt8 = 0x00
     static let statusBusy: UInt8 = 0xB0
@@ -190,6 +203,15 @@ enum BleCmd {
     /// Query the box's current GPS power state (0x12); reply arrives as
     /// `.gpsPower`. Legacy firmware never answers → the op times out (unknown).
     case getGpsPower
+    /// Fetch the box's persisted calibration blob (0x13). Reply arrives as
+    /// `.calibration(Data?)` — `nil` on legacy firmware / timeout. Firmware
+    /// v0.0.37+.
+    case getCalibration
+    /// Push a 32-byte calibration blob (0x14) — see `Calibration.encode`.
+    /// Reply arrives as `.calibration(Data?)` (with the sent blob on OK, so
+    /// the receiver mirrors it as authoritative without a second GET
+    /// round-trip). Firmware v0.0.37+.
+    case setCalibration(blob: Data)
 }
 
 enum BleEvent {
@@ -257,4 +279,10 @@ enum BleEvent {
     /// is active. Consumed by the GPS Debug survey; never touches the FileSync
     /// op state machine.
     case ubxFrame(Data)
+    /// The box's calibration blob, from a CAL_GET (0x13) reply or a confirmed
+    /// CAL_SET (0x14) round-trip. `Some(blob)` = the box's current 32-byte
+    /// blob (receiver should `Calibration.decode` it to drive local state);
+    /// `nil` = legacy firmware / GET timed out — the receiver keeps its local
+    /// `AgentConfig`.
+    case calibration(Data?)
 }

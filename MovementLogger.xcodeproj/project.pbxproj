@@ -37,6 +37,7 @@
 		A10000000000000000000402 /* GpsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000412 /* GpsScreen.swift */; };
 		A10000000000000000000D01 /* GpsDebugModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000D11 /* GpsDebugModel.swift */; };
 		A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000D12 /* GpsDebugScreen.swift */; };
+		A10000000000000000000E01 /* Calibration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000E11 /* Calibration.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -71,6 +72,7 @@
 		A10000000000000000000412 /* GpsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsScreen.swift; sourceTree = "<group>"; };
 		A10000000000000000000D11 /* GpsDebugModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsDebugModel.swift; sourceTree = "<group>"; };
 		A10000000000000000000D12 /* GpsDebugScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsDebugScreen.swift; sourceTree = "<group>"; };
+		A10000000000000000000E11 /* Calibration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Calibration.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -158,6 +160,7 @@
 				A100000000000000000000F2 /* BleClient.swift */,
 				A10000000000000000000D11 /* GpsDebugModel.swift */,
 				A100000000000000000000F7 /* SyncDb.swift */,
+				A10000000000000000000E11 /* Calibration.swift */,
 			);
 			path = BLE;
 			sourceTree = "<group>";
@@ -283,6 +286,7 @@
 				A10000000000000000000402 /* GpsScreen.swift in Sources */,
 				A10000000000000000000D01 /* GpsDebugModel.swift in Sources */,
 				A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */,
+				A10000000000000000000E01 /* Calibration.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -413,7 +417,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 17;
 				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -423,7 +427,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.15;
+				MARKETING_VERSION = 1.0.17;
 				PRODUCT_BUNDLE_IDENTIFIER = ch.pumptsueri.movementlogger;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -437,7 +441,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 15;
+				CURRENT_PROJECT_VERSION = 17;
 				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -447,7 +451,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.15;
+				MARKETING_VERSION = 1.0.17;
 				PRODUCT_BUNDLE_IDENTIFIER = ch.pumptsueri.movementlogger;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

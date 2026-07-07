@@ -122,6 +122,14 @@ final class FileSyncViewModel {
         let now = Date()
         angleZeroAt = now
         AgentConfig.angleZeroAtEpoch = now.timeIntervalSince1970
+        // Also push to the box's CAL.CFG so a "Zero here" done on the phone is
+        // visible from desktop/Android on their next connect (box is source of
+        // truth per DESIGN.md). Only the angle-zero bit is set, so the box's
+        // merge leaves the other calibration fields alone. Wire epoch is ms.
+        pushCalToBox(Calibration.EncodeInput(
+            angleZeroRef: ref,
+            angleZeroAtEpochMs: Int64(now.timeIntervalSince1970 * 1000)
+        ))
     }
 
     /// Clear the calibrated-angle reference (back to absolute-only).
@@ -130,36 +138,68 @@ final class FileSyncViewModel {
         AgentConfig.angleZeroRef = nil
         angleZeroAt = nil
         AgentConfig.angleZeroAtEpoch = nil
+        // Push a zeros-with-mask-set to the box — the merge stores all-zero
+        // for the tare fields (angleZeroAtEpoch=0 is the "never zeroed"
+        // sentinel; the ref itself reads back as [0,0,0]° via decode). Any
+        // host reading afterwards sees no tare, matching the local Clear.
+        pushCalToBox(Calibration.EncodeInput(
+            angleZeroRef: [0, 0, 0],
+            angleZeroAtEpochMs: 0
+        ))
     }
 
     /// "USB-C points SOUTH — set direction": define the current filter yaw
     /// as south. Reads the gyro/accel attitude (drift-free tilt, gyro-tracked
-    /// heading), sets the render bias so the nose reads 180°.
+    /// heading), sets the render bias so the nose reads 180°. Also pushes the
+    /// new bias to the box (CAL_SET, heading-bias bit only).
     func setDirectionSouth() {
         guard let az = orientationFilter.noseAzimuth(nosePlusY: nosePlusY ?? false, biasDeg: 0)
         else { return }
-        setBias(az - 180.0)
+        setBias(az - 180.0, pushToBox: true)
     }
 
     /// "Match iPhone compass": box laid flat, parallel to the phone, USB-C
     /// pointing the same way as the top of the phone. Sets the bias so the
     /// box nose reads the phone's (OS-calibrated) heading — no need to know
-    /// where south is.
+    /// where south is. Also pushes to the box.
     func setDirectionFromPhone(_ phoneHeadingDeg: Double) {
         guard let az = orientationFilter.noseAzimuth(nosePlusY: nosePlusY ?? false, biasDeg: 0)
         else { return }
-        setBias(az - phoneHeadingDeg)
+        setBias(az - phoneHeadingDeg, pushToBox: true)
     }
 
     /// Flipping the nose end flips the nose azimuth by exactly 180°,
     /// independent of pose — so add 180° to keep the set direction valid.
-    func nudgeBiasForNoseFlip() { setBias(headingBiasDeg + 180.0) }
+    /// The nose-toggle call site (`confirmNoseUp`) pushes nose + bias in one
+    /// blob, so this internal helper doesn't need to push itself.
+    func nudgeBiasForNoseFlip() { setBias(headingBiasDeg + 180.0, pushToBox: false) }
 
-    private func setBias(_ deg: Double) {
+    /// User confirmed which physical end (USB-C) points up while the box is
+    /// standing on its end. Persists locally + pushes both `nosePlusY` and the
+    /// (possibly-nudged) `headingBiasDeg` to the box in one CAL_SET so a
+    /// half-write can't leave the box inconsistent. Mirrors the desktop's
+    /// "USB-C end is UP — confirm" tap in `main.rs`.
+    func confirmNoseUp(_ pos: Bool) {
+        let was = nosePlusY ?? false
+        nosePlusY = pos
+        AgentConfig.nosePlusY = pos
+        // Flipping the nose end flips its azimuth by exactly 180° in any
+        // pose — nudge the bias to keep the set direction valid.
+        if pos != was { setBias(headingBiasDeg + 180.0, pushToBox: false) }
+        pushCalToBox(Calibration.EncodeInput(
+            nosePlusY: pos,
+            headingBiasDeg: headingBiasDeg
+        ))
+    }
+
+    private func setBias(_ deg: Double, pushToBox: Bool) {
         var b = deg.truncatingRemainder(dividingBy: 360)
         if b < 0 { b += 360 }
         headingBiasDeg = b
         AgentConfig.headingBiasDeg = b
+        if pushToBox {
+            self.pushCalToBox(Calibration.EncodeInput(headingBiasDeg: b))
+        }
     }
     /// Sliding window of recent raw mag samples (x, y, z) over ALL poses —
     /// the input to the full 3D hard-iron sphere fit. Unlike the old
@@ -180,7 +220,9 @@ final class FileSyncViewModel {
     /// Wipe the compass calibration: hard-iron offset, direction bias and
     /// the auto-cal windows. The continuous auto-calibration then starts
     /// learning from scratch (ordinary handling through varied poses
-    /// re-fills the 3D fit).
+    /// re-fills the 3D fit). Also wipes the box's copy (all four mask bits
+    /// set to zero payloads) so a fresh calibration on this or any other
+    /// host starts from a clean slate. Legacy firmware silently ignores it.
     func resetMagCalibration() {
         magOffsetMg = nil
         AgentConfig.magOffsetMg = nil
@@ -191,11 +233,28 @@ final class FileSyncViewModel {
         AgentConfig.lateralSign = nil   // clear any stale stored value
         AgentConfig.directionAnchorAcc = nil
         AgentConfig.directionAnchorMag = nil
+        // A tare captured under the old nose end / frame is now meaningless
+        // — drop it too (matches desktop's Reset calibration).
+        angleZeroRef = nil
+        AgentConfig.angleZeroRef = nil
+        angleZeroAt = nil
+        AgentConfig.angleZeroAtEpoch = nil
         autoBuf3.removeAll()
         autoBufFlat.removeAll()
         have3DFix = false
         orientationFilter.reset()
         oriRows = nil
+        // Wipe the box's copy — all four mask bits are set with all-zero
+        // payloads. The merge overwrites each field to zero, which decode()s
+        // back as the "not calibrated" sentinel (nose=false, offset=0,
+        // ref=[0,0,0]°, epoch=0 → nil, bias=0°).
+        pushCalToBox(Calibration.EncodeInput(
+            nosePlusY: false,
+            magOffsetMg: [0, 0, 0],
+            angleZeroRef: [0, 0, 0],
+            angleZeroAtEpochMs: 0,
+            headingBiasDeg: 0
+        ))
     }
 
     /// Continuous hard-iron auto-calibration. Prefers a full 3D sphere fit
@@ -480,6 +539,9 @@ final class FileSyncViewModel {
     /// While a connect-time GPS-power query is still trying to reach an idle
     /// worker. Stops the retry chain once the query has been sent (or given up).
     private var gpsPowerQueryPending = false
+    /// While a connect-time CAL_GET query is still trying to reach an idle
+    /// worker. Cleared once the query has been sent (or given up).
+    private var calibrationQueryPending = false
     private static let syncPollSeconds: UInt64 = 30
 
     private let ble: BleClient
@@ -1039,6 +1101,52 @@ final class FileSyncViewModel {
         }
     }
 
+    /// CAL_GET (0x13) once the single-op worker is idle — same self-deferring
+    /// pattern as `queryGpsPower`. Firmware v0.0.37+; legacy silently ignores
+    /// 0x13 → the op times out and `.calibration(nil)` fires, leaving the
+    /// local `AgentConfig` in charge. Only queried once per connect (chained
+    /// off the `.gpsPower` reply).
+    private func queryCalibration(attempt: Int) {
+        guard connection == .connected, calibrationQueryPending else { return }
+        let workerIdle = !listing && !syncing && downloads.isEmpty
+            && syncInFlight == nil && fwUpload == nil && !briefOpInFlight
+            && !reconnecting && !gpsSurveyActive && !clockSyncing
+        if workerIdle {
+            calibrationQueryPending = false
+            briefOpInFlight = true
+            logLine("CAL_GET")
+            ble.send(.getCalibration)
+            return
+        }
+        guard attempt < 20 else {
+            calibrationQueryPending = false
+            logLine("CAL_GET: box stayed busy — calibration unknown, keeping local config")
+            return
+        }
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            await MainActor.run { self?.queryCalibration(attempt: attempt + 1) }
+        }
+    }
+
+    /// Push a partial-update calibration blob to the box (`CAL_SET`, 0x14)
+    /// via `BleClient` (firmware v0.0.37+). Called from every local UI tap
+    /// that mutates one of the calibration fields (Zero here / Clear /
+    /// nosePlusY toggle / USB-C south / Reset calibration) — only the
+    /// touched field's bit is set in the encoded blob, so the box's
+    /// per-field merge leaves everything else alone. No-op when not
+    /// connected (the UI still mutates local + AgentConfig, and the next
+    /// connect's CAL_GET reconciles the two directions). Legacy firmware
+    /// (< v0.0.37) silently ignores the write. Continuous mag-offset
+    /// auto-calibration deliberately does NOT push (would churn SD) —
+    /// only explicit user actions (wipe / direction / tare / nose /
+    /// reset) do.
+    private func pushCalToBox(_ input: Calibration.EncodeInput) {
+        guard connection == .connected, !reconnecting else { return }
+        let blob = Calibration.encode(input)
+        ble.send(.setCalibration(blob: blob))
+    }
+
     func clearSession() {
         if sessionRunning != nil {
             logLine("LOG session duration reached — box is idle again (manual mode)")
@@ -1197,6 +1305,7 @@ final class FileSyncViewModel {
             deleteError = nil
             briefOpInFlight = false
             gpsPowerQueryPending = false
+            calibrationQueryPending = false
             // Reset the firmware-update check so the next connect re-runs it
             // cleanly and a stale banner doesn't linger after disconnect.
             fwCheckActive = false
@@ -1318,6 +1427,29 @@ final class FileSyncViewModel {
             briefOpInFlight = false
             gpsPowerOn = on
             logLine("box GPS: \(on ? "on" : "off (battery-save)")")
+            // Chain the connect-time CAL_GET now that the GPS-power slot has
+            // freed. Connect flow is GET_MODE → GET_VERSION → GET_GPS_POWER →
+            // GET_CAL, each self-guarding on an idle worker. One-shot per
+            // connect on v0.0.37+ firmware and a harmless timeout on legacy
+            // (the .calibrationReq watchdog emits `.calibration(nil)` and the
+            // client keeps its local AgentConfig).
+            if !calibrationQueryPending {
+                calibrationQueryPending = true
+                queryCalibration(attempt: 0)
+            }
+            pumpManualQueue()
+        case .calibration(let blob):
+            // CAL_GET reply (or CAL_SET echo). `nil` = legacy firmware / GET
+            // timed out — local AgentConfig stands. Merge each `Some(_)` field
+            // into both the VM's live-observed state AND AgentConfig so the
+            // SwiftUI Live screen updates and the persisted config reflects
+            // the box's per-field authority.
+            briefOpInFlight = false
+            if let blob {
+                onCalibrationBlob(blob)
+            } else {
+                logLine("CAL_GET no reply (legacy firmware < v0.0.37, keeping local config)")
+            }
             pumpManualQueue()
         case .sample(let s):
             onSample(s)
@@ -1351,6 +1483,48 @@ final class FileSyncViewModel {
             // Raw bridged u-blox UBX reply — feed the GPS Debug survey. Only
             // meaningful while a survey is running; a no-op otherwise.
             gps.feed(data)
+        }
+    }
+
+    /// Merge a CAL_GET / CAL_SET-echo blob into local state. Fields whose
+    /// valid_mask bit is clear in the blob (`nil` after decode) leave local
+    /// state alone; fields the box owns overwrite both the observed VM
+    /// property AND its AgentConfig mirror so the persisted config matches
+    /// the box's per-field authority. Mirrors the desktop's `on_calibration`.
+    @MainActor
+    private func onCalibrationBlob(_ blob: Data) {
+        guard let d = Calibration.decode(blob) else {
+            logLine("CAL_GET: malformed blob — keeping local config")
+            return
+        }
+        logLine(String(format: "CAL_GET mask=0x%02X", blob.count >= 2 ? blob[blob.startIndex + 1] : 0))
+        if let pos = d.nosePlusY, nosePlusY != pos {
+            nosePlusY = pos
+            AgentConfig.nosePlusY = pos
+        }
+        if let mo = d.magOffsetMg, magOffsetMg != mo {
+            magOffsetMg = mo
+            AgentConfig.magOffsetMg = mo
+        }
+        if let zr = d.angleZeroRef {
+            if angleZeroRef != zr {
+                angleZeroRef = zr
+                AgentConfig.angleZeroRef = zr
+            }
+            // Wire format is ms since epoch; AgentConfig stores seconds.
+            let atDate = d.angleZeroAtEpochMs.map {
+                Date(timeIntervalSince1970: Double($0) / 1000.0)
+            }
+            if angleZeroAt != atDate {
+                angleZeroAt = atDate
+                AgentConfig.angleZeroAtEpoch = atDate?.timeIntervalSince1970
+            }
+        }
+        if let bd = d.headingBiasDeg {
+            if abs(headingBiasDeg - bd) > 0.05 {
+                headingBiasDeg = bd
+                AgentConfig.headingBiasDeg = bd
+            }
         }
     }
 
