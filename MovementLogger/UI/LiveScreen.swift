@@ -305,13 +305,13 @@ private struct OrientationSection: View {
                     .font(.subheadline).foregroundStyle(.secondary)
                 Button("USB-C end is UP — confirm") {
                     // Nose end = the long-axis end currently pointing up.
-                    let was = nosePlusY ?? false
+                    // Route through the VM so the local update + the CAL_SET
+                    // push to the box are done atomically (nose + heading
+                    // bias in one blob — a nose flip nudges the bias by
+                    // 180°, and the box merge must see both together).
                     let now = Double(sample.accMg.1) > 0
+                    FileSyncViewModel.shared.confirmNoseUp(now)
                     nosePlusY = now
-                    AgentConfig.nosePlusY = now
-                    // Flipping the nose end flips its azimuth by exactly 180°
-                    // in any pose — keep the set direction valid.
-                    if now != was { FileSyncViewModel.shared.nudgeBiasForNoseFlip() }
                 }
                 .buttonStyle(.bordered)
                 .disabled(!upright)

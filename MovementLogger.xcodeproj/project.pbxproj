@@ -17,6 +17,7 @@
 		531529DEB6EE85BB56B46F25 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B50E642AE419F2872EF8B2F1 /* ContentView.swift */; };
 		6BB711BDC8A9E03CFC7C4E9D /* SessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1FF51A111E4D07B8ED9EF0F /* SessionController.swift */; };
 		6D21F01F26516DB561BDCC42 /* WorkoutKeepAlive.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617213F133B64E4AA0A7CE6F /* WorkoutKeepAlive.swift */; };
+		84B95C3736B677491FECB6AE /* Calibration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7542D3260D50D91AA1F9F342 /* Calibration.swift */; };
 		8D35D6FC926E778D67CDD1D3 /* FileSyncProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B71901CE99AEDF7D5291939 /* FileSyncProtocol.swift */; };
 		9DE6D0BD6B408961BB4439EE /* MovementLoggerWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4C9D51BBE5E8A7CDC9DAAE8 /* MovementLoggerWatchApp.swift */; };
 		A100000000000000000000AA /* MovementLoggerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000000000000000000F0 /* MovementLoggerApp.swift */; };
@@ -86,6 +87,7 @@
 		5BEEF19B16BDFCEC951C63CA /* WatchRideReceiver.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchRideReceiver.swift; sourceTree = "<group>"; };
 		617213F133B64E4AA0A7CE6F /* WorkoutKeepAlive.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkoutKeepAlive.swift; sourceTree = "<group>"; };
 		701C8A80B76519D70C9EAB65 /* WatchGpsLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchGpsLogger.swift; sourceTree = "<group>"; };
+		7542D3260D50D91AA1F9F342 /* Calibration.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Calibration.swift; sourceTree = "<group>"; };
 		A100000000000000000000F0 /* MovementLoggerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovementLoggerApp.swift; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* FileSyncProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncProtocol.swift; sourceTree = "<group>"; };
 		A100000000000000000000F2 /* BleClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BleClient.swift; sourceTree = "<group>"; };
@@ -215,6 +217,7 @@
 				A100000000000000000000F2 /* BleClient.swift */,
 				A10000000000000000000D11 /* GpsDebugModel.swift */,
 				A100000000000000000000F7 /* SyncDb.swift */,
+				7542D3260D50D91AA1F9F342 /* Calibration.swift */,
 			);
 			path = BLE;
 			sourceTree = "<group>";
@@ -416,6 +419,7 @@
 				A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */,
 				0A3E16FD73A9FA46C6E70D01 /* WatchRideReceiver.swift in Sources */,
 				21BC9E20260DBC676AC90A2F /* RidesScreen.swift in Sources */,
+				84B95C3736B677491FECB6AE /* Calibration.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -349,6 +349,40 @@ writer), `UI/GpsDebugScreen.swift` (the tab). Wiring notes:
 - `writeValue(_:for:type: .withoutResponse)` is fire-and-forget on iOS — no completion callback (in contrast to write-with-response). The 500 ms post-START_LOG sleep is preserved because the write-without-response on the underlying L2CAP socket can return before the bytes are actually transmitted, same race as Android/Rust.
 - iOS BLE scanning with `withServices: nil` requires the app to be in the foreground. That's fine for this app. We filter by `CBAdvertisementDataLocalNameKey == "PumpTsueri"` in the discover callback, mirroring the Android/desktop clients.
 
+## Box-sourced board-orientation calibration (v1.0.17+) — `Calibration.swift`
+
+The four calibration fields (`nosePlusY`, `magOffsetMg`, `angleZeroRef`
++ `angleZeroAtEpoch`, `headingBiasDeg`) live on the BOX in `CAL.CFG`
+(firmware v0.0.37+) — the app still mirrors them into `UserDefaults`
+via `AgentConfig`, but the BOX is now the source of truth. That means
+a "Zero here" or nose toggle done on the iPhone is visible to the
+Desktop and Android on their next connect (and vice versa).
+
+- **Wire format** (32-byte blob, per-field `validMask`, tenths-of-degree
+  fixed point, LE `UInt64` epoch ms): `MovementLogger/BLE/Calibration.swift`
+  — `encode(_:)` / `decode(_:)`. 1:1 port of desktop
+  `stbox-viz-gui/src/calibration.rs`; byte-compatible.
+- **On connect**: `FileSyncViewModel.queryCalibration(attempt:)` chains
+  a `CAL_GET (0x13)` after the GPS-power reply lands, same
+  self-guarded slot pattern as `GET_MODE` / `GET_VERSION`. Reply →
+  `BleEvent.calibration(Data?)` → `onCalibrationBlob` merges each
+  non-nil field into the VM's `@Published` props + `AgentConfig`;
+  fields the box hasn't set yet leave the local value alone. Legacy
+  firmware (< v0.0.37) times out silently (`.calibration(nil)`) — the
+  app keeps its UserDefaults as before.
+- **On any user tap**: `pushCalToBox(_:)` fires `CAL_SET (0x14)` with
+  ONLY the touched field's bit set — the box's per-field merge leaves
+  the other fields alone. Call sites: `zeroBoardAngles`,
+  `clearBoardAngleZero`, `setDirectionSouth`, `setDirectionFromPhone`,
+  `resetMagCalibration`, and the new `confirmNoseUp(_:)` (which pushes
+  nose + nudged bias atomically in one blob — the strict single-op
+  BLE slot rejects a second write while the first is in flight, so
+  the two-field combined send matters).
+- **Deliberately not synced**: continuous mag-offset auto-cal. Would
+  churn `CAL.CFG` on every convergence step. Only the explicit
+  `resetMagCalibration` tap pushes zeros. Desktop + Android make the
+  same tradeoff.
+
 ## BLE protocol gotchas (carried over from the Rust/Kotlin clients)
 
 - Subscribe to FileData notifications **once per connection**, not per op. Subscribing per op risks losing the first packet if the box notifies before we're ready.
