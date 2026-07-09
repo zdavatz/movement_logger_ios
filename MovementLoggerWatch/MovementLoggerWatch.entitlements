@@ -10,11 +10,10 @@
 	<true/>
 	<key>com.apple.developer.healthkit.access</key>
 	<array/>
-	<!-- Water temperature (CMWaterSubmersionManager) needs the "Submerged Depth
-	     and Pressure" capability, which Apple must MANUALLY approve for the team
-	     + bundle id (it's not self-serve like HealthKit). Until that's granted,
-	     the entitlement can't be in the profile, so it's commented out and the
-	     WaterTempManager gracefully reports no reading ("—"). Re-add on approval:
-	     <key>com.apple.developer.submerged-depth-and-pressure</key><true/> -->
+	<!-- Water temperature (CMWaterSubmersionManager). The "shallow" variant is
+	     self-serve (the "-depth-and-pressure" full/deep variant needs Apple's
+	     manual approval) and is enough for surface water temperature. -->
+	<key>com.apple.developer.submerged-shallow-depth-and-pressure</key>
+	<true/>
 </dict>
 </plist>

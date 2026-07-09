@@ -42,6 +42,8 @@
 	<string>Connects to the PumpTsueri MovementLogger box to start and stop a recording session.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Records your position once per second when no MovementLogger box is connected.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Reads the water temperature from the Apple Watch Ultra's submersion sensor during a session.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Uses a workout session to keep your MovementLogger recording running in the background.</string>
 	<key>NSHealthUpdateUsageDescription</key>
