@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>MovementLogger</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+
+	<!-- watchOS app embedded in the MovementLogger iOS app (companion). -->
+	<key>WKApplication</key>
+	<true/>
+	<!-- Paired iOS counterpart. Required for App Store delivery (a pure
+	     watch-only app can't be uploaded on Xcode 26 — it must ride inside
+	     the iOS app). Runs independently so no iPhone is needed at runtime. -->
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>ch.pumptsueri.movementlogger</string>
+	<key>WKRunsIndependentlyOfCompanionApp</key>
+	<true/>
+
+	<!-- An active HKWorkoutSession is what keeps the app running (and BLE /
+	     the 1 Hz GPS timer alive) after the wrist lowers. `location` lets
+	     CoreLocation deliver background fixes during that session. -->
+	<key>WKBackgroundModes</key>
+	<array>
+		<string>workout-processing</string>
+		<string>location</string>
+	</array>
+
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Connects to the PumpTsueri MovementLogger box to start and stop a recording session.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Records your position once per second when no MovementLogger box is connected.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Uses a workout session to keep your MovementLogger recording running in the background.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Uses a workout session to keep your MovementLogger recording running in the background.</string>
+</dict>
+</plist>
