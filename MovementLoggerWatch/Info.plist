@@ -29,12 +29,13 @@
 	<true/>
 
 	<!-- An active HKWorkoutSession is what keeps the app running (and BLE /
-	     the 1 Hz GPS timer alive) after the wrist lowers. `location` lets
-	     CoreLocation deliver background fixes during that session. -->
+	     the 1 Hz GPS timer alive) after the wrist lowers; CoreLocation delivers
+	     background fixes during that session. `workout-processing` is the only
+	     valid watchOS background mode here — `location` is an iOS-only value and
+	     the App Store rejects it (error 90362). -->
 	<key>WKBackgroundModes</key>
 	<array>
 		<string>workout-processing</string>
-		<string>location</string>
 	</array>
 
 	<key>NSBluetoothAlwaysUsageDescription</key>
