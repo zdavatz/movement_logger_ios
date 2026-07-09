@@ -82,9 +82,11 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
     private func beginUpdates() {
         guard !isLogging else { return }
         status = "Waiting for GPS fix…"
-        // Safe once WKBackgroundModes contains `location`; keeps fixes coming
-        // while a workout session holds the app awake.
-        manager.allowsBackgroundLocationUpdates = true
+        // NB: do NOT set `manager.allowsBackgroundLocationUpdates = true` on
+        // watchOS — it throws unless `WKBackgroundModes` contains `location`,
+        // which the App Store rejects (error 90362). This app runs in the
+        // foreground during an active workout session, so background location
+        // isn't needed; setting it was the crash on Start.
         manager.startUpdatingLocation()
         openCsv()
         startUptimeMs = Self.uptimeMs()
