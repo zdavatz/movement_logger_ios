@@ -28,11 +28,18 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
     private(set) var loggedRows: UInt64 = 0
     private(set) var status = "Idle"
     private(set) var logName: String? = nil
+    /// Top speed (km/h) seen this session — reset on `start()`.
+    private(set) var maxSpeedKmh: Double = 0
+    /// Current speed (km/h) of the freshest fix, for a live readout.
+    private(set) var speedKmh: Double = 0
 
     @ObservationIgnored private let manager = CLLocationManager()
     @ObservationIgnored private var latest: CLLocation?
     @ObservationIgnored private var tickTimer: Timer?
     @ObservationIgnored private var csvHandle: FileHandle?
+    /// URL of the CSV for the current/just-finished ride — handed to
+    /// WatchConnectivity to sync to the phone when the session ends.
+    @ObservationIgnored private(set) var csvURL: URL?
     @ObservationIgnored private var startUptimeMs: Int64 = 0
     /// Set by `start()`, cleared by `stop()`. Lets us begin updates from the
     /// authorization callback if permission was still pending at Start.
@@ -53,6 +60,8 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         wantLog = true
         loggedRows = 0
         fixAvailable = false
+        maxSpeedKmh = 0
+        speedKmh = 0
         switch authStatus {
         case .notDetermined:
             status = "Requesting location permission…"
@@ -122,6 +131,11 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             fixAvailable = true
             status = "Recording · ±\(Int(newest.horizontalAccuracy.rounded())) m"
         }
+        // Speed / top speed (CLLocation.speed is m/s; -1 = invalid).
+        if newest.speed >= 0 {
+            speedKmh = newest.speed * 3.6
+            if speedKmh > maxSpeedKmh { maxSpeedKmh = speedKmh }
+        }
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
@@ -143,6 +157,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         csvHandle = try? FileHandle(forWritingTo: url)
         _ = try? csvHandle?.seekToEnd()   // append after the header row
         logName = name
+        csvURL = url
     }
 
     private func closeCsv() {

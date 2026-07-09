@@ -33,6 +33,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         //    This catches the cold-launch case where the user toggled
         //    Keep-synced on, killed the app, and we're starting fresh.
         BackgroundSync.refresh()
+        // 4) Activate the WatchConnectivity receiver early so ride CSVs the
+        //    watch transfers are picked up even when the app is launched in
+        //    the background to receive them.
+        _ = WatchRideReceiver.shared
         return true
     }
 }

@@ -29,9 +29,12 @@ struct MainNav: View {
             ReplayScreen()
                 .tabItem { Label("Replay", systemImage: "play.circle") }
                 .tag(3)
+            RidesScreen()
+                .tabItem { Label("Rides", systemImage: "applewatch") }
+                .tag(4)
             GpsDebugScreen(vm: vm)
                 .tabItem { Label("GPS Debug", systemImage: "antenna.radiowaves.left.and.right") }
-                .tag(4)
+                .tag(5)
         }
     }
 

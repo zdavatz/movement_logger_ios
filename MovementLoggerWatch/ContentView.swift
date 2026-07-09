@@ -50,13 +50,28 @@ struct ContentView: View {
     }
 
     private var gpsDetail: some View {
-        VStack(spacing: 2) {
-            Text(controller.gps.status)
-            Text("\(controller.gps.loggedRows) samples")
+        VStack(spacing: 6) {
+            HStack(spacing: 14) {
+                metric("SPEED", String(format: "%.1f", controller.gps.speedKmh), "km/h")
+                metric("TOP", String(format: "%.1f", controller.gps.maxSpeedKmh), "km/h")
+            }
+            VStack(spacing: 2) {
+                Text(controller.gps.status)
+                Text("\(controller.gps.loggedRows) samples")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
         }
-        .font(.caption2)
-        .foregroundStyle(.secondary)
-        .multilineTextAlignment(.center)
+    }
+
+    private func metric(_ label: String, _ value: String, _ unit: String) -> some View {
+        VStack(spacing: 0) {
+            Text(label).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit()
+            Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Button

@@ -84,9 +84,15 @@ final class SessionController {
         guard phase == .running || phase == .starting else { return }
         phase = .stopping
         switch source {
-        case .box:      ble.stopLog()
-        case .watchGPS: gps.stop()
-        case .none:     break
+        case .box:
+            ble.stopLog()
+        case .watchGPS:
+            gps.stop()
+            // Sync this ride's CSV to the phone (queued; delivered even if the
+            // iOS app isn't open).
+            if let url = gps.csvURL { WatchSync.shared.send(csv: url) }
+        case .none:
+            break
         }
         finish()
         message = "Session ended"
