@@ -15,6 +15,7 @@ final class SessionController {
 
     let ble = BoxBleClient()
     let gps = WatchGpsLogger()
+    let waterTemp = WaterTempManager()
     @ObservationIgnored private let keepAlive = WorkoutKeepAlive()
 
     private(set) var phase: Phase = .idle
@@ -54,6 +55,7 @@ final class SessionController {
     private func start() {
         guard phase == .idle else { return }
         keepAlive.begin()
+        waterTemp.start()
         sessionStart = Date()
 
         if ble.isConnected {
@@ -106,6 +108,7 @@ final class SessionController {
 
     private func finish() {
         keepAlive.end()
+        waterTemp.stop()
         sessionStart = nil
         source = nil
         phase = .idle

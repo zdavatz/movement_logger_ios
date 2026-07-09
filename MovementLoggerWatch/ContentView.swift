@@ -7,9 +7,13 @@ struct ContentView: View {
         ScrollView {
             VStack(spacing: 10) {
                 durationView
+                if controller.isRunning {
+                    metricsRow
+                }
                 statusView
                 if controller.isRunning, controller.source == .watchGPS {
-                    gpsDetail
+                    Text("\(controller.gps.loggedRows) samples")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
                 startStopButton
             }
@@ -49,27 +53,24 @@ struct ContentView: View {
         .multilineTextAlignment(.center)
     }
 
-    private var gpsDetail: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 14) {
-                metric("SPEED", String(format: "%.1f", controller.gps.speedKmh), "km/h")
-                metric("TOP", String(format: "%.1f", controller.gps.maxSpeedKmh), "km/h")
-            }
-            VStack(spacing: 2) {
-                Text(controller.gps.status)
-                Text("\(controller.gps.loggedRows) samples")
-            }
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
+    /// Top speed + water temperature, under the timer. Fonts are ~30% larger
+    /// than the earlier readout. Water temp shows "—" until the Ultra's
+    /// submersion sensor has a reading (i.e. the watch is in the water).
+    private var metricsRow: some View {
+        HStack(spacing: 14) {
+            metric("TOP", String(format: "%.1f", controller.gps.maxSpeedKmh), "km/h")
+            metric("WATER",
+                   controller.waterTemp.temperatureC.map { String(format: "%.1f", $0) } ?? "—",
+                   "°C")
         }
     }
 
     private func metric(_ label: String, _ value: String, _ unit: String) -> some View {
         VStack(spacing: 0) {
-            Text(label).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 22, weight: .semibold, design: .rounded)).monospacedDigit()
-            Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(label).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 29, weight: .semibold, design: .rounded))
+                .monospacedDigit().minimumScaleFactor(0.5).lineLimit(1)
+            Text(unit).font(.system(size: 12)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
     }
