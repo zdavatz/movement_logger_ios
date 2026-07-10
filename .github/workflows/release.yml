@@ -172,23 +172,31 @@ jobs:
             > ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
           chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8
 
+      - name: Patch pbxproj for manual per-target signing
+        run: |
+          # xcodebuild archive takes only ONE PROVISIONING_PROFILE_SPECIFIER on
+          # the command line, but the app and the embedded Watch app need
+          # DIFFERENT profiles. So set manual signing + each target's own
+          # profile directly in the (Release) build settings. This edit is
+          # CI-only and never committed — local dev keeps Automatic signing.
+          python3 -m venv "$RUNNER_TEMP/pbxvenv"
+          "$RUNNER_TEMP/pbxvenv/bin/pip" install --quiet pbxproj
+          "$RUNNER_TEMP/pbxvenv/bin/python" scripts/ci_manual_signing.py \
+            "$PROFILE_NAME" "$WATCH_PROFILE_NAME" "$SIGN_IDENTITY"
+          grep -nE "CODE_SIGN_STYLE|PROVISIONING_PROFILE_SPECIFIER|CODE_SIGN_IDENTITY" \
+            MovementLogger.xcodeproj/project.pbxproj
+
       - name: Archive
         run: |
-          # No global PROVISIONING_PROFILE_SPECIFIER: that would force BOTH
-          # targets onto the main-app profile and fail the Watch target
-          # ("app ID … does not match bundle ID …watchkitapp"). With manual
-          # signing + only the two pinned profiles installed on this clean
-          # runner, each target auto-selects its matching profile by bundle
-          # id. The export step below pins them explicitly per bundle id.
+          # Signing is fully driven by the pbxproj patched above (manual, one
+          # profile per target) — pass no signing overrides here, or a global
+          # one would clobber the per-target profiles.
           xcodebuild \
             -project MovementLogger.xcodeproj \
             -scheme MovementLogger \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/MovementLogger.xcarchive \
-            CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
             archive
 
       - name: Write ExportOptions.plist
