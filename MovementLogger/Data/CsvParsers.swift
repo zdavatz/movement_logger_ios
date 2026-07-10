@@ -225,10 +225,13 @@ enum CsvParsers {
             iT = try cols.idxAny("Time [10ms]", "Time [mS]"); tickDiv = 1.0
         }
         let iUtc = try cols.idxAny("UTC", "utc")
-        let iLat = try cols.idxAny("Lat", "lat")
-        let iLon = try cols.idxAny("Lon", "lon")
+        // The Apple Watch GPS logger (`WatchGpsLogger.swift`) writes bracketed
+        // column names — `Lat [deg]` / `Lon [deg]` / `SpeedKMh` — so accept
+        // those alongside the box firmware's `Lat`/`lat` and `speed_kmh`.
+        let iLat = try cols.idxAny("Lat", "lat", "Lat [deg]")
+        let iLon = try cols.idxAny("Lon", "lon", "Lon [deg]")
         let iAlt = try cols.idxAny("Alt [m]", "alt_m")
-        let iSpd = try cols.idxAny("Speed [km/h]", "speed_kmh")
+        let iSpd = try cols.idxAny("Speed [km/h]", "speed_kmh", "SpeedKMh")
         let iCrs = try cols.idxAny("Course [deg]", "course_deg")
         let iFix = try cols.idxAny("Fix", "fix_q")
         let iSat = try cols.idxAny("NumSat", "nsat")

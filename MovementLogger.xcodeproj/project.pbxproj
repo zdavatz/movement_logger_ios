@@ -10,6 +10,7 @@
 		0A3E16FD73A9FA46C6E70D01 /* WatchRideReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BEEF19B16BDFCEC951C63CA /* WatchRideReceiver.swift */; };
 		1815BCF90E89A510DF9CC1AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EDDD795623AC92CE44CEB489 /* Assets.xcassets */; };
 		21BC9E20260DBC676AC90A2F /* RidesScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 536A7998F0FA05CA9E0715BA /* RidesScreen.swift */; };
+		A1000000000000000000030C /* RideMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040C /* RideMap.swift */; };
 		21FC55FD17776163CD8E1A1B /* WatchGpsLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 701C8A80B76519D70C9EAB65 /* WatchGpsLogger.swift */; };
 		38E8CBA2DBF58F6EF4FF04BB /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F3BFE5DB4B84E15D9CF7AD69 /* Foundation.framework */; };
 		4FB93983FE1F036E7B3F13DE /* WatchSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABB20C3561F42079F0986146 /* WatchSync.swift */; };
@@ -84,6 +85,7 @@
 		32E4AD06DEB64DC8BDB40586 /* MovementLogger Watch App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "MovementLogger Watch App.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		4B71901CE99AEDF7D5291939 /* FileSyncProtocol.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileSyncProtocol.swift; sourceTree = "<group>"; };
 		536A7998F0FA05CA9E0715BA /* RidesScreen.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RidesScreen.swift; sourceTree = "<group>"; };
+		A1000000000000000000040C /* RideMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideMap.swift; sourceTree = "<group>"; };
 		5BEEF19B16BDFCEC951C63CA /* WatchRideReceiver.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchRideReceiver.swift; sourceTree = "<group>"; };
 		617213F133B64E4AA0A7CE6F /* WorkoutKeepAlive.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkoutKeepAlive.swift; sourceTree = "<group>"; };
 		701C8A80B76519D70C9EAB65 /* WatchGpsLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchGpsLogger.swift; sourceTree = "<group>"; };
@@ -234,6 +236,7 @@
 				A1000000000000000000020B /* ReplayViewModel.swift */,
 				A1000000000000000000020C /* ReplayScreen.swift */,
 				536A7998F0FA05CA9E0715BA /* RidesScreen.swift */,
+				A1000000000000000000040C /* RideMap.swift */,
 			);
 			path = UI;
 			sourceTree = "<group>";
@@ -419,6 +422,7 @@
 				A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */,
 				0A3E16FD73A9FA46C6E70D01 /* WatchRideReceiver.swift in Sources */,
 				21BC9E20260DBC676AC90A2F /* RidesScreen.swift in Sources */,
+				A1000000000000000000030C /* RideMap.swift in Sources */,
 				84B95C3736B677491FECB6AE /* Calibration.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -459,12 +463,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MovementLoggerWatch/MovementLoggerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 23;
 				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MovementLoggerWatch/Info.plist;
-				MARKETING_VERSION = 1.0.22;
+				MARKETING_VERSION = 1.0.23;
 				PRODUCT_BUNDLE_IDENTIFIER = ch.pumptsueri.movementlogger.watchkitapp;
 				PRODUCT_NAME = MovementLogger;
 				SDKROOT = watchos;
@@ -602,7 +606,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 23;
 				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -612,7 +616,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.22;
+				MARKETING_VERSION = 1.0.23;
 				PRODUCT_BUNDLE_IDENTIFIER = ch.pumptsueri.movementlogger;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -626,7 +630,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 23;
 				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -636,7 +640,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0.22;
+				MARKETING_VERSION = 1.0.23;
 				PRODUCT_BUNDLE_IDENTIFIER = ch.pumptsueri.movementlogger;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -653,12 +657,12 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MovementLoggerWatch/MovementLoggerWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 24;
+				CURRENT_PROJECT_VERSION = 23;
 				DEVELOPMENT_TEAM = 4B37356EGR;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = MovementLoggerWatch/Info.plist;
-				MARKETING_VERSION = 1.0.22;
+				MARKETING_VERSION = 1.0.23;
 				PRODUCT_BUNDLE_IDENTIFIER = ch.pumptsueri.movementlogger.watchkitapp;
 				PRODUCT_NAME = MovementLogger;
 				SDKROOT = watchos;

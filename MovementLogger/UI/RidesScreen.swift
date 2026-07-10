@@ -15,21 +15,28 @@ struct RidesScreen: View {
                         description: Text("End a session on the MovementLogger watch app to sync its GPS ride here."))
                 } else {
                     List(receiver.rides, id: \.self) { url in
-                        HStack(spacing: 12) {
-                            Image(systemName: "location.circle.fill")
-                                .foregroundStyle(.tint)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(url.lastPathComponent)
-                                    .font(.subheadline).lineLimit(1).truncationMode(.middle)
-                                Text(Self.subtitle(url, receiver: receiver))
-                                    .font(.caption).foregroundStyle(.secondary)
+                        NavigationLink {
+                            RideMapView(url: url)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "map.fill")
+                                    .foregroundStyle(.tint)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(url.lastPathComponent)
+                                        .font(.subheadline).lineLimit(1).truncationMode(.middle)
+                                    Text(Self.subtitle(url, receiver: receiver))
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                // Share the raw CSV straight from the row; the
+                                // map PNG is shared from inside RideMapView.
+                                ShareLink(item: url) {
+                                    Image(systemName: "square.and.arrow.up").imageScale(.large)
+                                }
+                                .buttonStyle(.borderless)
                             }
-                            Spacer()
-                            ShareLink(item: url) {
-                                Image(systemName: "square.and.arrow.up").imageScale(.large)
-                            }
+                            .padding(.vertical, 2)
                         }
-                        .padding(.vertical, 2)
                     }
                 }
             }
