@@ -9,6 +9,7 @@ import UIKit
 struct RideMapView: View {
     let url: URL
 
+    @Environment(\.dismiss) private var dismiss
     @State private var rows: [GpsRow] = []
     @State private var loadError: String?
     @State private var camera: MapCameraPosition = .automatic
@@ -27,32 +28,45 @@ struct RideMapView: View {
     }
 
     var body: some View {
-        Group {
-            if let e = loadError {
-                ContentUnavailableView("Couldn't read ride",
-                    systemImage: "exclamationmark.triangle", description: Text(e))
-            } else if coords.count < 2 {
-                ContentUnavailableView("No GPS fixes",
-                    systemImage: "location.slash",
-                    description: Text("This ride has fewer than two valid GPS points to plot."))
-            } else {
-                mapView
-            }
-        }
-        .navigationTitle(url.deletingPathExtension().lastPathComponent)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    Task { await share() }
-                } label: {
-                    if rendering { ProgressView() }
-                    else { Image(systemName: "square.and.arrow.up") }
+        // Own NavigationStack so this screen has exactly ONE navigation bar,
+        // regardless of whether the Rides tab is nested under the tab bar's
+        // "More" overflow (which is itself a navigation controller — pushing
+        // into it is what produced the second, redundant back button).
+        NavigationStack {
+            Group {
+                if let e = loadError {
+                    ContentUnavailableView("Couldn't read ride",
+                        systemImage: "exclamationmark.triangle", description: Text(e))
+                } else if coords.count < 2 {
+                    ContentUnavailableView("No GPS fixes",
+                        systemImage: "location.slash",
+                        description: Text("This ride has fewer than two valid GPS points to plot."))
+                } else {
+                    mapView
                 }
-                .disabled(rendering || coords.count < 2)
             }
+            .navigationTitle(url.deletingPathExtension().lastPathComponent)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.visible, for: .navigationBar)
+            .toolbar {
+                // The single "back" — steps back to the ride list.
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { dismiss() } label: {
+                        Label("Rides", systemImage: "chevron.backward")
+                    }
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        Task { await share() }
+                    } label: {
+                        if rendering { ProgressView() }
+                        else { Image(systemName: "square.and.arrow.up") }
+                    }
+                    .disabled(rendering || coords.count < 2)
+                }
+            }
+            .task { load() }
         }
-        .task { load() }
         .sheet(item: $shareItem) { item in
             ActivityView(items: [item.url])
         }
@@ -80,7 +94,6 @@ struct RideMapView: View {
                 camera = .rect(rect)
             }
         }
-        .ignoresSafeArea(edges: .bottom)
     }
 
     private func marker(color: Color, glyph: String) -> some View {
