@@ -128,6 +128,40 @@ jobs:
           echo "PROFILE_NAME=$NAME" >> "$GITHUB_ENV"
           echo "Installed provisioning profile '$NAME' ($UUID)"
 
+      - name: Install Watch App Store provisioning profile
+        env:
+          WATCH_PROFILE_BASE64: ${{ secrets.APPLE_WATCH_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          # The build embeds the Apple Watch app, whose bundle id
+          # (…​.watchkitapp) needs its OWN App Store profile — the main-app
+          # profile can't sign it. Both profiles are bound to the same
+          # distribution cert; on this clean runner they're the only two
+          # profiles installed, so each target auto-matches its own by
+          # bundle id during the (manual) archive.
+          if [ -z "$WATCH_PROFILE_BASE64" ]; then
+            echo "::error::APPLE_WATCH_PROVISIONING_PROFILE_BASE64 is empty."
+            echo "::error::Create an App Store profile for"
+            echo "::error::${BUNDLE_ID}.watchkitapp bound to the same"
+            echo "::error::distribution cert and add it as that secret"
+            echo "::error::(scripts/create_watch_profile.py create)."
+            exit 1
+          fi
+          WPROFILE_PATH="$RUNNER_TEMP/watch.mobileprovision"
+          echo "$WATCH_PROFILE_BASE64" | base64 --decode > "$WPROFILE_PATH"
+
+          WPLIST="$RUNNER_TEMP/watch.plist"
+          security cms -D -i "$WPROFILE_PATH" > "$WPLIST"
+          WUUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$WPLIST")"
+          WNAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$WPLIST")"
+
+          DEST="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$DEST"
+          cp "$WPROFILE_PATH" "$DEST/$WUUID.mobileprovision"
+
+          echo "WATCH_PROFILE_UUID=$WUUID" >> "$GITHUB_ENV"
+          echo "WATCH_PROFILE_NAME=$WNAME" >> "$GITHUB_ENV"
+          echo "Installed watch provisioning profile '$WNAME' ($WUUID)"
+
       - name: Stage App Store Connect API key
         env:
           API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
@@ -140,6 +174,12 @@ jobs:
 
       - name: Archive
         run: |
+          # No global PROVISIONING_PROFILE_SPECIFIER: that would force BOTH
+          # targets onto the main-app profile and fail the Watch target
+          # ("app ID … does not match bundle ID …watchkitapp"). With manual
+          # signing + only the two pinned profiles installed on this clean
+          # runner, each target auto-selects its matching profile by bundle
+          # id. The export step below pins them explicitly per bundle id.
           xcodebuild \
             -project MovementLogger.xcodeproj \
             -scheme MovementLogger \
@@ -149,7 +189,6 @@ jobs:
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
             CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
-            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             archive
 
       - name: Write ExportOptions.plist
@@ -166,6 +205,7 @@ jobs:
               <key>provisioningProfiles</key>
               <dict>
                   <key>${BUNDLE_ID}</key><string>${PROFILE_NAME}</string>
+                  <key>${BUNDLE_ID}.watchkitapp</key><string>${WATCH_PROFILE_NAME}</string>
               </dict>
               <key>uploadSymbols</key><true/>
               <key>destination</key><string>export</string>
