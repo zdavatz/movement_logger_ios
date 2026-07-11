@@ -49,7 +49,16 @@ Targets: iOS 17.0+, universal (iPhone + iPad). Bundle id `ch.pumptsueri.movement
 
 ## Release (tag-driven CI)
 
-**Versioning policy (locked, user decision 30.6.2026): binary builds and store releases use SEPARATE version trains.**
+**Versioning policy — REVISED 11.7.2026: the 0.0.x TestFlight train is dead.**
+Apple rejects ANY upload (TestFlight included) whose
+`CFBundleShortVersionString` is lower than the last APPROVED store version
+(error 90062, hit when v0.0.31 tried to upload against approved 1.0.23).
+Everything now rides the `1.x.x` train: every tag uploads to TestFlight
+(usable by internal testers as soon as processing finishes, independent of
+review) and auto-submits to the App Store. The historical split below is
+kept for context only — do NOT tag 0.0.x anymore.
+
+**Historical policy (obsolete, pre-11.7.2026):**
 - **`0.0.x` = binary / TestFlight builds** — bumped per dev iteration, installed to the phone over USB (`devicectl`) and/or uploaded to App Store Connect for TestFlight, but **never auto-submitted** to the public App Store. These are what I bump+install while iterating (currently 0.0.30).
 - **`1.x.x+` = public App Store releases** — the only tags that auto-submit for review. Recent store/TestFlight builds run on the 1.0.x train (last tagged **1.0.17**; Watch water-temp work bumped source through 1.0.22 untagged). This release (Rides-tab watch-GPS map + shareable PNG) is **1.0.23** (the App Store version string must be > the live one, and a build's `CFBundleShortVersionString` must match the store version it's submitted under, so a store build is literally built as `1.0.x`, not `0.0.x`).
 - The workflow gates the submit-for-review step on `MAJOR >= 1` (`steps.ver.outputs.store`), so a `0.0.x` tag builds + uploads but stops before publishing, and only a `v1.x.x` tag actually goes to the store. The auto-submit (`scripts/submit_for_review.py`) sets `releaseType=AFTER_APPROVAL` (auto-publish on Apple's approval — the iOS analogue of Android's `--track production --release-status completed`) and answers export-compliance via `ITSAppUsesNonExemptEncryption=false` in Info.plist. Apple still requires human review (~1 day); no API skips it.
