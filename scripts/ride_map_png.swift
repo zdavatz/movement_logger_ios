@@ -20,7 +20,7 @@ let outPath = args[2]
 let logoPath = args.count >= 4 ? args[3] : nil
 let sourceURL = "github.com/zdavatz/movement_logger_ios"
 
-struct Row { let ticks: Double; let lat: Double; let lon: Double; let speed: Double; let fix: Int }
+struct Row { let ticks: Double; let utc: String; let lat: Double; let lon: Double; let speed: Double; let fix: Int; let hdop: Double }
 
 // ---- parse CSV (exact-header map, tolerant of bad rows) ------------------
 guard let text = try? String(contentsOfFile: csvPath, encoding: .utf8) else {
@@ -37,6 +37,8 @@ let iLat = col(["Lat [deg]", "Lat", "lat"])!
 let iLon = col(["Lon [deg]", "Lon", "lon"])!
 let iSpd = col(["SpeedKMh", "Speed [km/h]", "speed_kmh"]) ?? -1
 let iFix = col(["Fix", "fix_q"]) ?? -1
+let iUtc = col(["UTC", "utc"]) ?? -1
+let iHdp = col(["HDOP", "hdop"]) ?? -1
 
 var rows: [Row] = []
 for line in lines {
@@ -45,12 +47,42 @@ for line in lines {
     let sp = (iSpd >= 0 && iSpd < f.count) ? (Double(f[iSpd]) ?? 0) : 0
     let fx = (iFix >= 0 && iFix < f.count) ? (Int(f[iFix]) ?? 1) : 1
     let tk = (iT < f.count ? (Double(f[iT]) ?? 0) : 0) / tickDiv
-    rows.append(Row(ticks: tk, lat: lat, lon: lon, speed: sp, fix: fx))
+    let ut = (iUtc >= 0 && iUtc < f.count) ? f[iUtc] : ""
+    let hd = (iHdp >= 0 && iHdp < f.count) ? (Double(f[iHdp]) ?? .nan) : .nan
+    rows.append(Row(ticks: tk, utc: ut, lat: lat, lon: lon, speed: sp, fix: fx, hdop: hd))
 }
-let valid = rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite && !($0.lat == 0 && $0.lon == 0) }
-guard valid.count >= 2 else { FileHandle.standardError.write("need >=2 valid fixes (got \(valid.count))\n".data(using: .utf8)!); exit(1) }
+// Valid fixes: fix>0, finite, not null island, not flagged-inaccurate.
+let validRaw = rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
+    && !($0.lat == 0 && $0.lon == 0) && !($0.hdop > 50) }
+// Collapse consecutive identical fixes (watch stall duplicates) so a dead
+// receiver's rewritten last-known rows read as a hole, not a live timeline.
+var fixesD: [Row] = []
+for f in validRaw {
+    if let p = fixesD.last, p.utc == f.utc, p.lat == f.lat, p.lon == f.lon { continue }
+    fixesD.append(f)
+}
+guard fixesD.count >= 2 else { FileHandle.standardError.write("need >=2 valid fixes (got \(fixesD.count))\n".data(using: .utf8)!); exit(1) }
+// Blackout zones: leading convergence, every >=2 s fix hole (+-10 s pad), trailing.
+let ftAll = fixesD.map { $0.ticks }
+var zonesG: [(Double, Double)] = [(-.infinity, ftAll[0] + 1000)]
+for i in 1..<ftAll.count where ftAll[i] - ftAll[i-1] >= 200 { zonesG.append((ftAll[i-1] - 1000, ftAll[i] + 1000)) }
+zonesG.append((ftAll.last! + 1e-9, .infinity))
+// Cleaned per-segment track: no fabricated positions, no bridging lines.
+var segments: [[Row]] = []
+var curSeg: [Row] = []
+for f in fixesD {
+    if zonesG.contains(where: { f.ticks >= $0.0 && f.ticks <= $0.1 }) { continue }
+    if let last = curSeg.last, f.ticks - last.ticks >= 200 {
+        if curSeg.count >= 2 { segments.append(curSeg) }
+        curSeg = []
+    }
+    curSeg.append(f)
+}
+if curSeg.count >= 2 { segments.append(curSeg) }
+let valid = segments.flatMap { $0 }
+guard valid.count >= 2 else { FileHandle.standardError.write("no clean track segments\n".data(using: .utf8)!); exit(1) }
 let coords = valid.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-FileHandle.standardError.write("parsed \(rows.count) rows, \(valid.count) valid fixes\n".data(using: .utf8)!)
+FileHandle.standardError.write("parsed \(rows.count) rows, \(valid.count) clean fixes in \(segments.count) segment(s)\n".data(using: .utf8)!)
 
 // ---- stats ---------------------------------------------------------------
 func haversineM(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Double {
@@ -58,7 +90,14 @@ func haversineM(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Dou
     let s = sin(dLat/2)*sin(dLat/2) + cos(a.latitude * .pi/180)*cos(b.latitude * .pi/180)*sin(dLon/2)*sin(dLon/2)
     return 2*R*asin(min(1, sqrt(s)))
 }
-var distM = 0.0; for i in 1..<coords.count { distM += haversineM(coords[i-1], coords[i]) }
+var distM = 0.0
+for seg in segments {
+    for i in 1..<seg.count {
+        let d = haversineM(CLLocationCoordinate2D(latitude: seg[i-1].lat, longitude: seg[i-1].lon),
+                           CLLocationCoordinate2D(latitude: seg[i].lat, longitude: seg[i].lon))
+        if d <= 60 { distM += d }   // single-hop glitch gate
+    }
+}
 let distanceKm = distM/1000
 let speeds = valid.map { $0.speed }
 // Outlier-hardened top speed (port of RideMap.robustTopSpeed): hard clip,
@@ -90,7 +129,7 @@ func robustTopSpeed(_ rows: [Row], _ valid: [Row]) -> Double {
     }
     return top
 }
-let topSpeed = robustTopSpeed(rows, valid)
+let topSpeed = robustTopSpeed(rows, fixesD)
 let durMin = (valid.last!.ticks - valid.first!.ticks) * 0.01 / 60.0
 let sortedSp = speeds.filter { $0.isFinite && $0 >= 0 }.sorted()
 let vMax = max(sortedSp.isEmpty ? 5 : sortedSp[Int(Double(sortedSp.count-1)*0.95)], 5)
@@ -148,13 +187,22 @@ snapshotter.start(with: DispatchQueue.global(qos: .userInitiated)) { snap, err i
 
     // White casing.
     let casing = NSBezierPath(); casing.lineWidth = 9; casing.lineCapStyle = .round; casing.lineJoinStyle = .round
-    casing.move(to: px[0]); for i in 1..<px.count { casing.line(to: px[i]) }
+    var offC = 0
+    for seg in segments {
+        casing.move(to: px[offC])
+        for i in 1..<seg.count { casing.line(to: px[offC + i]) }
+        offC += seg.count
+    }
     NSColor.white.withAlphaComponent(0.9).setStroke(); casing.stroke()
-    // Speed-coloured segments.
-    for i in 1..<px.count {
-        let seg = NSBezierPath(); seg.lineWidth = 5; seg.lineCapStyle = .round
-        seg.move(to: px[i-1]); seg.line(to: px[i])
-        speedColor(speeds[i]).setStroke(); seg.stroke()
+    // Speed-coloured segments — never across a blackout hole.
+    var offS = 0
+    for segRun in segments {
+        for i in 1..<segRun.count {
+            let seg = NSBezierPath(); seg.lineWidth = 5; seg.lineCapStyle = .round
+            seg.move(to: px[offS + i - 1]); seg.line(to: px[offS + i])
+            speedColor(speeds[offS + i]).setStroke(); seg.stroke()
+        }
+        offS += segRun.count
     }
     // Start / end markers.
     func marker(_ p: NSPoint, _ color: NSColor) {

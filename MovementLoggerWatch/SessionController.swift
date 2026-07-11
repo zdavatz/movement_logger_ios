@@ -56,6 +56,7 @@ final class SessionController {
         guard phase == .idle else { return }
         keepAlive.begin()
         waterTemp.start()
+        gps.waterTempProvider = { [weak self] in self?.waterTemp.temperatureC }
         sessionStart = Date()
 
         if ble.isConnected {

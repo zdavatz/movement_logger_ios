@@ -16,16 +16,12 @@ struct RideMapView: View {
     @State private var rendering = false
     @State private var shareItem: ShareImage?
 
-    /// Valid fixes only — drop no-fix rows and the (0,0) null island so a cold
-    /// start before first fix doesn't stretch the track to the Gulf of Guinea.
-    private var pts: [GpsRow] {
-        rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
-            && !($0.lat == 0 && $0.lon == 0) }
-    }
+    /// Blackout-cleaned track segments — fabricated antenna-under-water
+    /// positions dropped, polyline broken across fix holes. Cached from
+    /// `load()` so map camera changes don't recompute the cleaning.
+    @State private var coordSegments: [[CLLocationCoordinate2D]] = []
 
-    private var coords: [CLLocationCoordinate2D] {
-        pts.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-    }
+    private var coords: [CLLocationCoordinate2D] { coordSegments.flatMap { $0 } }
 
     var body: some View {
         // Own NavigationStack so this screen has exactly ONE navigation bar,
@@ -74,8 +70,14 @@ struct RideMapView: View {
 
     private var mapView: some View {
         Map(position: $camera) {
-            MapPolyline(coordinates: RideMapRenderer.downsample(coords, max: 2000))
-                .stroke(.teal, lineWidth: 4)
+            // One polyline per segment — never a straight connector line
+            // bridging a signal blackout.
+            ForEach(coordSegments.indices, id: \.self) { i in
+                MapPolyline(coordinates: RideMapRenderer.downsample(
+                    coordSegments[i],
+                    max: Swift.max(2, 2000 * coordSegments[i].count / Swift.max(1, coords.count))))
+                    .stroke(.teal, lineWidth: 4)
+            }
             if let first = coords.first {
                 Annotation("Start", coordinate: first) {
                     marker(color: .green, glyph: "flag.fill")
@@ -108,6 +110,9 @@ struct RideMapView: View {
     private func load() {
         do {
             rows = try CsvParsers.parseGpsFile(url)
+            coordSegments = RideMapRenderer.cleanTrackSegments(rows: rows).map { seg in
+                seg.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+            }
             loadError = rows.isEmpty ? "no rows parsed" : nil
         } catch {
             loadError = error.localizedDescription
@@ -118,7 +123,7 @@ struct RideMapView: View {
         rendering = true
         defer { rendering = false }
         let png = await RideMapRenderer.render(
-            rows: pts, title: url.deletingPathExtension().lastPathComponent)
+            rows: rows, title: url.deletingPathExtension().lastPathComponent)
         guard let png else { return }
         let dir = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -179,9 +184,11 @@ enum RideMapRenderer {
     static func render(rows: [GpsRow], title: String,
                        width: CGFloat = 1080, mapHeight: CGFloat = 1440,
                        footerHeight: CGFloat = 190) async -> Data? {
-        let valid = rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
-            && !($0.lat == 0 && $0.lon == 0) }
-        guard valid.count >= 2 else { return nil }
+        // Blackout-cleaned segments: no fabricated antenna-under-water
+        // positions, no straight connector lines across the fix holes.
+        let segments = cleanTrackSegments(rows: rows)
+        guard !segments.isEmpty else { return nil }
+        let valid = segments.flatMap { $0 }
         let coords = valid.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
         guard let rect = boundingRect(coords) else { return nil }
 
@@ -200,7 +207,7 @@ enum RideMapRenderer {
         // dips under water (see robustTopSpeed).
         let speeds = valid.map { $0.speedKmhModule }
         let topSpeed = robustTopSpeed(rows: rows)
-        let distanceKm = trackDistanceKm(valid)
+        let distanceKm = segmentsDistanceKm(segments)
         let durMin = (valid.last!.ticks - valid.first!.ticks) * 0.01 / 60.0   // 10ms ticks → min
         let vMax = max(robustMaxSpeed(speeds), 5)
 
@@ -219,16 +226,25 @@ enum RideMapRenderer {
             //    segments on top.
             let px = coords.map { snap.point(for: $0) }
             cg.setLineCap(.round); cg.setLineJoin(.round)
+            // One sub-path per segment — the casing never crosses a blackout.
             let casing = CGMutablePath()
-            casing.addLines(between: px)
+            var off = 0
+            for seg in segments {
+                casing.addLines(between: Array(px[off ..< off + seg.count]))
+                off += seg.count
+            }
             cg.setStrokeColor(UIColor.white.withAlphaComponent(0.9).cgColor)
             cg.setLineWidth(9)
             cg.addPath(casing); cg.strokePath()
 
             cg.setLineWidth(5)
-            for i in 1..<px.count {
-                cg.setStrokeColor(speedColor(speeds[i], vMax: vMax).cgColor)
-                cg.beginPath(); cg.move(to: px[i - 1]); cg.addLine(to: px[i]); cg.strokePath()
+            off = 0
+            for seg in segments {
+                for i in 1..<seg.count {
+                    cg.setStrokeColor(speedColor(speeds[off + i], vMax: vMax).cgColor)
+                    cg.beginPath(); cg.move(to: px[off + i - 1]); cg.addLine(to: px[off + i]); cg.strokePath()
+                }
+                off += seg.count
             }
 
             // 3. Start / end markers.
@@ -270,7 +286,81 @@ enum RideMapRenderer {
         return s[Int(Double(s.count - 1) * 0.95)]
     }
 
-    // MARK: robust top speed (Android `RideMapRenderer.robustTopSpeed` port)
+    // MARK: track cleaning + robust stats (Android `RideMapRenderer` port)
+
+    /// Positions with a worse claimed accuracy than this are flagged
+    /// garbage — the 11.7.2026 watch ride carried one WiFi-fallback fix
+    /// 70 km away, honestly stamped accuracy 149 000 m. NaN passes.
+    static let maxPlausibleHdop = 50.0
+
+    /// Plottable fixes: fix>0, finite, not (0,0), not flagged-inaccurate.
+    static func validPoints(_ rows: [GpsRow]) -> [GpsRow] {
+        rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
+            && !($0.lat == 0 && $0.lon == 0) && !($0.hdop > maxPlausibleHdop) }
+    }
+
+    /// The watch logger rewrites the LAST KNOWN location once per second
+    /// while no fresh fix arrives (42 identical rows during the 11.7.2026
+    /// stall), so a dead receiver looks like a live fix timeline. Collapse
+    /// consecutive identical fixes so a stall becomes a visible hole.
+    private static func dedupFixes(_ fixes: [GpsRow]) -> [GpsRow] {
+        var out: [GpsRow] = []
+        out.reserveCapacity(fixes.count)
+        for f in fixes {
+            if let p = out.last, p.utc == f.utc, p.lat == f.lat, p.lon == f.lon { continue }
+            out.append(f)
+        }
+        return out
+    }
+
+    /// Blackout exclusion zones as (start, end) tick pairs: before the
+    /// first fix settles, around every ≥2 s hole, and after the last fix.
+    private static func blackoutZones(_ fixTicks: [Double]) -> [(Double, Double)] {
+        var zones: [(Double, Double)] = [(-.infinity, fixTicks[0] + blackoutPadTicks)]
+        for i in 1..<fixTicks.count where fixTicks[i] - fixTicks[i - 1] >= blackoutGapTicks {
+            zones.append((fixTicks[i - 1] - blackoutPadTicks, fixTicks[i] + blackoutPadTicks))
+        }
+        zones.append((fixTicks.last! + 1e-9, .infinity))
+        return zones
+    }
+
+    /// The drawable track, cleaned with the same blackout rule as
+    /// `robustTopSpeed` and split into continuous segments: positions
+    /// within ±10 s of a ≥2 s fix hole are dropped (where u-blox/watch
+    /// fabricate a sliding solution) and the polyline breaks across the
+    /// holes instead of bridging two distant real points.
+    static func cleanTrackSegments(rows: [GpsRow]) -> [[GpsRow]] {
+        let fixes = dedupFixes(validPoints(rows))
+        guard fixes.count >= 2 else { return [] }
+        let zones = blackoutZones(fixes.map { $0.ticks })
+        var segments: [[GpsRow]] = []
+        var cur: [GpsRow] = []
+        for f in fixes {
+            if zones.contains(where: { f.ticks >= $0.0 && f.ticks <= $0.1 }) { continue }
+            if let last = cur.last, f.ticks - last.ticks >= blackoutGapTicks {
+                if cur.count >= 2 { segments.append(cur) }
+                cur = []
+            }
+            cur.append(f)
+        }
+        if cur.count >= 2 { segments.append(cur) }
+        return segments
+    }
+
+    /// Single hops longer than this are GPS glitches and don't count.
+    private static let trackMaxHopM = 60.0
+
+    /// Σ haversine within segments — never across the holes between them.
+    static func segmentsDistanceKm(_ segments: [[GpsRow]]) -> Double {
+        var m = 0.0
+        for seg in segments {
+            for i in 1..<seg.count {
+                let hop = GpsMath.haversineM(seg[i-1].lat, seg[i-1].lon, seg[i].lat, seg[i].lon)
+                if hop <= trackMaxHopM { m += hop }
+            }
+        }
+        return m / 1000.0
+    }
 
     /// >60 km/h on a pumpfoil is always a bad fix (same clip as `GpsMath`).
     private static let maxPlausibleSpeedKmh = 60.0
@@ -299,16 +389,10 @@ enum RideMapRenderer {
     /// against the 11.7.2026 Ermioni ride, whose raw column peaked at a
     /// fantasy 27.1 km/h on a ~7 km/h session.
     static func robustTopSpeed(rows: [GpsRow]) -> Double {
-        let fixes = rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
-            && !($0.lat == 0 && $0.lon == 0) }
+        let fixes = dedupFixes(validPoints(rows))
         guard fixes.count >= 2 else { return 0 }
         let fixTicks = fixes.map { $0.ticks }
-
-        var zones: [(Double, Double)] = [(-.infinity, fixTicks[0] + blackoutPadTicks)]
-        for i in 1..<fixTicks.count where fixTicks[i] - fixTicks[i - 1] >= blackoutGapTicks {
-            zones.append((fixTicks[i - 1] - blackoutPadTicks, fixTicks[i] + blackoutPadTicks))
-        }
-        zones.append((fixTicks.last! + 1e-9, .infinity))
+        let zones = blackoutZones(fixTicks)
 
         var top = 0.0
         for r in rows {

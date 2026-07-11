@@ -227,6 +227,29 @@ After export, a **"Play composite video"** button presents `AVPlayerViewControll
 
 ### Rides tab — watch GPS on a map (v1.0.23+)
 
+**Row stats (11.7.2026+):** each ride row shows start–end time (local,
+derived from the filename's UTC stamp + tick span), duration, outlier-hardened
+top speed, and — on rides recorded by an Ultra with the new `WaterTemp [C]`
+column — the median water temperature. Parsed once per (path, size) by the
+`RideStatsLoader` actor; the mtime + size subtitle shows until the parse lands.
+The watch logger (`WatchGpsLogger`) writes the temp column from
+`WaterTempManager` (`CMWaterSubmersionManager`, submersion-gated, Ultra-only;
+blank when dry or unsupported) via a provider closure set in
+`SessionController.start()`.
+
+**Track + stats are blackout-cleaned (11.7.2026):** `RideMap.cleanTrackSegments`
+(port of Android `RideMapRenderer.cleanTrackSegments`) drops positions within
+±10 s of a ≥2 s hole in the valid-fix timeline and splits the polyline across
+the holes — GPS fabricates self-consistent position/speed slides while the
+antenna sinks (the 11.7.2026 Ermioni ride drew a straight line across town),
+and CoreLocation once emitted a WiFi-fallback fix 70 km away flagged accuracy
+149 000 m (hence the `hdop ≤ 50` gate in `validPoints`). Consecutive identical
+fixes collapse first: the watch logger rewrites the last-known location every
+second during a stall, which otherwise hides the hole. Consumers: interactive
+`Map` (one `MapPolyline` per segment), the PNG renderer (casing + coloured
+strokes per segment, distance via `segmentsDistanceKm`), the Rides-row stats,
+and `scripts/ride_map_png.swift`.
+
 `RidesScreen` lists the Apple-Watch ride CSVs that `WatchRideReceiver` mirrors into `Documents/WatchRides/`. Each row is a `NavigationLink` into **`RideMapView`** (`UI/RideMap.swift`); the raw CSV `ShareLink` stays on the row (with `.borderless` so the tap doesn't also fire the nav).
 
 - **Interactive view** — `RideMapView` parses the CSV with `CsvParsers.parseGpsFile` (which now also accepts the watch logger's bracketed `Lat [deg]` / `Lon [deg]` / `SpeedKMh` headers — see the CSV-schema note) and draws the track as a `MapPolyline` on a SwiftUI `Map`, with green **Start** / red **End** annotations. The camera frames the track via `.rect(RideMapRenderer.boundingRect(coords))`. No-fix rows and the `(0,0)` null island are filtered so a cold start before first fix doesn't stretch the map. The polyline is downsampled to ≤2000 points for a light interactive layer.

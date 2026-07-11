@@ -35,6 +35,10 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
 
     @ObservationIgnored private let manager = CLLocationManager()
     @ObservationIgnored private var latest: CLLocation?
+    /// Injected by SessionController: the Ultra's submersion water
+    /// temperature (°C) while the wrist is in the water, else nil. Logged
+    /// as the `WaterTemp [C]` column so rides carry it to the phone.
+    @ObservationIgnored var waterTempProvider: (() -> Double?)? = nil
     @ObservationIgnored private var tickTimer: Timer?
     @ObservationIgnored private var csvHandle: FileHandle?
     /// URL of the CSV for the current/just-finished ride — handed to
@@ -152,7 +156,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let name = "WatchGps_" + Self.stamp(Date()) + ".csv"
         let url = docs.appendingPathComponent(name)
-        let header = "Time [10ms],UTC,Lat [deg],Lon [deg],Alt [m],SpeedKMh,Course [deg],Fix,NumSat,HDOP\n"
+        let header = "Time [10ms],UTC,Lat [deg],Lon [deg],Alt [m],SpeedKMh,Course [deg],Fix,NumSat,HDOP,WaterTemp [C]\n"
         FileManager.default.createFile(atPath: url.path, contents: header.data(using: .utf8))
         csvHandle = try? FileHandle(forWritingTo: url)
         _ = try? csvHandle?.seekToEnd()   // append after the header row
@@ -188,6 +192,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             hasFix ? "1" : "0",
             "0",
             fmt(hdop),
+            fmt(waterTempProvider?() ?? nil),
         ].joined(separator: ",") + "\n"
         if let data = row.data(using: .utf8) {
             try? h.write(contentsOf: data)

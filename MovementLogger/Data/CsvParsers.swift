@@ -40,6 +40,11 @@ struct GpsRow {
     let fix: Int
     let numSat: Int
     let hdop: Double
+    /// Water temperature (°C) from the Apple Watch Ultra's submersion
+    /// sensor — `WaterTemp [C]` column, written by `WatchGpsLogger` while
+    /// the wrist is in the water. NaN when the column is absent (box /
+    /// u-blox files, older watch rides) or the sensor had no reading.
+    var waterTempC: Double = .nan
 }
 
 /// Battery row. Units match the CSV — voltage in mV, SOC in 0.1 %, current in 100 µA.
@@ -236,6 +241,7 @@ enum CsvParsers {
         let iFix = try cols.idxAny("Fix", "fix_q")
         let iSat = try cols.idxAny("NumSat", "nsat")
         let iHdp = try cols.idxAny("HDOP", "hdop")
+        let iTmp = cols.idxOrNil("WaterTemp [C]")
 
         var out: [GpsRow] = []
         out.reserveCapacity(2048)
@@ -257,6 +263,9 @@ enum CsvParsers {
                     fix: try parseInt(r, iFix),
                     numSat: try parseInt(r, iSat),
                     hdop: try parseDouble(r, iHdp),
+                    waterTempC: iTmp.flatMap { i in
+                        (try? fieldAt(r, i)).flatMap(Double.init)
+                    } ?? .nan,
                 ))
             } catch {
                 continue
