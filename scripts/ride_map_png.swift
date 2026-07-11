@@ -61,7 +61,36 @@ func haversineM(_ a: CLLocationCoordinate2D, _ b: CLLocationCoordinate2D) -> Dou
 var distM = 0.0; for i in 1..<coords.count { distM += haversineM(coords[i-1], coords[i]) }
 let distanceKm = distM/1000
 let speeds = valid.map { $0.speed }
-let topSpeed = speeds.max() ?? 0
+// Outlier-hardened top speed (port of RideMap.robustTopSpeed): hard clip,
+// blackout adjacency (no speed within 10 s of a >=2 s hole in the fix
+// timeline — u-blox fabricates self-consistent speed ramps while the
+// antenna sinks), and position consistency vs. the +-1 s fix chord.
+func robustTopSpeed(_ rows: [Row], _ valid: [Row]) -> Double {
+    guard valid.count >= 2 else { return 0 }
+    let ft = valid.map { $0.ticks }
+    var zones: [(Double, Double)] = [(-.infinity, ft[0] + 1000)]
+    for i in 1..<ft.count where ft[i] - ft[i-1] >= 200 { zones.append((ft[i-1] - 1000, ft[i] + 1000)) }
+    zones.append((ft.last! + 1e-9, .infinity))
+    func lowerBound(_ key: Double) -> Int {
+        var lo = 0, hi = ft.count
+        while lo < hi { let m = (lo + hi) / 2; if ft[m] < key { lo = m + 1 } else { hi = m } }
+        return lo
+    }
+    var top = 0.0
+    for r in rows {
+        let v = r.speed
+        guard v.isFinite, v >= 0, v <= 60, v > top, r.ticks.isFinite else { continue }
+        if zones.contains(where: { r.ticks >= $0.0 && r.ticks <= $0.1 }) { continue }
+        let a = lowerBound(r.ticks - 100), b = lowerBound(r.ticks + 100 + 1e-9) - 1
+        guard b > a, ft[b] - ft[a] >= 50 else { continue }
+        let chordKmh = haversineM(CLLocationCoordinate2D(latitude: valid[a].lat, longitude: valid[a].lon),
+                                  CLLocationCoordinate2D(latitude: valid[b].lat, longitude: valid[b].lon))
+            / ((ft[b] - ft[a]) / 100.0) * 3.6
+        if v <= chordKmh * 3 + 5 { top = v }
+    }
+    return top
+}
+let topSpeed = robustTopSpeed(rows, valid)
 let durMin = (valid.last!.ticks - valid.first!.ticks) * 0.01 / 60.0
 let sortedSp = speeds.filter { $0.isFinite && $0 >= 0 }.sorted()
 let vMax = max(sortedSp.isEmpty ? 5 : sortedSp[Int(Double(sortedSp.count-1)*0.95)], 5)

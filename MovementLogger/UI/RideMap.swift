@@ -195,9 +195,11 @@ enum RideMapRenderer {
 
         guard let snap = try? await start(MKMapSnapshotter(options: opts)) else { return nil }
 
-        // Stats for the footer.
+        // Stats for the footer. Top speed is outlier-hardened — the raw
+        // column max reads 27 km/h on a 7 km/h session when the antenna
+        // dips under water (see robustTopSpeed).
         let speeds = valid.map { $0.speedKmhModule }
-        let topSpeed = speeds.max() ?? 0
+        let topSpeed = robustTopSpeed(rows: rows)
         let distanceKm = trackDistanceKm(valid)
         let durMin = (valid.last!.ticks - valid.first!.ticks) * 0.01 / 60.0   // 10ms ticks → min
         let vMax = max(robustMaxSpeed(speeds), 5)
@@ -266,6 +268,75 @@ enum RideMapRenderer {
         let s = speeds.filter { $0.isFinite && $0 >= 0 }.sorted()
         guard !s.isEmpty else { return 0 }
         return s[Int(Double(s.count - 1) * 0.95)]
+    }
+
+    // MARK: robust top speed (Android `RideMapRenderer.robustTopSpeed` port)
+
+    /// >60 km/h on a pumpfoil is always a bad fix (same clip as `GpsMath`).
+    private static let maxPlausibleSpeedKmh = 60.0
+    /// Fix pair for the position cross-check: within ±1 s of the speed row…
+    private static let fixWindowTicks = 100.0
+    /// …spanning ≥0.5 s, so position jitter can't fake a huge derived speed.
+    private static let minFixSpanTicks = 50.0
+    /// Reported speed may exceed the chord-derived speed by ×3 + 5 km/h.
+    private static let speedVsTrackFactor = 3.0
+    private static let speedVsTrackFloorKmh = 5.0
+    /// A ≥2 s hole in the valid-fix timeline is a signal blackout
+    /// (antenna under water)…
+    private static let blackoutGapTicks = 200.0
+    /// …and no speed row within 10 s of one counts: while the antenna
+    /// sinks, u-blox fabricates a smooth, self-consistent speed ramp WITH
+    /// matching sliding positions and healthy quality flags (12 sats /
+    /// HDOP 0.6 while reporting 5 → 27 km/h on a ~1.5 km/h swimmer,
+    /// 11.7.2026 Ermioni ride), so neither quality gates nor the position
+    /// cross-check can catch it — blackout adjacency is the one reliable
+    /// signature.
+    private static let blackoutPadTicks = 1_000.0
+
+    /// Top speed for the footer stat, outlier-hardened: hard clip, blackout
+    /// adjacency, and position consistency (the earliest/latest valid fix
+    /// within ±1 s must span ≥0.5 s and move commensurately). Verified
+    /// against the 11.7.2026 Ermioni ride, whose raw column peaked at a
+    /// fantasy 27.1 km/h on a ~7 km/h session.
+    static func robustTopSpeed(rows: [GpsRow]) -> Double {
+        let fixes = rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
+            && !($0.lat == 0 && $0.lon == 0) }
+        guard fixes.count >= 2 else { return 0 }
+        let fixTicks = fixes.map { $0.ticks }
+
+        var zones: [(Double, Double)] = [(-.infinity, fixTicks[0] + blackoutPadTicks)]
+        for i in 1..<fixTicks.count where fixTicks[i] - fixTicks[i - 1] >= blackoutGapTicks {
+            zones.append((fixTicks[i - 1] - blackoutPadTicks, fixTicks[i] + blackoutPadTicks))
+        }
+        zones.append((fixTicks.last! + 1e-9, .infinity))
+
+        var top = 0.0
+        for r in rows {
+            let v = r.speedKmhModule
+            guard v.isFinite, v >= 0, v <= maxPlausibleSpeedKmh, v > top,
+                  r.ticks.isFinite else { continue }
+            if zones.contains(where: { r.ticks >= $0.0 && r.ticks <= $0.1 }) { continue }
+            let a = lowerBound(fixTicks, r.ticks - fixWindowTicks)
+            let b = lowerBound(fixTicks, r.ticks + fixWindowTicks + 1e-9) - 1
+            guard b > a else { continue }
+            let span = fixTicks[b] - fixTicks[a]
+            guard span >= minFixSpanTicks else { continue }
+            let chordKmh = GpsMath.haversineM(fixes[a].lat, fixes[a].lon,
+                                              fixes[b].lat, fixes[b].lon)
+                / (span / 100.0) * 3.6   // ticks are 10 ms
+            if v <= chordKmh * speedVsTrackFactor + speedVsTrackFloorKmh { top = v }
+        }
+        return top
+    }
+
+    /// Index of the first element ≥ `key` in the sorted `arr`.
+    private static func lowerBound(_ arr: [Double], _ key: Double) -> Int {
+        var lo = 0, hi = arr.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if arr[mid] < key { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
     }
 
     /// Blue (slow) → cyan → green → yellow → red (fast).
