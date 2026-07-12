@@ -89,13 +89,19 @@ final class RaceUplink: @unchecked Sendable {
         pushRelayFlag()
     }
 
-    /// Tell the watch whether to stream live fixes (application context
-    /// survives the watch app relaunching mid-race).
+    /// Hand the watch everything it needs (application context survives
+    /// the watch app relaunching mid-race): the relay flag plus the full
+    /// target config, so the watch can send DIRECTLY over its own WiFi
+    /// when this phone isn't reachable — watch-only riders.
     private func pushRelayFlag() {
         guard WCSession.isSupported(),
               WCSession.default.activationState == .activated else { return }
-        try? WCSession.default.updateApplicationContext(
-            ["raceRelay": enabled && source == .watch])
+        try? WCSession.default.updateApplicationContext([
+            "raceRelay": enabled && source == .watch,
+            "raceRider": rider,
+            "raceHost": host,
+            "racePort": port,
+        ])
     }
 
     private func openConnection() {

@@ -25,16 +25,34 @@ final class WatchSync: NSObject, WCSessionDelegate {
         }
     }
 
-    /// One live fix (1 Hz, from `WatchGpsLogger.writeRow`). `sendMessage`
-    /// is fire-and-forget; it needs the phone reachable, which during a
-    /// race it is — the phone in the rider's pouch is the uplink.
+    /// One live fix (1 Hz, from `WatchGpsLogger.writeRow`). With the
+    /// phone reachable it relays over WCSession (the phone is the
+    /// uplink); without it — phone ashore or off — the watch sends the
+    /// datagram itself over its own WiFi (`WatchRaceUplink`), so
+    /// watch-only riders stay on the race map.
     func relayLiveFix(lat: Double, lon: Double, kmh: Double, deg: Double, acc: Double) {
-        guard relayLive, WCSession.default.isReachable else { return }
-        var fix: [String: Double] = ["lat": lat, "lon": lon]
-        if kmh.isFinite { fix["kmh"] = kmh }
-        if deg.isFinite { fix["deg"] = deg }
-        if acc.isFinite, acc > 0 { fix["acc"] = acc }
-        WCSession.default.sendMessage(["raceFix": fix], replyHandler: nil, errorHandler: nil)
+        guard relayLive else { return }
+        if WCSession.default.isReachable {
+            var fix: [String: Double] = ["lat": lat, "lon": lon]
+            if kmh.isFinite { fix["kmh"] = kmh }
+            if deg.isFinite { fix["deg"] = deg }
+            if acc.isFinite, acc > 0 { fix["acc"] = acc }
+            WCSession.default.sendMessage(["raceFix": fix], replyHandler: nil, errorHandler: nil)
+        } else {
+            WatchRaceUplink.shared.sendFix(lat: lat, lon: lon, kmh: kmh, deg: deg, acc: acc)
+        }
+    }
+
+    /// Pull the race settings out of an application context (pushed by
+    /// the phone's `RaceUplink` whenever race mode is toggled).
+    private func applyRaceContext(_ ctx: [String: Any]) {
+        if let flag = ctx["raceRelay"] as? Bool {
+            relayLive = flag
+        }
+        WatchRaceUplink.shared.updateConfig(
+            rider: ctx["raceRider"] as? String,
+            host: ctx["raceHost"] as? String,
+            port: ctx["racePort"] as? Int)
     }
 
     /// Sync one ride CSV to the phone.
@@ -59,18 +77,14 @@ final class WatchSync: NSObject, WCSessionDelegate {
                  activationDidCompleteWith activationState: WCSessionActivationState,
                  error: Error?) {
         guard activationState == .activated else { return }
-        // Pick up a relay flag raised while this app wasn't running.
-        if let flag = session.receivedApplicationContext["raceRelay"] as? Bool {
-            relayLive = flag
-        }
+        // Pick up race settings pushed while this app wasn't running.
+        applyRaceContext(session.receivedApplicationContext)
         let queued = pending; pending.removeAll()
         queued.forEach { transfer($0, on: session) }
     }
 
     func session(_ session: WCSession,
                  didReceiveApplicationContext applicationContext: [String: Any]) {
-        if let flag = applicationContext["raceRelay"] as? Bool {
-            relayLive = flag
-        }
+        applyRaceContext(applicationContext)
     }
 }

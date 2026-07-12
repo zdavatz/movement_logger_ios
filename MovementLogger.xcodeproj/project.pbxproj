@@ -12,6 +12,7 @@
 		21BC9E20260DBC676AC90A2F /* RidesScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 536A7998F0FA05CA9E0715BA /* RidesScreen.swift */; };
 		A1000000000000000000030C /* RideMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040C /* RideMap.swift */; };
 		21FC55FD17776163CD8E1A1B /* WatchGpsLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 701C8A80B76519D70C9EAB65 /* WatchGpsLogger.swift */; };
+		A10000000000000000000405 /* WatchRaceUplink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000415 /* WatchRaceUplink.swift */; };
 		38E8CBA2DBF58F6EF4FF04BB /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = F3BFE5DB4B84E15D9CF7AD69 /* Foundation.framework */; };
 		4FB93983FE1F036E7B3F13DE /* WatchSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABB20C3561F42079F0986146 /* WatchSync.swift */; };
 		512ABB27C1CAE6CCF4D2E4EE /* BoxBleClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = B72771DDCD8DF058D5D67703 /* BoxBleClient.swift */; };
@@ -90,6 +91,7 @@
 		5BEEF19B16BDFCEC951C63CA /* WatchRideReceiver.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchRideReceiver.swift; sourceTree = "<group>"; };
 		617213F133B64E4AA0A7CE6F /* WorkoutKeepAlive.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkoutKeepAlive.swift; sourceTree = "<group>"; };
 		701C8A80B76519D70C9EAB65 /* WatchGpsLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchGpsLogger.swift; sourceTree = "<group>"; };
+		A10000000000000000000415 /* WatchRaceUplink.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchRaceUplink.swift; sourceTree = "<group>"; };
 		7542D3260D50D91AA1F9F342 /* Calibration.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = Calibration.swift; sourceTree = "<group>"; };
 		A100000000000000000000F0 /* MovementLoggerApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MovementLoggerApp.swift; sourceTree = "<group>"; };
 		A100000000000000000000F1 /* FileSyncProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSyncProtocol.swift; sourceTree = "<group>"; };
@@ -177,6 +179,7 @@
 				A4C9D51BBE5E8A7CDC9DAAE8 /* MovementLoggerWatchApp.swift */,
 				A1FF51A111E4D07B8ED9EF0F /* SessionController.swift */,
 				701C8A80B76519D70C9EAB65 /* WatchGpsLogger.swift */,
+				A10000000000000000000415 /* WatchRaceUplink.swift */,
 				617213F133B64E4AA0A7CE6F /* WorkoutKeepAlive.swift */,
 				EDDD795623AC92CE44CEB489 /* Assets.xcassets */,
 				1EA9FA244DD2070BCD629FA1 /* Info.plist */,
@@ -441,6 +444,7 @@
 				9DE6D0BD6B408961BB4439EE /* MovementLoggerWatchApp.swift in Sources */,
 				6BB711BDC8A9E03CFC7C4E9D /* SessionController.swift in Sources */,
 				21FC55FD17776163CD8E1A1B /* WatchGpsLogger.swift in Sources */,
+				A10000000000000000000405 /* WatchRaceUplink.swift in Sources */,
 				6D21F01F26516DB561BDCC42 /* WorkoutKeepAlive.swift in Sources */,
 				4FB93983FE1F036E7B3F13DE /* WatchSync.swift in Sources */,
 				FDC16A73B7FB8289A9885366 /* WaterTempManager.swift in Sources */,

@@ -324,13 +324,18 @@ default port 47777 (shared with Android `RaceUplink.kt`).
 - **iPhone GPS source**: hooked in `GpsCore.didUpdateLocations`;
   enabling race mode auto-`start()`s `GpsCore` so there's no separate
   Start tap to forget.
-- **Apple Watch source**: the phone raises a `raceRelay` application-
-  context flag; `WatchSync` (watch) then streams each 1 Hz
-  `WatchGpsLogger.writeRow` fix via `sendMessage(["raceFix": …])`
-  while a watch recording runs, `WatchRideReceiver` (phone) forwards
-  it into `RaceUplink` sourced "watch". Off by default so ordinary
-  rides don't spend battery messaging nobody. The iPhone stays the
-  uplink either way — it's the device with the network.
+- **Apple Watch source**: the phone pushes `raceRelay` + the full
+  target config (`raceRider`/`raceHost`/`racePort`) via application
+  context; `WatchSync` (watch) then streams each 1 Hz
+  `WatchGpsLogger.writeRow` fix while a recording runs — via
+  `sendMessage(["raceFix": …])` → `WatchRideReceiver` → phone
+  `RaceUplink` when the phone is reachable, or **directly over the
+  watch's own WiFi** (`WatchRaceUplink.swift`, NWConnection UDP, same
+  wire format, watch battery %) when it isn't — watch-only riders
+  work on venue WiFi after one setup moment near the phone. Config
+  persists in watch UserDefaults. A cellular watch can't reach a
+  private LAN address; phone-free-over-LTE needs the future relay.
+  Off by default so ordinary rides don't spend battery.
 - `sendFix` is gated on the *configured* source so a running iPhone
   GPS can't inject fixes into a watch-sourced race.
 - New files must be registered in `project.pbxproj` by hand (explicit
