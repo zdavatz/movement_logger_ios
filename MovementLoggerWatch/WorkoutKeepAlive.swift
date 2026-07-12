@@ -19,6 +19,13 @@ final class WorkoutKeepAlive: NSObject, HKWorkoutSessionDelegate {
     private let store = HKHealthStore()
     private var session: HKWorkoutSession?
 
+    /// Invoked on the main thread each time the workout session enters the
+    /// `.running` state. `SessionController` uses it to (re-)engage Water Lock.
+    /// Water Lock lives on the controller, not here, because `enableWaterLock()`
+    /// is a no-op unless the app is frontmost — so it needs a second trigger
+    /// (scene-active) that this class doesn't observe.
+    var onSessionRunning: (() -> Void)?
+
     /// Request authorization (once) and start the runtime-holding session.
     func begin() {
         guard HKHealthStore.isHealthDataAvailable() else { return }
@@ -56,13 +63,14 @@ final class WorkoutKeepAlive: NSObject, HKWorkoutSessionDelegate {
                         didChangeTo toState: HKWorkoutSessionState,
                         from fromState: HKWorkoutSessionState,
                         date: Date) {
-        // Once the session is actually running, lock the touchscreen against
-        // wet-screen taps. Must run on the main thread; delegate callbacks may
-        // arrive off-main. `enableWaterLock()` only works with an active
-        // workout session, which is exactly this state.
+        // Once the session is actually running, ask the controller to engage
+        // Water Lock (touchscreen guard against wet-screen taps). Must run on
+        // the main thread; delegate callbacks may arrive off-main. This is one
+        // of two triggers — the app may not be frontmost yet on an
+        // Action-button launch, so the controller also re-tries on scene-active.
         if toState == .running {
-            DispatchQueue.main.async {
-                WKInterfaceDevice.current().enableWaterLock()
+            DispatchQueue.main.async { [weak self] in
+                self?.onSessionRunning?()
             }
         }
     }

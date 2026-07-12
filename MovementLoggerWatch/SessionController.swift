@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import WatchKit
 
 /// Orchestrates one recording session and owns the box/GPS decision.
 ///
@@ -31,10 +32,32 @@ final class SessionController {
     private(set) var sessionStart: Date? = nil
     private(set) var message: String = ""
 
+    /// True while a session is meant to hold **Water Lock**. The app's scene
+    /// (re-)calls `engageWaterLockIfNeeded()` whenever it becomes frontmost, and
+    /// the workout session calls it when it reaches `.running`. Both triggers
+    /// exist because `WKInterfaceDevice.enableWaterLock()` silently does nothing
+    /// unless the app is frontmost — and on an Action-button launch the workout
+    /// often reaches `.running` *before* the app is active (auth already
+    /// granted → no delay), which is why Water Lock used to be skipped and a
+    /// wet-screen tap could hit "End Session" mid-ride.
+    @ObservationIgnored private var wantsWaterLock = false
+
     var isRunning: Bool { phase == .running || phase == .starting }
 
     init() {
         ble.startScanning()
+        keepAlive.onSessionRunning = { [weak self] in self?.engageWaterLockIfNeeded() }
+    }
+
+    /// Engage Water Lock if a session wants it. Safe to call repeatedly and from
+    /// either trigger — a redundant call while already locked is a no-op, and a
+    /// call while the app isn't frontmost is a no-op too (which is exactly why
+    /// we retry on scene-active). The `enableWaterLock()` call is marshalled to
+    /// the main thread (it's a UI operation). No effect on non-Ultra hardware
+    /// beyond the standard touchscreen lock.
+    func engageWaterLockIfNeeded() {
+        guard wantsWaterLock else { return }
+        DispatchQueue.main.async { WKInterfaceDevice.current().enableWaterLock() }
     }
 
     /// Line shown while idle: reflects whether a box will be used.
@@ -69,6 +92,7 @@ final class SessionController {
 
     private func start() {
         guard phase == .idle else { return }
+        wantsWaterLock = true      // engaged once the workout runs / app is frontmost
         keepAlive.begin()
         waterTemp.start()
         gps.waterTempProvider = { [weak self] in self?.waterTemp.temperatureC }
@@ -123,6 +147,7 @@ final class SessionController {
     }
 
     private func finish() {
+        wantsWaterLock = false
         keepAlive.end()
         waterTemp.stop()
         sessionStart = nil

@@ -8,6 +8,7 @@ struct MovementLoggerWatchApp: App {
     /// Observation environment. Uses `SessionController.shared` so the
     /// Action-button intent controls the same session the UI renders.
     @State private var controller = SessionController.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -15,6 +16,13 @@ struct MovementLoggerWatchApp: App {
                 ContentView()
             }
             .environment(controller)
+            // Second Water-Lock trigger: on an Action-button launch the workout
+            // can reach `.running` before the app is frontmost, and
+            // `enableWaterLock()` is a no-op until then. Retrying on scene-active
+            // guarantees the screen locks once we're actually in the foreground.
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active { controller.engageWaterLockIfNeeded() }
+            }
         }
     }
 }
