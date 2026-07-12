@@ -116,7 +116,8 @@ final class RaceUplink: @unchecked Sendable {
 
     /// Entry point for both sources; gated on the configured one so a
     /// running iPhone GPS can't inject fixes into a watch-sourced race.
-    func sendFix(lat: Double, lon: Double, kmh: Double?, deg: Double?, from src: Source) {
+    func sendFix(lat: Double, lon: Double, kmh: Double?, deg: Double?,
+                 acc: Double? = nil, from src: Source) {
         guard enabled, src == source, !rider.isEmpty else { return }
         let now = Date()
         guard now.timeIntervalSince(lastSentAt) >= Self.minSendInterval else { return }
@@ -132,6 +133,7 @@ final class RaceUplink: @unchecked Sendable {
         ]
         if let kmh, kmh.isFinite { o["kmh"] = kmh }
         if let deg, deg.isFinite { o["deg"] = deg }
+        if let acc, acc.isFinite, acc > 0 { o["acc"] = acc }
         let batt = UIDevice.current.batteryLevel
         if batt >= 0 { o["batt"] = Int(batt * 100) }
 

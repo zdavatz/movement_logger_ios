@@ -203,7 +203,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         if hasFix, let loc {
             WatchSync.shared.relayLiveFix(
                 lat: loc.coordinate.latitude, lon: loc.coordinate.longitude,
-                kmh: speedKmh, deg: courseDeg)
+                kmh: speedKmh, deg: courseDeg, acc: loc.horizontalAccuracy)
         }
     }
 

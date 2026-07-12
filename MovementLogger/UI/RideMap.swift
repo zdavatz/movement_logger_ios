@@ -253,15 +253,75 @@ enum RideActivity {
         rows.contains { $0.waterTempC.isFinite }
     }
 
+    /// Grid cell size (metres) for the geographic water region below.
+    static let waterCellM = 70.0
+
+    /// Per-point "on the water" flag, derived GEOGRAPHICALLY from the wet fixes.
+    ///
+    /// The submersion sensor is sparse AND often late — on one 62-min ride it
+    /// didn't fire at all for the first 34 min of foiling, then ran continuously
+    /// for the swim back. So a blank reading must NOT be read as "on land", and a
+    /// time-window sticky-wet can't bridge a 34-min gap. Instead: the confirmed-
+    /// wet fixes are ground-truth "this is water" locations — rasterise them into
+    /// ~70 m grid cells, then mark any point within ±2 cells (~140 m) of a wet
+    /// cell as ON THE WATER, whatever the wrist was doing that second. Only points
+    /// far from every wet fix — a genuine inland walk — stay dry (→ land).
+    static func waterRegion(_ pts: [GpsRow]) -> [Bool] {
+        let n = pts.count
+        guard n > 0 else { return [] }
+        let latRef = pts[n / 2].lat
+        let mLat = 111320.0, mLon = 111320.0 * cos(latRef * .pi / 180)
+        let cell = waterCellM
+        func cx(_ la: Double) -> Int { Int((la * mLat / cell).rounded(.down)) }
+        func cy(_ lo: Double) -> Int { Int((lo * mLon / cell).rounded(.down)) }
+        func gkey(_ x: Int, _ y: Int) -> Int64 { Int64(x) &* 4_000_000 &+ Int64(y) }
+        var wetCells = Set<Int64>()
+        for p in pts where p.waterTempC.isFinite { wetCells.insert(gkey(cx(p.lat), cy(p.lon))) }
+        return pts.map { p in
+            let x = cx(p.lat), y = cy(p.lon)
+            for dx in -2...2 { for dy in -2...2 where wetCells.contains(gkey(x + dx, y + dy)) { return true } }
+            return false
+        }
+    }
+
+    /// A point counts as "wrist in the water" if a submersion reading occurred
+    /// within this many seconds — bridges the brief wrist-up moments between
+    /// swim strokes so a continuous swim doesn't flicker to "on board".
+    static let wetStickySec = 45.0
+
+    /// Per-point wrist-wet flag: confirmed submersion, or one within
+    /// `wetStickySec` before/after (two-pass nearest-reading distance in time).
+    static func stickyWet(_ pts: [GpsRow]) -> [Bool] {
+        let n = pts.count
+        guard n > 0 else { return [] }
+        let t = pts.map { $0.ticks * 0.01 }                 // seconds
+        let confirmed = pts.map { $0.waterTempC.isFinite }
+        var dPrev = [Double](repeating: .infinity, count: n)
+        var last = -Double.infinity
+        for i in 0..<n { if confirmed[i] { last = t[i] }; dPrev[i] = t[i] - last }
+        var dNext = [Double](repeating: .infinity, count: n)
+        var next = Double.infinity
+        for i in stride(from: n - 1, through: 0, by: -1) { if confirmed[i] { next = t[i] }; dNext[i] = next - t[i] }
+        return (0..<n).map { min(dPrev[$0], dNext[$0]) <= wetStickySec }
+    }
+
     /// Per-point smoothed activity mode for a cleaned, continuous track.
+    ///
+    /// Two signals, both needed: WHERE (geographic `waterRegion`) separates the
+    /// water session from a real inland walk; and wrist-WET (`stickyWet`, the
+    /// submersion sensor) separates **swimming** (wrist in the water) from **on
+    /// the board** (foiling — the wrist rides above the surface, so the sensor is
+    /// dry). Speed is deliberately NOT used: at swim/foil speeds GPS noise spikes
+    /// cross any threshold, and submersion tells board-vs-swim reliably where
+    /// speed can't.
     static func modes(for pts: [GpsRow]) -> [RideMode] {
         guard !pts.isEmpty else { return [] }
-        // Median-smooth speed so a single 0-reading between foil strokes doesn't
-        // punch a hole out of an "on board" stretch.
-        let sp = GpsMath.rollingMedian(pts.map { $0.speedKmhModule }, window: 5)
+        let water = waterRegion(pts)      // on the water patch vs far inland
+        let wet = stickyWet(pts)          // wrist submerged (or just was)
         let raw: [Int] = pts.indices.map { i in
-            if sp[i] >= boardKmh { return RideMode.board.rawValue }
-            return pts[i].waterTempC.isFinite ? RideMode.swim.rawValue : RideMode.land.rawValue
+            if !water[i] { return RideMode.land.rawValue }   // far from water = on land
+            return wet[i] ? RideMode.swim.rawValue           // wrist in water = swimming
+                          : RideMode.board.rawValue           // on the water, dry = on the board
         }
         return smoothKeys(raw, ticks: pts.map { $0.ticks }, minRunSec: minRunSec)
             .map { RideMode(rawValue: $0) ?? .swim }
@@ -370,8 +430,37 @@ enum RideMapRenderer {
         return zip(pts, keep).filter { $0.1 }.map { $0.0 }
     }
 
+    /// Half-width (samples) of the accuracy-weighted position smoother below.
+    static let smoothHalfWindow = 6
+
+    /// Accuracy-weighted position smoothing. While the wrist is submerged the
+    /// fix accuracy collapses to ~27 m (vs ~5 m dry), so a swim draws a
+    /// GPS-noise zig-zag no one could actually swim. Average each point's
+    /// position with its neighbours weighted by 1/accuracy² — accurate fixes
+    /// dominate and pull the noisy ones onto the real line, while clean
+    /// low-error (dry) stretches barely move. Rebuilds rows (GpsRow is
+    /// immutable), preserving every non-position field.
+    private static func smoothPositions(_ pts: [GpsRow]) -> [GpsRow] {
+        let n = pts.count
+        guard n >= 3 else { return pts }
+        let half = smoothHalfWindow
+        return pts.indices.map { i -> GpsRow in
+            var sLat = 0.0, sLon = 0.0, sW = 0.0
+            for j in max(0, i - half)...min(n - 1, i + half) {
+                let acc = (pts[j].hdop.isFinite && pts[j].hdop > 1) ? pts[j].hdop : 5.0
+                let w = 1.0 / (acc * acc)
+                sLat += pts[j].lat * w; sLon += pts[j].lon * w; sW += w
+            }
+            guard sW > 0 else { return pts[i] }
+            let r = pts[i]
+            return GpsRow(ticks: r.ticks, utc: r.utc, lat: sLat / sW, lon: sLon / sW,
+                          altM: r.altM, speedKmhModule: r.speedKmhModule, courseDeg: r.courseDeg,
+                          fix: r.fix, numSat: r.numSat, hdop: r.hdop, waterTempC: r.waterTempC)
+        }
+    }
+
     static func cleanTrack(rows: [GpsRow]) -> CleanTrack {
-        let pts = despike(dedupFixes(validPoints(rows)))
+        let pts = smoothPositions(despike(dedupFixes(validPoints(rows))))
         var breaks = Set<Int>()
         if pts.count >= 2 {
             for i in 1..<pts.count {

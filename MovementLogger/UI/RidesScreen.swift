@@ -32,6 +32,18 @@ struct RidesScreen: View {
                             RideRowLabel(url: url, receiver: receiver)
                         }
                         .buttonStyle(.plain)
+                        // Swipe right-to-left to delete this ride. `allowsFullSwipe`
+                        // is off so a stray full swipe can't wipe a ride — the red
+                        // Delete button must be tapped (ride data is only on the
+                        // phone once the watch rotates its copy).
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                if selected?.url == url { selected = nil }
+                                receiver.delete(url)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
                     }
                 }
             }

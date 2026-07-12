@@ -50,14 +50,30 @@ final class SessionController {
     }
 
     /// Engage Water Lock if a session wants it. Safe to call repeatedly and from
-    /// either trigger — a redundant call while already locked is a no-op, and a
+    /// any trigger — a redundant call while already locked is a no-op, and a
     /// call while the app isn't frontmost is a no-op too (which is exactly why
-    /// we retry on scene-active). The `enableWaterLock()` call is marshalled to
-    /// the main thread (it's a UI operation). No effect on non-Ultra hardware
-    /// beyond the standard touchscreen lock.
+    /// we retry). The `enableWaterLock()` call is marshalled to the main thread
+    /// (it's a UI operation). No effect on non-Ultra hardware beyond the
+    /// standard touchscreen lock.
     func engageWaterLockIfNeeded() {
         guard wantsWaterLock else { return }
         DispatchQueue.main.async { WKInterfaceDevice.current().enableWaterLock() }
+    }
+
+    /// Bounded retry of Water Lock for the first few seconds of a session.
+    /// `enableWaterLock()` is a no-op until the app is frontmost, and on a cold
+    /// Action-button launch the app becomes frontmost *after* the workout
+    /// `.running` callback fires — while SwiftUI's `.onChange(of: scenePhase)`
+    /// never fires for the *initial* `.active` state, so a single attempt from
+    /// either trigger can be missed entirely. Repeated attempts land the moment
+    /// we're frontmost; once locked, further calls are harmless no-ops. Runs on
+    /// the main queue (asyncAfter), so the `enableWaterLock()` calls are on main.
+    private func retryWaterLock(_ remaining: Int = 10) {
+        guard wantsWaterLock, remaining > 0 else { return }
+        WKInterfaceDevice.current().enableWaterLock()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.retryWaterLock(remaining - 1)
+        }
     }
 
     /// Line shown while idle: reflects whether a box will be used.
@@ -93,6 +109,7 @@ final class SessionController {
     private func start() {
         guard phase == .idle else { return }
         wantsWaterLock = true      // engaged once the workout runs / app is frontmost
+        retryWaterLock()           // keep trying until we're frontmost (cold-launch safe)
         keepAlive.begin()
         waterTemp.start()
         gps.waterTempProvider = { [weak self] in self?.waterTemp.temperatureC }

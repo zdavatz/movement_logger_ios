@@ -42,6 +42,20 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 
+    /// Delete one ride CSV from `Documents/WatchRides/` (swipe-to-delete in the
+    /// Rides list). Removes the file and refreshes the list. The ride still
+    /// exists on the watch until the watch app rotates it, so this only clears
+    /// the phone's copy. Also removes any exported map PNG for that ride.
+    func delete(_ url: URL) {
+        try? FileManager.default.removeItem(at: url)
+        // Best-effort cleanup of the matching exported map, if one was shared.
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let png = docs.appendingPathComponent("RideMaps", isDirectory: true)
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_map.png")
+        try? FileManager.default.removeItem(at: png)
+        refresh()
+    }
+
     // MARK: - WCSessionDelegate
 
     func session(_ session: WCSession, didReceive file: WCSessionFile) {
@@ -66,7 +80,7 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
               let lat = f["lat"], let lon = f["lon"] else { return }
         DispatchQueue.main.async {
             RaceUplink.shared.sendFix(lat: lat, lon: lon, kmh: f["kmh"], deg: f["deg"],
-                                      from: .watch)
+                                      acc: f["acc"], from: .watch)
         }
     }
 

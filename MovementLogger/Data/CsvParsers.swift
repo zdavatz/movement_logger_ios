@@ -252,17 +252,20 @@ enum CsvParsers {
             let r = splitTrim(line)
             // Skip corrupted rows — see parseSensorText comment.
             do {
+                // ticks/lat/lon strict (drop a row with no position); all other
+                // GPS fields lenient so a blank Speed/Course/Alt no longer drops
+                // the whole row — see `parseDoubleOpt`.
                 out.append(GpsRow(
                     ticks: try parseDouble(r, iT) / tickDiv,
                     utc: try fieldAt(r, iUtc),
                     lat: try parseDouble(r, iLat),
                     lon: try parseDouble(r, iLon),
-                    altM: try parseDouble(r, iAlt),
-                    speedKmhModule: try parseDouble(r, iSpd),
-                    courseDeg: try parseDouble(r, iCrs),
-                    fix: try parseInt(r, iFix),
-                    numSat: try parseInt(r, iSat),
-                    hdop: try parseDouble(r, iHdp),
+                    altM: parseDoubleOpt(r, iAlt),
+                    speedKmhModule: parseDoubleOpt(r, iSpd),
+                    courseDeg: parseDoubleOpt(r, iCrs),
+                    fix: parseIntOpt(r, iFix),
+                    numSat: parseIntOpt(r, iSat),
+                    hdop: parseDoubleOpt(r, iHdp),
                     waterTempC: iTmp.flatMap { i in
                         (try? fieldAt(r, i)).flatMap(Double.init)
                     } ?? .nan,
@@ -372,5 +375,24 @@ private func parseInt(_ row: [String], _ idx: Int) throws -> Int {
     guard let v = Int(s) else {
         throw CsvParseError(message: "not an int: \"\(s)\"")
     }
+    return v
+}
+
+/// Lenient double: a blank / missing / non-numeric field yields NaN instead of
+/// throwing. The Apple-Watch GPS logger writes an EMPTY Speed/Course (and
+/// sometimes Alt) whenever CoreLocation reports no valid value — stationary, or
+/// while submerged. With the strict `parseDouble` those blanks threw and the
+/// whole row was dropped (`catch { continue }`), so a stationary session parsed
+/// to ZERO rows ("Couldn't read ride — no rows parsed") and normal rides
+/// silently lost their no-speed in-water points. Only ticks/lat/lon stay strict
+/// (a row without a position is genuinely unusable); everything else is lenient.
+private func parseDoubleOpt(_ row: [String], _ idx: Int) -> Double {
+    guard idx < row.count, let v = Double(row[idx]) else { return .nan }
+    return v
+}
+
+/// Lenient int companion of `parseDoubleOpt`: blank / missing → 0.
+private func parseIntOpt(_ row: [String], _ idx: Int) -> Int {
+    guard idx < row.count, let v = Int(row[idx]) else { return 0 }
     return v
 }

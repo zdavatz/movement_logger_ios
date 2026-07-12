@@ -28,11 +28,12 @@ final class WatchSync: NSObject, WCSessionDelegate {
     /// One live fix (1 Hz, from `WatchGpsLogger.writeRow`). `sendMessage`
     /// is fire-and-forget; it needs the phone reachable, which during a
     /// race it is — the phone in the rider's pouch is the uplink.
-    func relayLiveFix(lat: Double, lon: Double, kmh: Double, deg: Double) {
+    func relayLiveFix(lat: Double, lon: Double, kmh: Double, deg: Double, acc: Double) {
         guard relayLive, WCSession.default.isReachable else { return }
         var fix: [String: Double] = ["lat": lat, "lon": lon]
         if kmh.isFinite { fix["kmh"] = kmh }
         if deg.isFinite { fix["deg"] = deg }
+        if acc.isFinite, acc > 0 { fix["acc"] = acc }
         WCSession.default.sendMessage(["raceFix": fix], replyHandler: nil, errorHandler: nil)
     }
 

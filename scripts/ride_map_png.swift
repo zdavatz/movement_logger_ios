@@ -96,11 +96,31 @@ if deduped.count >= 3 {
 }
 let pts = zip(deduped, keep).filter { $0.1 }.map { $0.0 }
 guard pts.count >= 2 else { FileHandle.standardError.write("need >=2 valid fixes (got \(pts.count))\n".data(using: .utf8)!); exit(1) }
+// Accuracy-weighted position smoothing. While the wrist is submerged the fix
+// accuracy collapses to ~27 m (vs ~5 m dry), so the swim draws a GPS-noise
+// zig-zag that no one could actually swim. Average each point with its
+// neighbours weighted by 1/accuracy² — good fixes dominate and pull the noisy
+// ones onto the real line, while clean low-error stretches barely move.
+func smoothCoords(_ p: [Row]) -> [(lat: Double, lon: Double)] {
+    let n = p.count
+    if n < 3 { return p.map { (lat: $0.lat, lon: $0.lon) } }
+    let half = 6
+    return (0..<n).map { i -> (lat: Double, lon: Double) in
+        var sLat = 0.0, sLon = 0.0, sW = 0.0
+        for j in max(0, i - half)...min(n - 1, i + half) {
+            let acc = (p[j].hdop.isFinite && p[j].hdop > 1) ? p[j].hdop : 5.0
+            let w = 1.0 / (acc * acc)
+            sLat += p[j].lat * w; sLon += p[j].lon * w; sW += w
+        }
+        return sW > 0 ? (sLat / sW, sLon / sW) : (p[i].lat, p[i].lon)
+    }
+}
+let sc = smoothCoords(pts)
 // Teleport breaks (safety valve — none in practice after the accuracy gate).
 let teleportBreakM = 200.0
 var breaks = Set<Int>()
 for i in 1..<pts.count where hav(pts[i-1], pts[i]) > teleportBreakM { breaks.insert(i) }
-let coords = pts.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+let coords = sc.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
 FileHandle.standardError.write("parsed \(rows.count) rows, \(pts.count) clean fixes, \(breaks.count) break(s)\n".data(using: .utf8)!)
 
 // ---- activity classification ---------------------------------------------
@@ -152,9 +172,51 @@ let modeColors: [NSColor] = [
 let modeLabels = ["In water", "On board", "On land"]
 var modes: [Int] = []
 if submerged {
+    // GEOGRAPHIC water region. The submersion sensor is sparse & late (here it
+    // didn't fire for the first 34 min of foiling), so a blank reading does NOT
+    // mean "on land". The confirmed-wet fixes are ground-truth water locations;
+    // any point spatially within that water patch (± ~140 m) is on the water,
+    // whatever the wrist was doing that second. Only points FAR from every wet
+    // fix — a genuine walk inland — are "on land".
+    let latRef = pts[pts.count / 2].lat
+    let mLat = 111320.0, mLon = 111320.0 * cos(latRef * .pi / 180)
+    let cell = 70.0
+    func cx(_ la: Double) -> Int { Int((la * mLat / cell).rounded(.down)) }
+    func cy(_ lo: Double) -> Int { Int((lo * mLon / cell).rounded(.down)) }
+    func gkey(_ x: Int, _ y: Int) -> Int64 { Int64(x) &* 4_000_000 &+ Int64(y) }
+    var wetCells = Set<Int64>()
+    // The submersion sensor doesn't clear its last reading when the wrist leaves
+    // the water, so a ride holds the final temperature for the whole walk back
+    // on land. Detect that: a long, MOVING trailing run of bit-identical
+    // temperature is the stuck value, not real submersion — treat it as dry so
+    // it neither reads "swimming" nor poisons the water region.
+    var confWet = pts.map { $0.waterTemp.isFinite }
+    if pts.count > 2, let lastT = pts.last?.waterTemp, lastT.isFinite {
+        var s = pts.count - 1
+        while s > 0 && pts[s-1].waterTemp == lastT { s -= 1 }
+        let runSec = (pts[pts.count-1].ticks - pts[s].ticks) * 0.01
+        let disp = hav(pts[s], pts[pts.count-1])
+        if runSec > 60 && disp > 60 { for k in s..<pts.count { confWet[k] = false } }
+    }
+    for i in pts.indices where confWet[i] { wetCells.insert(gkey(cx(sc[i].lat), cy(sc[i].lon))) }
+    func inWater(_ la: Double, _ lo: Double) -> Bool {
+        let x = cx(la), y = cy(lo)
+        for dx in -2...2 { for dy in -2...2 where wetCells.contains(gkey(x + dx, y + dy)) { return true } }
+        return false
+    }
+    // Sticky-wet: confirmed submersion or one within 45 s (bridges brief
+    // wrist-up moments mid-swim so a swim doesn't flicker to board).
+    let wetStickySec = 45.0
+    let tSec = pts.map { $0.ticks * 0.01 }
+    let confirmed = confWet
+    var dP = [Double](repeating: .infinity, count: pts.count); var lst = -Double.infinity
+    for i in 0..<pts.count { if confirmed[i] { lst = tSec[i] }; dP[i] = tSec[i] - lst }
+    var dN = [Double](repeating: .infinity, count: pts.count); var nx = Double.infinity
+    for i in stride(from: pts.count-1, through: 0, by: -1) { if confirmed[i] { nx = tSec[i] }; dN[i] = nx - tSec[i] }
+    let wet = (0..<pts.count).map { min(dP[$0], dN[$0]) <= wetStickySec }
     let raw = pts.indices.map { i -> Int in
-        if smoothSpeed[i] >= boardKmh { return 1 }
-        return pts[i].waterTemp.isFinite ? 0 : 2
+        if !inWater(sc[i].lat, sc[i].lon) { return 2 }   // far from water = on land
+        return wet[i] ? 0 : 1                             // wet = swim (blue); dry on water = on board (green)
     }
     modes = smoothKeys(raw, ticksArr, 20)
 }
