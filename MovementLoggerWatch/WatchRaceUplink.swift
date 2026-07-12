@@ -23,6 +23,7 @@ final class WatchRaceUplink {
     private(set) var rider: String
     private(set) var host: String
     private(set) var port: Int
+    private(set) var token: String
     private(set) var sent: UInt64 = 0
 
     private var connection: NWConnection?
@@ -34,11 +35,12 @@ final class WatchRaceUplink {
         host = d.string(forKey: "race.host") ?? ""
         let p = d.integer(forKey: "race.port")
         port = p == 0 ? 47777 : p
+        token = d.string(forKey: "race.token") ?? ""
         WKInterfaceDevice.current().isBatteryMonitoringEnabled = true
     }
 
     /// Fold in whatever the phone's application context carried.
-    func updateConfig(rider: String?, host: String?, port: Int?) {
+    func updateConfig(rider: String?, host: String?, port: Int?, token: String? = nil) {
         let d = UserDefaults.standard
         if let rider, !rider.isEmpty {
             self.rider = rider
@@ -55,6 +57,10 @@ final class WatchRaceUplink {
             d.set(port, forKey: "race.port")
             connection?.cancel()
             connection = nil
+        }
+        if let token {
+            self.token = token
+            d.set(token, forKey: "race.token")
         }
     }
 
@@ -73,6 +79,7 @@ final class WatchRaceUplink {
         if kmh.isFinite { o["kmh"] = kmh }
         if deg.isFinite { o["deg"] = deg }
         if acc.isFinite, acc > 0 { o["acc"] = acc }
+        if !token.isEmpty { o["race"] = token }
         let batt = WKInterfaceDevice.current().batteryLevel
         if batt >= 0 { o["batt"] = Int(batt * 100) }
         guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }

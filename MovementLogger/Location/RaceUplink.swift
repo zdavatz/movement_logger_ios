@@ -58,6 +58,10 @@ final class RaceUplink: @unchecked Sendable {
             pushRelayFlag()
         }
     }
+    /// Optional shared race token — must match the desktop's.
+    var token: String {
+        didSet { UserDefaults.standard.set(token, forKey: "race.token") }
+    }
     private(set) var sent: UInt64 = 0
     private(set) var lastError: String? = nil
 
@@ -72,6 +76,7 @@ final class RaceUplink: @unchecked Sendable {
         let p = d.integer(forKey: "race.port")
         port = p == 0 ? Self.defaultPort : p
         source = d.bool(forKey: "race.watch") ? .watch : .phone
+        token = d.string(forKey: "race.token") ?? ""
         UIDevice.current.isBatteryMonitoringEnabled = true
     }
 
@@ -103,6 +108,7 @@ final class RaceUplink: @unchecked Sendable {
             "raceRider": rider,
             "raceHost": host,
             "racePort": port,
+            "raceToken": token,
         ])
     }
 
@@ -142,6 +148,7 @@ final class RaceUplink: @unchecked Sendable {
         if let kmh, kmh.isFinite { o["kmh"] = kmh }
         if let deg, deg.isFinite { o["deg"] = deg }
         if let acc, acc.isFinite, acc > 0 { o["acc"] = acc }
+        if !token.isEmpty { o["race"] = token }
         let batt = UIDevice.current.batteryLevel
         if batt >= 0 { o["batt"] = Int(batt * 100) }
 

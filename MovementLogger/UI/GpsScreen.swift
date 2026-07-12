@@ -311,6 +311,11 @@ private struct RaceCard: View {
                     .frame(width: 80)
                     .disabled(uplink.enabled)
             }
+            TextField("Race token (optional)", text: $uplink.token)
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .disabled(uplink.enabled)
 
             if uplink.enabled {
                 Text("Sending — \(uplink.sent) fixes to \(uplink.host):\(uplink.port)"

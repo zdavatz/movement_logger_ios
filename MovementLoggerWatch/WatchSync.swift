@@ -52,7 +52,8 @@ final class WatchSync: NSObject, WCSessionDelegate {
         WatchRaceUplink.shared.updateConfig(
             rider: ctx["raceRider"] as? String,
             host: ctx["raceHost"] as? String,
-            port: ctx["racePort"] as? Int)
+            port: ctx["racePort"] as? Int,
+            token: ctx["raceToken"] as? String)
     }
 
     /// Sync one ride CSV to the phone.
