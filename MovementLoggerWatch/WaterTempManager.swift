@@ -31,9 +31,25 @@ final class WaterTempManager: NSObject, CMWaterSubmersionManagerDelegate {
 
     // MARK: - CMWaterSubmersionManagerDelegate
 
-    func manager(_ manager: CMWaterSubmersionManager, didUpdate event: CMWaterSubmersionEvent) {}
+    func manager(_ manager: CMWaterSubmersionManager, didUpdate event: CMWaterSubmersionEvent) {
+        // The sensor pushes a temperature only while submerged and never signals
+        // "no longer valid" on its own, so `temperatureC` would otherwise HOLD
+        // the last reading for the rest of the session — making the walk back on
+        // land wrongly read as "in the water" in the ride CSV. Clear it the
+        // moment the wrist surfaces.
+        if event.state == .notSubmerged {
+            DispatchQueue.main.async { self.temperatureC = nil }
+        }
+    }
 
-    func manager(_ manager: CMWaterSubmersionManager, didUpdate measurement: CMWaterSubmersionMeasurement) {}
+    func manager(_ manager: CMWaterSubmersionManager, didUpdate measurement: CMWaterSubmersionMeasurement) {
+        // Same intent as above, via the depth/measurement channel: surfaced ⇒
+        // drop the held temperature so only actually-submerged seconds log a
+        // WaterTemp value.
+        if measurement.submersionState == .notSubmerged {
+            DispatchQueue.main.async { self.temperatureC = nil }
+        }
+    }
 
     func manager(_ manager: CMWaterSubmersionManager, didUpdate temperature: CMWaterTemperature) {
         let celsius = temperature.temperature.converted(to: .celsius).value

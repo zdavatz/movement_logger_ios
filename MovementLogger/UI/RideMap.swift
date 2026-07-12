@@ -256,6 +256,27 @@ enum RideActivity {
     /// Grid cell size (metres) for the geographic water region below.
     static let waterCellM = 70.0
 
+    /// Per-point CONFIRMED-wet flag, with the sensor's held-last-reading removed.
+    ///
+    /// `CMWaterSubmersionManager` doesn't clear its last temperature when the
+    /// wrist leaves the water (fixed on the watch side going forward), so an
+    /// older ride holds the final value for the whole walk back on land — which
+    /// both reads "swimming" and poisons the water region. A long, MOVING
+    /// trailing run of BIT-IDENTICAL temperature reaching the last fix is that
+    /// stuck value, not real submersion; treat it as dry. The displacement gate
+    /// leaves a ride that simply ends afloat untouched.
+    static func confirmedWet(_ pts: [GpsRow]) -> [Bool] {
+        var wet = pts.map { $0.waterTempC.isFinite }
+        let n = pts.count
+        guard n > 2, let lastT = pts.last?.waterTempC, lastT.isFinite else { return wet }
+        var s = n - 1
+        while s > 0 && pts[s - 1].waterTempC == lastT { s -= 1 }
+        let runSec = (pts[n - 1].ticks - pts[s].ticks) * 0.01
+        let disp = GpsMath.haversineM(pts[s].lat, pts[s].lon, pts[n - 1].lat, pts[n - 1].lon)
+        if runSec > 60 && disp > 60 { for k in s..<n { wet[k] = false } }
+        return wet
+    }
+
     /// Per-point "on the water" flag, derived GEOGRAPHICALLY from the wet fixes.
     ///
     /// The submersion sensor is sparse AND often late — on one 62-min ride it
@@ -266,7 +287,7 @@ enum RideActivity {
     /// ~70 m grid cells, then mark any point within ±2 cells (~140 m) of a wet
     /// cell as ON THE WATER, whatever the wrist was doing that second. Only points
     /// far from every wet fix — a genuine inland walk — stay dry (→ land).
-    static func waterRegion(_ pts: [GpsRow]) -> [Bool] {
+    static func waterRegion(_ pts: [GpsRow], confWet: [Bool]) -> [Bool] {
         let n = pts.count
         guard n > 0 else { return [] }
         let latRef = pts[n / 2].lat
@@ -276,7 +297,7 @@ enum RideActivity {
         func cy(_ lo: Double) -> Int { Int((lo * mLon / cell).rounded(.down)) }
         func gkey(_ x: Int, _ y: Int) -> Int64 { Int64(x) &* 4_000_000 &+ Int64(y) }
         var wetCells = Set<Int64>()
-        for p in pts where p.waterTempC.isFinite { wetCells.insert(gkey(cx(p.lat), cy(p.lon))) }
+        for i in pts.indices where confWet[i] { wetCells.insert(gkey(cx(pts[i].lat), cy(pts[i].lon))) }
         return pts.map { p in
             let x = cx(p.lat), y = cy(p.lon)
             for dx in -2...2 { for dy in -2...2 where wetCells.contains(gkey(x + dx, y + dy)) { return true } }
@@ -289,39 +310,48 @@ enum RideActivity {
     /// swim strokes so a continuous swim doesn't flicker to "on board".
     static let wetStickySec = 45.0
 
-    /// Per-point wrist-wet flag: confirmed submersion, or one within
+    /// Per-point wrist-wet flag: confirmed submersion (`confWet`), or one within
     /// `wetStickySec` before/after (two-pass nearest-reading distance in time).
-    static func stickyWet(_ pts: [GpsRow]) -> [Bool] {
+    static func stickyWet(_ pts: [GpsRow], confWet: [Bool]) -> [Bool] {
         let n = pts.count
         guard n > 0 else { return [] }
         let t = pts.map { $0.ticks * 0.01 }                 // seconds
-        let confirmed = pts.map { $0.waterTempC.isFinite }
         var dPrev = [Double](repeating: .infinity, count: n)
         var last = -Double.infinity
-        for i in 0..<n { if confirmed[i] { last = t[i] }; dPrev[i] = t[i] - last }
+        for i in 0..<n { if confWet[i] { last = t[i] }; dPrev[i] = t[i] - last }
         var dNext = [Double](repeating: .infinity, count: n)
         var next = Double.infinity
-        for i in stride(from: n - 1, through: 0, by: -1) { if confirmed[i] { next = t[i] }; dNext[i] = next - t[i] }
+        for i in stride(from: n - 1, through: 0, by: -1) { if confWet[i] { next = t[i] }; dNext[i] = next - t[i] }
         return (0..<n).map { min(dPrev[$0], dNext[$0]) <= wetStickySec }
     }
 
     /// Per-point smoothed activity mode for a cleaned, continuous track.
     ///
-    /// Two signals, both needed: WHERE (geographic `waterRegion`) separates the
-    /// water session from a real inland walk; and wrist-WET (`stickyWet`, the
-    /// submersion sensor) separates **swimming** (wrist in the water) from **on
-    /// the board** (foiling — the wrist rides above the surface, so the sensor is
-    /// dry). Speed is deliberately NOT used: at swim/foil speeds GPS noise spikes
-    /// cross any threshold, and submersion tells board-vs-swim reliably where
-    /// speed can't.
+    /// Signals, in order: the **terminal walk back on land** (the dry, moving
+    /// segment after the last real submersion); **WHERE** (geographic
+    /// `waterRegion`) separates the water session from a deep inland walk; and
+    /// wrist-**WET** (`stickyWet`) separates **swimming** (wrist in the water)
+    /// from **on the board** (foiling — the wrist rides above the surface, so the
+    /// sensor is dry). Speed is deliberately NOT used: at swim/foil speeds GPS
+    /// noise spikes cross any threshold, and submersion tells board-vs-swim
+    /// reliably where speed can't.
     static func modes(for pts: [GpsRow]) -> [RideMode] {
         guard !pts.isEmpty else { return [] }
-        let water = waterRegion(pts)      // on the water patch vs far inland
-        let wet = stickyWet(pts)          // wrist submerged (or just was)
+        let confWet = confirmedWet(pts)                 // real submersion (stuck-temp removed)
+        let water = waterRegion(pts, confWet: confWet)  // on the water patch vs far inland
+        let wet = stickyWet(pts, confWet: confWet)      // wrist submerged (or just was)
+        // Terminal walk back: dry points after the last real submersion, when
+        // that trailing segment actually travels to shore, are on land.
+        var lastWet = -1
+        for i in pts.indices where confWet[i] { lastWet = i }
+        let tailIsWalk = lastWet >= 0 && lastWet < pts.count - 1
+            && GpsMath.haversineM(pts[lastWet].lat, pts[lastWet].lon,
+                                  pts[pts.count - 1].lat, pts[pts.count - 1].lon) > 60
         let raw: [Int] = pts.indices.map { i in
-            if !water[i] { return RideMode.land.rawValue }   // far from water = on land
-            return wet[i] ? RideMode.swim.rawValue           // wrist in water = swimming
-                          : RideMode.board.rawValue           // on the water, dry = on the board
+            if tailIsWalk && i > lastWet { return RideMode.land.rawValue }   // walk back on land
+            if !water[i] { return RideMode.land.rawValue }                   // far from water = on land
+            return wet[i] ? RideMode.swim.rawValue                           // wrist in water = swimming
+                          : RideMode.board.rawValue                          // on the water, dry = on the board
         }
         return smoothKeys(raw, ticks: pts.map { $0.ticks }, minRunSec: minRunSec)
             .map { RideMode(rawValue: $0) ?? .swim }

@@ -214,7 +214,17 @@ if submerged {
     var dN = [Double](repeating: .infinity, count: pts.count); var nx = Double.infinity
     for i in stride(from: pts.count-1, through: 0, by: -1) { if confirmed[i] { nx = tSec[i] }; dN[i] = nx - tSec[i] }
     let wet = (0..<pts.count).map { min(dP[$0], dN[$0]) <= wetStickySec }
+    // Terminal walk-back on land: the dry points AFTER the last real submersion,
+    // when that trailing segment actually travels toward shore (displacement),
+    // are on land — not "on the board". The stale-temp detection above already
+    // made the walk-back dry; the displacement gate keeps a ride that simply
+    // ends floating in the water from being mislabelled.
+    var lastWet = -1
+    for i in pts.indices where confWet[i] { lastWet = i }
+    let tailIsWalk = lastWet >= 0 && lastWet < pts.count - 1
+        && hav(pts[lastWet], pts[pts.count - 1]) > 60
     let raw = pts.indices.map { i -> Int in
+        if tailIsWalk && i > lastWet { return 2 }        // walk back on land
         if !inWater(sc[i].lat, sc[i].lon) { return 2 }   // far from water = on land
         return wet[i] ? 0 : 1                             // wet = swim (blue); dry on water = on board (green)
     }
