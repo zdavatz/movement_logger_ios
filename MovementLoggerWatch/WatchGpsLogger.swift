@@ -198,6 +198,13 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             try? h.write(contentsOf: data)
             loggedRows &+= 1
         }
+        // Race mode: mirror the same 1 Hz grid to the phone. No-op
+        // unless the phone raised the relay flag and is reachable.
+        if hasFix, let loc {
+            WatchSync.shared.relayLiveFix(
+                lat: loc.coordinate.latitude, lon: loc.coordinate.longitude,
+                kmh: speedKmh, deg: courseDeg)
+        }
     }
 
     // MARK: - Helpers

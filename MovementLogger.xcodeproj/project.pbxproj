@@ -48,6 +48,7 @@
 		A10000000000000000000303 /* SyncTaskHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000313 /* SyncTaskHandler.swift */; };
 		A10000000000000000000304 /* FirmwareUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000314 /* FirmwareUpdate.swift */; };
 		A10000000000000000000401 /* GpsCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000411 /* GpsCore.swift */; };
+		A10000000000000000000404 /* RaceUplink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000414 /* RaceUplink.swift */; };
 		A10000000000000000000402 /* GpsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000412 /* GpsScreen.swift */; };
 		A10000000000000000000D01 /* GpsDebugModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000D11 /* GpsDebugModel.swift */; };
 		A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000D12 /* GpsDebugScreen.swift */; };
@@ -118,6 +119,7 @@
 		A10000000000000000000313 /* SyncTaskHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyncTaskHandler.swift; sourceTree = "<group>"; };
 		A10000000000000000000314 /* FirmwareUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FirmwareUpdate.swift; sourceTree = "<group>"; };
 		A10000000000000000000411 /* GpsCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsCore.swift; sourceTree = "<group>"; };
+		A10000000000000000000414 /* RaceUplink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaceUplink.swift; sourceTree = "<group>"; };
 		A10000000000000000000412 /* GpsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsScreen.swift; sourceTree = "<group>"; };
 		A10000000000000000000D11 /* GpsDebugModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsDebugModel.swift; sourceTree = "<group>"; };
 		A10000000000000000000D12 /* GpsDebugScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsDebugScreen.swift; sourceTree = "<group>"; };
@@ -290,6 +292,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000411 /* GpsCore.swift */,
+				A10000000000000000000414 /* RaceUplink.swift */,
 			);
 			path = Location;
 			sourceTree = "<group>";
@@ -417,6 +420,7 @@
 				A10000000000000000000303 /* SyncTaskHandler.swift in Sources */,
 				A10000000000000000000304 /* FirmwareUpdate.swift in Sources */,
 				A10000000000000000000401 /* GpsCore.swift in Sources */,
+				A10000000000000000000404 /* RaceUplink.swift in Sources */,
 				A10000000000000000000402 /* GpsScreen.swift in Sources */,
 				A10000000000000000000D01 /* GpsDebugModel.swift in Sources */,
 				A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */,

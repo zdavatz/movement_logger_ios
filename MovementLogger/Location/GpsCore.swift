@@ -171,6 +171,13 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
             latestLocation = newest
             fixAvailable = true
             status = "Reading \(String(format: "%.1f", hz)) Hz · accuracy ±\(Int(newest.horizontalAccuracy.rounded())) m"
+            // Race mode: no-op unless enabled with the iPhone source.
+            RaceUplink.shared.sendFix(
+                lat: newest.coordinate.latitude,
+                lon: newest.coordinate.longitude,
+                kmh: newest.speed >= 0 ? newest.speed * 3.6 : nil,
+                deg: newest.course >= 0 ? newest.course : nil,
+                from: .phone)
         } else if !fixAvailable {
             status = "Waiting for first fix…"
         }

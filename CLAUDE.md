@@ -311,6 +311,32 @@ writer), `UI/GpsDebugScreen.swift` (the tab). Wiring notes:
   firmware ≥ v0.0.18 (bridge opcode + MAX-M10S UBX-output fix); older firmware
   ignores 0x0D and the survey shows "no NAV-PVT reply".
 
+## Race mode — live position uplink (`Location/RaceUplink.swift`)
+
+Race-day streaming to the desktop app's **Race** tab (`race.rs`, which
+owns the wire doc): a card at the bottom of the GPS tab (rider name +
+desktop `ip:port` + source picker, persisted in `UserDefaults
+race.*`) toggles an `NWConnection` UDP uplink firing one JSON datagram
+per fix, throttled to 2 Hz — `{"v":1,"rider":..,"src":"phone|watch",
+"lat":..,"lon":..,"kmh":..,"deg":..,"ts":<epoch ms>,"batt":0-100}`,
+default port 47777 (shared with Android `RaceUplink.kt`).
+
+- **iPhone GPS source**: hooked in `GpsCore.didUpdateLocations`;
+  enabling race mode auto-`start()`s `GpsCore` so there's no separate
+  Start tap to forget.
+- **Apple Watch source**: the phone raises a `raceRelay` application-
+  context flag; `WatchSync` (watch) then streams each 1 Hz
+  `WatchGpsLogger.writeRow` fix via `sendMessage(["raceFix": …])`
+  while a watch recording runs, `WatchRideReceiver` (phone) forwards
+  it into `RaceUplink` sourced "watch". Off by default so ordinary
+  rides don't spend battery messaging nobody. The iPhone stays the
+  uplink either way — it's the device with the network.
+- `sendFix` is gated on the *configured* source so a running iPhone
+  GPS can't inject fixes into a watch-sourced race.
+- New files must be registered in `project.pbxproj` by hand (explicit
+  file references, no synchronized folders) — `RaceUplink.swift` is
+  IDs `A1…0404`/`A1…0414`.
+
 ## iOS BLE specifics that differ from Android
 
 - iOS doesn't expose stable MAC addresses; `CBPeripheral.identifier` is a `UUID` scoped to this app installation. The view-model uses that UUID instead of an address. To connect, the client must hold the `CBPeripheral` reference from the scan — we keep a `[UUID: CBPeripheral]` map populated during `centralManager(_:didDiscover:advertisementData:rssi:)`.

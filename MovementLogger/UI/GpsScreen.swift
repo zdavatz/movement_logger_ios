@@ -34,6 +34,8 @@ struct GpsScreen: View {
                         fixCard
                         logCard
                     }
+
+                    RaceCard()
                 }
                 .padding(16)
             }
@@ -250,5 +252,76 @@ struct GpsScreen: View {
             .font(.system(.subheadline, design: .monospaced))
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Race mode — stream live positions to the desktop app's Race tab
+/// (UDP, 2 Hz; see `RaceUplink`). Mirrors the Android `RaceCard`. The
+/// desktop shows the `ip:port` to enter here when it starts listening.
+private struct RaceCard: View {
+    @Bindable var uplink = RaceUplink.shared
+    @State private var portText = String(RaceUplink.shared.port)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Race mode").font(.headline)
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { uplink.enabled },
+                    set: { on in
+                        uplink.port = Int(portText) ?? RaceUplink.defaultPort
+                        uplink.setEnabled(on)
+                    }
+                ))
+                .labelsHidden()
+                .disabled(!uplink.enabled && (uplink.rider.isEmpty || uplink.host.isEmpty))
+            }
+            Text("Streams live positions to the desktop Race map (same WiFi).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Picker("Source", selection: $uplink.source) {
+                ForEach(RaceUplink.Source.allCases) { s in
+                    Text(s.rawValue).tag(s)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(uplink.enabled)
+            if uplink.source == .watch {
+                Text("The watch streams while a watch recording is running; keep the iPhone along — it is the uplink.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField("Rider name", text: $uplink.rider)
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled()
+                .disabled(uplink.enabled)
+            HStack {
+                TextField("Desktop IP", text: $uplink.host)
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.numbersAndPunctuation)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .disabled(uplink.enabled)
+                TextField("Port", text: $portText)
+                    .textFieldStyle(.roundedBorder)
+                    .keyboardType(.numberPad)
+                    .frame(width: 80)
+                    .disabled(uplink.enabled)
+            }
+
+            if uplink.enabled {
+                Text("Sending — \(uplink.sent) fixes to \(uplink.host):\(uplink.port)"
+                     + (uplink.sent == 0 ? " (waiting for a GPS fix)" : ""))
+                    .font(.caption)
+                if let e = uplink.lastError {
+                    Text(e).font(.caption).foregroundStyle(.red)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }

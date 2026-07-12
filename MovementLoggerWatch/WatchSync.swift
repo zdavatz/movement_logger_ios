@@ -11,12 +11,29 @@ final class WatchSync: NSObject, WCSessionDelegate {
     /// Rides queued before the session finished activating.
     private var pending: [URL] = []
 
+    /// Race mode: stream live fixes to the phone while it has raised the
+    /// `raceRelay` application-context flag (see the phone's
+    /// `RaceUplink`). Off by default so ordinary rides don't spend
+    /// battery on per-second messages nobody is listening to.
+    private(set) var relayLive = false
+
     private override init() {
         super.init()
         if WCSession.isSupported() {
             WCSession.default.delegate = self
             WCSession.default.activate()
         }
+    }
+
+    /// One live fix (1 Hz, from `WatchGpsLogger.writeRow`). `sendMessage`
+    /// is fire-and-forget; it needs the phone reachable, which during a
+    /// race it is — the phone in the rider's pouch is the uplink.
+    func relayLiveFix(lat: Double, lon: Double, kmh: Double, deg: Double) {
+        guard relayLive, WCSession.default.isReachable else { return }
+        var fix: [String: Double] = ["lat": lat, "lon": lon]
+        if kmh.isFinite { fix["kmh"] = kmh }
+        if deg.isFinite { fix["deg"] = deg }
+        WCSession.default.sendMessage(["raceFix": fix], replyHandler: nil, errorHandler: nil)
     }
 
     /// Sync one ride CSV to the phone.
@@ -41,7 +58,18 @@ final class WatchSync: NSObject, WCSessionDelegate {
                  activationDidCompleteWith activationState: WCSessionActivationState,
                  error: Error?) {
         guard activationState == .activated else { return }
+        // Pick up a relay flag raised while this app wasn't running.
+        if let flag = session.receivedApplicationContext["raceRelay"] as? Bool {
+            relayLive = flag
+        }
         let queued = pending; pending.removeAll()
         queued.forEach { transfer($0, on: session) }
+    }
+
+    func session(_ session: WCSession,
+                 didReceiveApplicationContext applicationContext: [String: Any]) {
+        if let flag = applicationContext["raceRelay"] as? Bool {
+            relayLive = flag
+        }
     }
 }

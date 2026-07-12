@@ -58,6 +58,18 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
         DispatchQueue.main.async { self.refresh() }
     }
 
+    /// Live race relay: the watch streams one fix per second while the
+    /// phone has raised the `raceRelay` application-context flag (see
+    /// `RaceUplink`). Forwarded to the UDP uplink, sourced "watch".
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        guard let f = message["raceFix"] as? [String: Double],
+              let lat = f["lat"], let lon = f["lon"] else { return }
+        DispatchQueue.main.async {
+            RaceUplink.shared.sendFix(lat: lat, lon: lon, kmh: f["kmh"], deg: f["deg"],
+                                      from: .watch)
+        }
+    }
+
     func session(_ session: WCSession,
                  activationDidCompleteWith activationState: WCSessionActivationState,
                  error: Error?) {}
