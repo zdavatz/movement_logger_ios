@@ -10,6 +10,12 @@ import Observation
 @Observable
 final class SessionController {
 
+    /// The single app-wide controller. Shared so the Action-button / Siri
+    /// `AppIntent` (`ToggleSessionIntent`) drives the SAME session the UI shows
+    /// — a hardware-button press and an on-screen tap must not create two
+    /// separate controllers. The SwiftUI `App` binds to this instance too.
+    static let shared = SessionController()
+
     enum Source: String, Equatable { case box = "Box", watchGPS = "Watch GPS" }
     enum Phase: Equatable { case idle, starting, running, stopping }
 
