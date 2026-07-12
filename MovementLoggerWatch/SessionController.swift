@@ -58,6 +58,15 @@ final class SessionController {
         }
     }
 
+    /// Entry point for the Action-button workout intent (`BeginSessionIntent`):
+    /// begin a session if idle, otherwise leave the running one alone (a stray
+    /// second press must never end a ride mid-water). Ending stays on-screen /
+    /// Siri.
+    @MainActor
+    func startFromActionButton() {
+        if phase == .idle { start() }
+    }
+
     private func start() {
         guard phase == .idle else { return }
         keepAlive.begin()
