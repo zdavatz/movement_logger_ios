@@ -35,6 +35,11 @@
 	<array>
 		<string>bluetooth-central</string>
 		<string>fetch</string>
+		<!-- Keep CoreLocation delivering (and race-mode uplink sending)
+		     with the screen locked — without this the app suspends on
+		     lock and the rider goes "last seen Ns ago" on the race map
+		     while Android (foreground service) keeps streaming. -->
+		<string>location</string>
 		<string>processing</string>
 	</array>
 	<key>BGTaskSchedulerPermittedIdentifiers</key>

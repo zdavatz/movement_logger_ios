@@ -85,6 +85,7 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
             // updates will start from the delegate once permission lands
         case .authorizedWhenInUse, .authorizedAlways:
             status = "Waiting for first fix…"
+            enableBackgroundDelivery()
             manager.startUpdatingLocation()
         case .denied, .restricted:
             isReading = false
@@ -93,6 +94,16 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
             isReading = false
             status = "Unknown authorization state"
         }
+    }
+
+    /// Keep fixes (and the race uplink) flowing with the screen locked.
+    /// Requires the `location` UIBackgroundModes entry — setting
+    /// `allowsBackgroundLocationUpdates` without it throws. The blue
+    /// system indicator makes the background use visible to the user.
+    private func enableBackgroundDelivery() {
+        manager.allowsBackgroundLocationUpdates = true
+        manager.pausesLocationUpdatesAutomatically = false
+        manager.showsBackgroundLocationIndicator = true
     }
 
     func stop() {
@@ -151,6 +162,7 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
             switch authStatus {
             case .authorizedWhenInUse, .authorizedAlways:
                 status = "Waiting for first fix…"
+                enableBackgroundDelivery()
                 manager.startUpdatingLocation()
             case .denied, .restricted:
                 isReading = false
