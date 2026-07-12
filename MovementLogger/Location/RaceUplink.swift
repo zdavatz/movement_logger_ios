@@ -6,7 +6,7 @@ import UIKit
 
 /// Race mode — live position uplink to the desktop app's Race tab.
 ///
-/// One small JSON datagram per fix, throttled to 2 Hz, fired at the
+/// One small JSON datagram per fix, throttled to 5 Hz, fired at the
 /// configured `host:port` (the desktop's Race tab shows its LAN ip:port
 /// when it starts listening; over cellular a relay forwarding the same
 /// datagrams works unchanged). Wire format shared with Android
@@ -29,8 +29,10 @@ final class RaceUplink: @unchecked Sendable {
     static let shared = RaceUplink()
 
     static let defaultPort = 47777
-    /// ≤ ~2 Hz regardless of how fast fixes arrive.
-    private static let minSendInterval: TimeInterval = 0.45
+    /// ≤ ~5 Hz regardless of how fast fixes arrive (the iPhone's own
+    /// GPS only produces ~1 Hz anyway; the cap matters for future
+    /// higher-rate sources).
+    private static let minSendInterval: TimeInterval = 0.18
 
     enum Source: String, CaseIterable, Identifiable {
         case phone = "iPhone GPS"

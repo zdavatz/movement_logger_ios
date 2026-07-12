@@ -317,7 +317,7 @@ Race-day streaming to the desktop app's **Race** tab (`race.rs`, which
 owns the wire doc): a card at the bottom of the GPS tab (rider name +
 desktop `ip:port` + source picker, persisted in `UserDefaults
 race.*`) toggles an `NWConnection` UDP uplink firing one JSON datagram
-per fix, throttled to 2 Hz — `{"v":1,"rider":..,"src":"phone|watch",
+per fix, throttled to 5 Hz — `{"v":1,"rider":..,"src":"phone|watch",
 "lat":..,"lon":..,"kmh":..,"deg":..,"ts":<epoch ms>,"batt":0-100}`,
 default port 47777 (shared with Android `RaceUplink.kt`).
 
