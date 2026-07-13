@@ -30,7 +30,15 @@ jobs:
       BUNDLE_ID: ch.pumptsueri.movementlogger
 
     steps:
+      # fetch-tags/fetch-depth 0: a tag push otherwise checks out a DETACHED HEAD
+      # with no local tag ref, so `git tag -l --format='%(contents)'` in the
+      # submit step returns empty and "What's New" silently falls back to the
+      # commit message ("bump source version to 1.0.32…"). That shipped to the
+      # store record on v1.0.32 and had to be patched by hand.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -270,8 +278,23 @@ jobs:
           # "What's New" = the annotated tag body, falling back to the commit
           # message of the tagged commit (lightweight tags). The script strips
           # the Co-Authored-By / 🤖 trailer lines.
-          NOTES="$(git tag -l --format='%(contents)' "${{ steps.ver.outputs.tag }}")"
+          #
+          # Belt-and-braces: make sure the annotated tag OBJECT is actually here.
+          # checkout now fetches tags, but if the ref is ever missing again this
+          # step would quietly ship the commit message as the user-facing release
+          # notes rather than fail — so fetch it explicitly and refuse to fall
+          # back to a "bump source version" commit, which is never real notes.
+          TAG="${{ steps.ver.outputs.tag }}"
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+          NOTES="$(git tag -l --format='%(contents)' "$TAG")"
           if [ -z "$NOTES" ]; then NOTES="$(git log -1 --pretty=%B)"; fi
+          case "$NOTES" in
+            "bump source version"*)
+              echo "::error::Release notes resolved to the version-bump commit message."
+              echo "::error::The annotated tag body for $TAG was not readable — refusing"
+              echo "::error::to publish that as user-facing 'What's New'."
+              exit 1 ;;
+          esac
           printf '%s\n' "$NOTES" > "$RUNNER_TEMP/release_notes.txt"
           echo "Release notes:"; cat "$RUNNER_TEMP/release_notes.txt"
 
