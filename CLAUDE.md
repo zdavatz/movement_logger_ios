@@ -261,28 +261,51 @@ the line (`CleanTrack.breaks`; never happens in practice after the accuracy
 gate). Verified against the 11.7.2026 ride: 7 segments → 1 line, no hops >150 m.
 
 **Activity classification (`RideActivity`).** Colour = inferred activity, not
-raw speed, when the ride carries the Ultra's `WaterTemp [C]` submersion column:
-per point, `speed ≥ RideActivity.boardKmh` (6) → **on board** (green); else
-`waterTempC` finite (wrist wet) → **in water / swim** (blue); else dry+slow →
-**on land / walk** (orange). Speed is median-smoothed (window 5) first, and
-runs shorter than `minRunSec` (20 s) are absorbed into their longer neighbour
-(`smoothKeys`) so the track shows sustained bands, not per-fix flicker (a wrist
-briefly leaving the water mid-swim). **Submersion is the only reliable wet/dry
-signal** — proven necessary: on the temp-less 10.7/11.7 files, speed+altitude
-mislabels ~80 % as "swim" and flickers false "land" mid-ride (GPS altitude is
-±several m of noise at sea level), so **rides with no submersion column degrade
-to a speed gradient** (blue slow → red fast) with a "no submersion data" note
-rather than guessing land vs water. `RideActivity.hasSubmersion` (≥1 finite
-`waterTempC`) picks the path. The `WaterTemp [C]` column is already in the
-watch source (`WatchGpsLogger.swift`) — a watch that recorded before that build
-was installed produces temp-less rides, so existing rides show the speed
-fallback until a fresh ride is recorded with the updated watch app.
+raw speed, when the ride carries the Ultra's `WaterTemp [C]` submersion column.
+`RideActivity.modes(for:)` decides per point, in this order:
+
+1. **Speed vetoes land** — median-smoothed (window 5) `speed ≥ boardKmh` (6)
+   → **on board** (green). Nobody walks or swims at 16 km/h.
+2. **Terminal walk back** — dry, moving points after the last real submersion,
+   when that tail travels >60 m, are **on land** (orange).
+3. **WHERE** — `waterRegion`, a ~70 m grid dilated by ±2 cells (~140 m) around
+   every *proven-water* fix: the confirmed-wet fixes **plus every fix crossed at
+   board speed between the first and last submersion** (you cannot foil across a
+   car park). Outside it → **on land**.
+4. **WET** — `stickyWet` (a submersion reading within ±45 s) → **in water /
+   swim** (blue); dry and slow but on the water → **on board** (a drift or a
+   wait between runs).
+
+Runs shorter than `minRunSec` (20 s) are absorbed into their longer neighbour
+(`smoothKeys`) so the track shows sustained bands, not per-fix flicker.
+
+**Speed only ever rules land and swim OUT; it never tells them apart** — at
+swim/foil speeds GPS noise spikes cross any threshold, so board-vs-swim stays
+the submersion sensor's job. That asymmetry is the 13.7.2026 fix: seeding the
+water region on the wet fixes ALONE is far too tight. On a 125-min sea session
+the sensor fired on only 2.1 % of fixes (159 of 7492, 20 grid cells), so every
+stretch more than 140 m from one of them fell outside the region and was called
+"on land" — 22 % of the ride, at a median 16.5 km/h, on a rider who never once
+went ashore. The fast track now seeds the region too, and a moving fix can no
+longer be land at all. Genuine walks (2–3 km/h, off the water) are unaffected —
+verified against the 12.7 rides, whose walk up into the town still reads land.
+
+**Submersion is the only reliable wet/dry signal** — proven necessary: on the
+temp-less 10.7/11.7 files, speed+altitude mislabels ~80 % as "swim" and flickers
+false "land" mid-ride (GPS altitude is ±several m of noise at sea level), so
+**rides with no submersion column degrade to a speed gradient** (blue slow → red
+fast) with a "no submersion data" note rather than guessing land vs water.
+`RideActivity.hasSubmersion` (≥1 finite `waterTempC`) picks the path. The
+`WaterTemp [C]` column is already in the watch source (`WatchGpsLogger.swift`) —
+a watch that recorded before that build was installed produces temp-less rides,
+so existing rides show the speed fallback until a fresh ride is recorded with
+the updated watch app.
 
 `RidesScreen` lists the Apple-Watch ride CSVs that `WatchRideReceiver` mirrors into `Documents/WatchRides/`. Each row is a `Button` presenting **`RideMapView`** (`UI/RideMap.swift`) as a `.fullScreenCover`; the raw CSV `ShareLink` stays on the row (with `.borderless` so the tap doesn't also fire the nav).
 
 - **Interactive view** — `RideMapView` parses the CSV with `CsvParsers.parseGpsFile` (which also accepts the watch logger's bracketed `Lat [deg]` / `Lon [deg]` / `SpeedKMh` headers — see the CSV-schema note), builds the coloured runs via `RideMapRenderer.mapRuns(clean:)` and draws **one `MapPolyline` per colour run** (adjacent runs share their boundary point so the line stays continuous across a colour change), with green **Start** / red **End** annotations and a translucent **legend card** (`.overlay(.bottomLeading)`) — mode swatches when submersion data exists, a speed-gradient bar otherwise. The speed fallback approximates the gradient with 6 smoothed speed bands. Camera frames the track via `.rect(RideMapRenderer.boundingRect(trackPoints))`.
 - **Shareable PNG** — the toolbar Share button calls `RideMapRenderer.render(rows:title:)`, which uses **`MKMapSnapshotter`** (NOT `ImageRenderer` — SwiftUI's `Map` snapshots blank because tiles render out-of-process) to grab real Apple Maps tiles, then draws over the snapshot with CoreGraphics: a white casing (one continuous sub-path per non-broken run), then the track **edge-by-edge** in the activity-mode colour (or the speed gradient `speedColor`, `robustMaxSpeed` = 95th-pct), start/end dots, and a branded footer. The footer is a **horizontal legend strip along the top** (activity swatches left→right, or a speed-gradient scale — deliberately its own band so the long source-URL line can never collide with it), a divider, then the **app logo** (`RideLogo` imageset — a copy of the app icon, since `UIImage(named:)` can't reliably load an `AppIcon` set), ride **stats** (top speed via `RideMapRenderer.robustTopSpeed` — hard 60 km/h clip + blackout adjacency + ±1 s chord consistency; distance via `trackDistanceKm` over the continuous track skipping breaks + `trackMaxHopM` glitch hops; duration), and the **GitHub source link** (`RideMapRenderer.sourceURL`). The PNG lands in `Documents/RideMaps/<name>_map.png` and is handed to a `UIActivityViewController` share sheet. `snapshot.point(for:)` returns points in the snapshot image's own space, so the track aligns to the tiles with no manual flip on iOS.
-- **`scripts/ride_map_png.swift`** is the standalone macOS twin of `RideMapRenderer` (AppKit/`NSImage` instead of UIKit, and it DOES flip `point(for:)` because AppKit is y-up): `swift scripts/ride_map_png.swift <in.csv> <out.png> [logo.png]`. It ports the same continuous-track cleaning + `RideActivity` classifier + legend, and is how the v1.0.24 rendering was verified on the Mac (incl. a synthesised `WaterTemp` column to exercise the 3-mode path).
+- **`scripts/ride_map_png.swift`** is the standalone macOS twin of `RideMapRenderer` (AppKit/`NSImage` instead of UIKit): `swift scripts/ride_map_png.swift <in.csv> <out.png> [logo.png]`, `MLDEBUG=1` to print the classified runs. It ports the same continuous-track cleaning + `RideActivity` classifier + legend, and is how the v1.0.24 rendering was verified on the Mac (incl. a synthesised `WaterTemp` column to exercise the 3-mode path). **It does NOT flip `point(for:)`** — that was a bug (fixed 13.7.2026): on AppKit `snapshot.point(for:)` already comes back in the same y-up space the snapshot image is drawn in, so the old `y = footerH + (mapH - p.y)` mirrored the whole track against the tiles. It silently invalidates any visual check made with this script — a due-north synthetic track drew its start at the top, and the 12.7 walk into town appeared out at sea. iOS is y-down and likewise needs no flip.
 
 ### GPS Debug tab — u-blox UBX survey over BLE
 

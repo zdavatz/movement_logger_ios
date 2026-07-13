@@ -277,17 +277,27 @@ enum RideActivity {
         return wet
     }
 
-    /// Per-point "on the water" flag, derived GEOGRAPHICALLY from the wet fixes.
+    /// Per-point "on the water" flag, derived GEOGRAPHICALLY from where the ride
+    /// PROVED it was on the water: the confirmed-wet fixes, plus every fix the
+    /// rider crossed at board speed between the first and last submersion.
     ///
     /// The submersion sensor is sparse AND often late — on one 62-min ride it
     /// didn't fire at all for the first 34 min of foiling, then ran continuously
     /// for the swim back. So a blank reading must NOT be read as "on land", and a
-    /// time-window sticky-wet can't bridge a 34-min gap. Instead: the confirmed-
-    /// wet fixes are ground-truth "this is water" locations — rasterise them into
-    /// ~70 m grid cells, then mark any point within ±2 cells (~140 m) of a wet
-    /// cell as ON THE WATER, whatever the wrist was doing that second. Only points
-    /// far from every wet fix — a genuine inland walk — stay dry (→ land).
-    static func waterRegion(_ pts: [GpsRow], confWet: [Bool]) -> [Bool] {
+    /// time-window sticky-wet can't bridge a 34-min gap. Instead: rasterise the
+    /// proven-water fixes into ~70 m grid cells and mark any point within ±2 cells
+    /// (~140 m) of one as ON THE WATER, whatever the wrist was doing that second.
+    ///
+    /// **Seeding on the wet fixes ALONE is far too tight** (the 13.7.2026 bug): a
+    /// 125-min sea session fired the sensor on only 2.1 % of fixes, forming 20 wet
+    /// cells — so every stretch of the ride more than 140 m from one of them fell
+    /// outside the region and was called "on land" (22 % of the ride, at a median
+    /// 16.5 km/h). The rider was never ashore. The fast track fixes that: you
+    /// cannot foil across a car park, so any cell crossed at ≥ `boardKmh` during
+    /// the water session IS water, and a slow dry drift out at sea now sits inside
+    /// the region its own fast track drew. Fast fixes OUTSIDE the submersion span
+    /// deliberately don't seed — that's the drive to and from the beach.
+    static func waterRegion(_ pts: [GpsRow], confWet: [Bool], smoothKmh: [Double]) -> [Bool] {
         let n = pts.count
         guard n > 0 else { return [] }
         let latRef = pts[n / 2].lat
@@ -296,8 +306,13 @@ enum RideActivity {
         func cx(_ la: Double) -> Int { Int((la * mLat / cell).rounded(.down)) }
         func cy(_ lo: Double) -> Int { Int((lo * mLon / cell).rounded(.down)) }
         func gkey(_ x: Int, _ y: Int) -> Int64 { Int64(x) &* 4_000_000 &+ Int64(y) }
+        let wetIdx = pts.indices.filter { confWet[$0] }
+        let firstWet = wetIdx.first ?? 0, lastWet = wetIdx.last ?? -1
         var wetCells = Set<Int64>()
-        for i in pts.indices where confWet[i] { wetCells.insert(gkey(cx(pts[i].lat), cy(pts[i].lon))) }
+        for i in pts.indices where confWet[i]
+            || (i >= firstWet && i <= lastWet && smoothKmh[i] >= boardKmh) {
+            wetCells.insert(gkey(cx(pts[i].lat), cy(pts[i].lon)))
+        }
         return pts.map { p in
             let x = cx(p.lat), y = cy(p.lon)
             for dx in -2...2 { for dy in -2...2 where wetCells.contains(gkey(x + dx, y + dy)) { return true } }
@@ -327,18 +342,25 @@ enum RideActivity {
 
     /// Per-point smoothed activity mode for a cleaned, continuous track.
     ///
-    /// Signals, in order: the **terminal walk back on land** (the dry, moving
-    /// segment after the last real submersion); **WHERE** (geographic
-    /// `waterRegion`) separates the water session from a deep inland walk; and
+    /// Signals, in order: **SPEED vetoes land** (≥ `boardKmh` — nobody walks or
+    /// swims at 16 km/h, so a moving fix is on the board whatever the geography
+    /// says); then the **terminal walk back on land** (the dry, moving segment
+    /// after the last real submersion); then **WHERE** (geographic `waterRegion`)
+    /// separates the water session from a deep inland walk; and finally
     /// wrist-**WET** (`stickyWet`) separates **swimming** (wrist in the water)
     /// from **on the board** (foiling — the wrist rides above the surface, so the
-    /// sensor is dry). Speed is deliberately NOT used: at swim/foil speeds GPS
-    /// noise spikes cross any threshold, and submersion tells board-vs-swim
-    /// reliably where speed can't.
+    /// sensor is dry).
+    ///
+    /// Speed only ever *rules out* land and swim; it is never used to tell those
+    /// two apart — at swim/foil speeds GPS noise spikes cross any threshold, and
+    /// submersion tells board-vs-swim reliably where speed can't. That asymmetry
+    /// is the point: the old "speed is deliberately NOT used" rule let a sparse
+    /// submersion sensor label a 16 km/h foil run as a walk on land.
     static func modes(for pts: [GpsRow]) -> [RideMode] {
         guard !pts.isEmpty else { return [] }
+        let kmh = GpsMath.rollingMedian(pts.map { $0.speedKmhModule }, window: 5)
         let confWet = confirmedWet(pts)                 // real submersion (stuck-temp removed)
-        let water = waterRegion(pts, confWet: confWet)  // on the water patch vs far inland
+        let water = waterRegion(pts, confWet: confWet, smoothKmh: kmh)
         let wet = stickyWet(pts, confWet: confWet)      // wrist submerged (or just was)
         // Terminal walk back: dry points after the last real submersion, when
         // that trailing segment actually travels to shore, are on land.
@@ -348,6 +370,7 @@ enum RideActivity {
             && GpsMath.haversineM(pts[lastWet].lat, pts[lastWet].lon,
                                   pts[pts.count - 1].lat, pts[pts.count - 1].lon) > 60
         let raw: [Int] = pts.indices.map { i in
+            if kmh[i] >= boardKmh { return RideMode.board.rawValue }         // too fast to be on foot
             if tailIsWalk && i > lastWet { return RideMode.land.rawValue }   // walk back on land
             if !water[i] { return RideMode.land.rawValue }                   // far from water = on land
             return wet[i] ? RideMode.swim.rawValue                           // wrist in water = swimming

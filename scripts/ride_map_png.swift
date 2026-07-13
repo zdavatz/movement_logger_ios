@@ -174,10 +174,13 @@ var modes: [Int] = []
 if submerged {
     // GEOGRAPHIC water region. The submersion sensor is sparse & late (here it
     // didn't fire for the first 34 min of foiling), so a blank reading does NOT
-    // mean "on land". The confirmed-wet fixes are ground-truth water locations;
-    // any point spatially within that water patch (± ~140 m) is on the water,
-    // whatever the wrist was doing that second. Only points FAR from every wet
-    // fix — a genuine walk inland — are "on land".
+    // mean "on land". Water locations are the confirmed-wet fixes PLUS every fix
+    // crossed at board speed during the water session — you cannot foil across a
+    // car park, and seeding on the wet fixes alone is far too tight (a 125-min
+    // sea ride fired the sensor on 2.1 % of fixes, so 22 % of it — at a median
+    // 16.5 km/h — fell outside the region and read "on land"). Any point within
+    // ± ~140 m of that patch is on the water, whatever the wrist was doing that
+    // second. Only points FAR from it — a genuine walk inland — are "on land".
     let latRef = pts[pts.count / 2].lat
     let mLat = 111320.0, mLon = 111320.0 * cos(latRef * .pi / 180)
     let cell = 70.0
@@ -198,7 +201,12 @@ if submerged {
         let disp = hav(pts[s], pts[pts.count-1])
         if runSec > 60 && disp > 60 { for k in s..<pts.count { confWet[k] = false } }
     }
-    for i in pts.indices where confWet[i] { wetCells.insert(gkey(cx(sc[i].lat), cy(sc[i].lon))) }
+    let wetIdx = pts.indices.filter { confWet[$0] }
+    let firstWetIdx = wetIdx.first ?? 0, lastWetIdx = wetIdx.last ?? -1
+    for i in pts.indices where confWet[i]
+        || (i >= firstWetIdx && i <= lastWetIdx && smoothSpeed[i] >= boardKmh) {
+        wetCells.insert(gkey(cx(sc[i].lat), cy(sc[i].lon)))
+    }
     func inWater(_ la: Double, _ lo: Double) -> Bool {
         let x = cx(la), y = cy(lo)
         for dx in -2...2 { for dy in -2...2 where wetCells.contains(gkey(x + dx, y + dy)) { return true } }
@@ -223,12 +231,26 @@ if submerged {
     for i in pts.indices where confWet[i] { lastWet = i }
     let tailIsWalk = lastWet >= 0 && lastWet < pts.count - 1
         && hav(pts[lastWet], pts[pts.count - 1]) > 60
+    // Speed vetoes land: nobody walks or swims at 16 km/h, so a moving fix is on
+    // the board whatever the geography says. It never tells swim from board —
+    // that stays the submersion sensor's job.
     let raw = pts.indices.map { i -> Int in
+        if smoothSpeed[i] >= boardKmh { return 1 }       // too fast to be on foot
         if tailIsWalk && i > lastWet { return 2 }        // walk back on land
         if !inWater(sc[i].lat, sc[i].lon) { return 2 }   // far from water = on land
         return wet[i] ? 0 : 1                             // wet = swim (blue); dry on water = on board (green)
     }
     modes = smoothKeys(raw, ticksArr, 20)
+    if ProcessInfo.processInfo.environment["MLDEBUG"] != nil {
+        var st = 0
+        for i in 1...modes.count where i == modes.count || modes[i] != modes[st] {
+            let a = st, b = i - 1
+            FileHandle.standardError.write(String(format: "  %@ t %.0f-%.0f (%.0fs)  lat %.5f..%.5f\n",
+                modeLabels[modes[a]], ticksArr[a]*0.01, ticksArr[b]*0.01,
+                (ticksArr[b]-ticksArr[a])*0.01, pts[a].lat, pts[b].lat).data(using: .utf8)!)
+            st = i
+        }
+    }
 }
 // Speed scale for the gradient fallback.
 let sortedSp = pts.map { $0.speed }.filter { $0.isFinite && $0 >= 0 }.sorted()
@@ -309,11 +331,15 @@ snapshotter.start(with: DispatchQueue.global(qos: .userInitiated)) { snap, err i
     // bottom edge sits at y = footerH.
     snap.image.draw(in: NSRect(x: 0, y: footerH, width: W, height: mapH))
 
-    // snap.point(for:) is relative to the map image's upper-left (y-down);
-    // convert to this y-up canvas: y = footerH + (mapH - p.y).
+    // On AppKit `snap.point(for:)` is ALREADY y-up (same space the snapshot image
+    // is drawn in), so it needs NO flip — only the footer offset. Subtracting it
+    // from mapH mirrored the whole track against the tiles: a due-north synthetic
+    // track drew its start at the top and its end at the bottom, and the 12.7.2026
+    // walk into town appeared out at sea. (iOS is y-down and matches its own
+    // image space, which is why `RideMapRenderer` doesn't flip either.)
     func canvasPoint(_ c: CLLocationCoordinate2D) -> NSPoint {
         let p = snap.point(for: c)
-        return NSPoint(x: p.x, y: footerH + (mapH - p.y))
+        return NSPoint(x: p.x, y: footerH + p.y)
     }
     let px = coords.map(canvasPoint)
 
