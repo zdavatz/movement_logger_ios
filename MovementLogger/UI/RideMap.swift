@@ -111,6 +111,10 @@ struct RideMapView: View {
                 camera = .rect(rect)
             }
         }
+        // Dark tiles even in light mode — same reason as the shared PNG: the
+        // track has to read against the sea, and Apple's light sea is pale blue.
+        // Scoped to the map + its legend, so the rest of the app is untouched.
+        .environment(\.colorScheme, .dark)
     }
 
     /// Small translucent legend in the map corner — mode swatches when the
@@ -211,11 +215,16 @@ enum RideMode: Int, CaseIterable {
     case board  // on the water, on the board / foil
     case land   // walking on land
 
+    /// Palette picked for contrast against DARK map tiles (navy water, near-black
+    /// land) — see `darkTiles` below. The old blue/green pair was chosen for
+    /// meaning, not legibility: green sat on light-blue water at barely any
+    /// contrast and blue "in water" was all but invisible on the water it named.
+    /// These three read clearly against the water, the land, and each other.
     var color: UIColor {
         switch self {
-        case .swim:  return UIColor(red: 0.20, green: 0.55, blue: 0.95, alpha: 1)  // blue
-        case .board: return UIColor(red: 0.16, green: 0.78, blue: 0.42, alpha: 1)  // green
-        case .land:  return UIColor(red: 0.95, green: 0.55, blue: 0.13, alpha: 1)  // orange
+        case .swim:  return UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 1)  // cyan
+        case .board: return UIColor(red: 0.93, green: 0.11, blue: 0.31, alpha: 1)  // crimson
+        case .land:  return UIColor(red: 1.00, green: 0.65, blue: 0.00, alpha: 1)  // amber
         }
     }
     var swiftUIColor: Color { Color(color) }
@@ -654,6 +663,12 @@ enum RideMapRenderer {
         opts.mapType = .standard
         opts.showsBuildings = true
         opts.pointOfInterestFilter = .excludingAll
+        // DARK tiles regardless of the phone's appearance. Apple's light map
+        // paints the sea in a pale blue that a track has to fight; on the dark
+        // map the sea is deep navy, so the whole palette pops off it (and the
+        // tiles then match the dark footer). Snapshots don't inherit the app's
+        // trait collection, so it has to be set explicitly.
+        opts.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
 
         guard let snap = try? await start(MKMapSnapshotter(options: opts)) else { return nil }
 
