@@ -86,12 +86,17 @@ fully scriptable and needs no phone:
   `AVAssetExportSession` with a `.commonIdentifierCreationDate` metadata item, and set
   the date **inside the GPS coverage window** of the paired `Gps*.csv`.
 
-Then transcode to the slot size (no `pad`, ever):
+**A preview MUST carry a stereo audio track — `-an` fails.** A Simulator recording
+has no audio, and uploading it silent makes Apple's processing set
+`assetDeliveryState=FAILED` with `MOV_RESAVE_STEREO`. Mux in a silent **stereo** AAC
+track (48 kHz). Then transcode to the slot size (no `pad`, ever):
 
 ```sh
 ffmpeg -ss 2 -t 26 -i rec.mov \
+    -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=48000 -shortest \
     -vf "scale=886:1920:flags=lanczos,fps=30" \
-    -c:v libx264 -profile:v high -pix_fmt yuv420p -b:v 10M -movflags +faststart -an \
+    -c:v libx264 -profile:v high -pix_fmt yuv420p -b:v 10M -movflags +faststart \
+    -c:a aac -b:a 192k -ar 48000 -ac 2 \
     screenshots/store/previews/01_rides_map.mp4
 ```
 
