@@ -42,6 +42,12 @@
 	<string>Connects to the PumpTsueri MovementLogger box to start and stop a recording session.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Records your position once per second when no MovementLogger box is connected.</string>
+	<!-- Watch-only riders: WatchRaceUplink sends race fixes over UDP straight from
+	     the watch's own WiFi when the phone isn't reachable, so the watch needs its
+	     OWN local-network permission — the phone app's key does not cover this
+	     bundle. Same silent-drop failure mode as on the phone if it's missing. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Race mode sends your live position to the Movement Logger app on your computer, so the race map can show where you are on the water.</string>
 	<key>NSMotionUsageDescription</key>
 	<string>Reads the water temperature from the Apple Watch Ultra's submersion sensor during a session.</string>
 	<key>NSHealthShareUsageDescription</key>

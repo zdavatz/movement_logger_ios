@@ -52,6 +52,14 @@
 	<string>Movement Logger saves the composite replay video to your Photos library so you can share it.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Movement Logger uses the iPhone's GPS to record an independent cross-check track alongside the box's GPS over BLE.</string>
+	<!-- Race mode streams one position fix per second over UDP to the Movement
+	     Logger desktop app's Race screen, addressed by its LAN ip:port. iOS gates
+	     ANY traffic to a local-network address behind this permission — including
+	     plain unicast UDP — and without this key the prompt never appears and the
+	     datagrams are dropped silently (UDP has no ACK, so the app would show the
+	     uplink running with no error while the desktop receives nothing). -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Race mode sends your live position to the Movement Logger app on your computer, so the race map can show where you are on the water.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UIApplicationSceneManifest</key>
