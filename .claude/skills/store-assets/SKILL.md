@@ -43,27 +43,63 @@ Note: the iPad simulator's Sync screen logs `ERROR: BLE unsupported on this devi
   - `IPHONE_67` / `IPHONE_65`: 1080×1920, 886×1920, 1920×1080, 1920×886
   - `IPAD_PRO_3GEN_129`: 1200×1600, 1600×1200
 
-**Source-of-truth files live in `screenshots/store/previews/`.** The same MP4 goes to both iPhone slots (the iPad slot is currently skipped because the composite layout doesn't fit 1200×1600 nicely). The committed clips came from the app's own composite-MOV export (1080×3200 native), then `ffmpeg`-transcoded:
+**NEVER pad/pillarbox a preview. It WILL be rejected (Guideline 2.3.4).**
 
-- Pillarboxed to 1080×1920 — keeps all 4 data panels visible at the cost of 216 px black bars left+right. Cropping the source to fit 1080×1920 would cut out the panels, which defeats the entire point of the App Preview for this app.
-- Trimmed (>30 s sources) or slowed via `setpts` + `atempo` (<15 s sources) into the 15-30 s window.
+App previews must be **full-bleed screen captures of the app's UI**. Anything else
+around the app — black bars, a device bezel, a mockup frame — is read by App Review
+as "framing around the video screen capture of the app" and rejected.
+
+This is not hypothetical: **v1.0.31 was rejected exactly this way** (Jul 2026). The
+previews were the app's own *composite export* scaled into 1080×1920, leaving 216 px
+of black each side (`cropdetect` → `crop=640:1920:220:0`). The app's exported
+composite is app *output*, not the app — it is not a valid preview source, and no
+amount of re-cropping makes it one.
+
+**Pre-flight check — run before every upload.** The detected crop must equal the
+full frame; anything smaller means there's a border:
 
 ```sh
-# Trim+pillarbox a long composite to 30 s:
-ffmpeg -ss 0 -t 30 -i combined.mov \
-    -vf "scale=648:1920,pad=1080:1920:216:0:black" \
-    -c:v libx264 -profile:v high -pix_fmt yuv420p -r 30 -b:v 10M -movflags +faststart \
-    -c:a aac -b:a 192k -ar 48000 \
-    screenshots/store/previews/01_ride.mp4
-
-# Slow a <15 s composite (1.4× → ~15-16 s):
-ffmpeg -i short.mov \
-    -filter_complex "[0:v]setpts=1.4*PTS,scale=648:1920,pad=1080:1920:216:0:black[v];[0:a]atempo=0.7143[a]" \
-    -map "[v]" -map "[a]" \
-    -c:v libx264 -profile:v high -pix_fmt yuv420p -r 30 -b:v 10M -movflags +faststart \
-    -c:a aac -b:a 192k -ar 48000 \
-    screenshots/store/previews/02_short.mp4
+ffmpeg -hide_banner -i preview.mp4 -vf cropdetect -frames:v 30 -f null - 2>&1 | grep -o "crop=[0-9:]*" | tail -1
 ```
+
+**How to produce a valid preview: record the app's screen.** The Simulator route is
+fully scriptable and needs no phone:
+
+- Use an **iPhone 15 Pro Max** simulator (1290×2796). Its aspect ratio (0.46137)
+  matches the **886×1920** preview slot (0.46146) to within 0.02 %, so it scales with
+  **no crop and no padding**. (A 6.9"/iPhone 17 sim does NOT match as cleanly.)
+- Seed real data into the app container so the screens have content:
+  `xcrun simctl get_app_container <sim> ch.pumptsueri.movementlogger data` → drop
+  CSVs / videos into `Documents/`.
+- Clean status bar: `xcrun simctl status_bar <sim> override --time "9:41" --batteryState charged --batteryLevel 100 --wifiBars 3 --cellularBars 4`
+- Record: `xcrun simctl io <sim> recordVideo --codec h264 --force out.mov`.
+  **Start the recorder FIRST, then re-`activate` the Simulator** — the recorder steals
+  focus, and synthetic clicks sent while it isn't frontmost are silently dropped
+  (symptom: a recording containing exactly 1 frame).
+- Drive the UI with `cliclick` against the Simulator window (there is no `simctl tap`).
+  Map device px → screen points; a slow multi-step `dd`/`dm`/`du` drag is required for
+  scrolling — a single fast drag does not register as a swipe.
+- A **video seeded for the Replay tab must carry an Apple-native creation date**, or
+  the app shows "Video has no creation_time — cursor hidden" and the panels can't
+  align. `ffmpeg -metadata creation_time=…` is NOT enough (AVFoundation doesn't
+  surface the mvhd timestamp as `commonKeyCreationDate`). Re-mux passthrough through
+  `AVAssetExportSession` with a `.commonIdentifierCreationDate` metadata item, and set
+  the date **inside the GPS coverage window** of the paired `Gps*.csv`.
+
+Then transcode to the slot size (no `pad`, ever):
+
+```sh
+ffmpeg -ss 2 -t 26 -i rec.mov \
+    -vf "scale=886:1920:flags=lanczos,fps=30" \
+    -c:v libx264 -profile:v high -pix_fmt yuv420p -b:v 10M -movflags +faststart -an \
+    screenshots/store/previews/01_rides_map.mp4
+```
+
+**Source-of-truth files live in `screenshots/store/previews/`.** The same MP4 goes to
+both iPhone slots (the iPad slot is skipped). Current clips are Simulator screen
+recordings: `01_rides_map.mp4` (Rides list → activity-coloured ride map → zoom) and
+`02_replay_panels.mp4` (Replay: video playing, four data panels drawing live with the
+cursor sweeping).
 
 After upload, Apple takes 5–15 min to process each video asynchronously. Poll `/v1/appPreviews/<id>` and watch `assetDeliveryState` go through `UPLOAD_COMPLETE → PROCESSING → COMPLETE` (or `FAILED` with error codes).
 
