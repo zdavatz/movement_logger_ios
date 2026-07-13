@@ -255,21 +255,35 @@ def cancel_blocking_submissions(c: Client, app_id: str, target_version: str) -> 
     Cancelling is safe/reversible in spirit: the build stays uploaded and the
     superseding version re-enters review immediately with the same-or-newer
     binary. Covers WAITING_FOR_REVIEW (queued) and IN_REVIEW (Apple looking) —
-    both are cancellable via `canceled=true` and both block us."""
+    both are cancellable via `canceled=true` and both block us.
+
+    UNRESOLVED_ISSUES (App Review REJECTED the submission) also blocks, and it
+    is the one case where we must cancel a submission that DOES carry our target
+    version: the rejected submission still owns that appStoreVersion, so adding
+    it to a fresh submission 409s with
+    STATE_ERROR.ITEM_PART_OF_ANOTHER_SUBMISSION ("was already added to another
+    reviewSubmission"). Hit for real fixing the v1.0.31 preview rejection
+    (Guideline 2.3.4, 13.7.2026) — the version had to be freed before the
+    corrected metadata could be resubmitted. So it is cancelled unconditionally,
+    unlike the queued/in-review states below."""
     subs = c.get("/reviewSubmissions", params={
         "filter[app]": app_id, "filter[platform]": PLATFORM, "limit": 20,
     })["data"]
     pending = [s for s in subs
-               if s["attributes"]["state"] in ("WAITING_FOR_REVIEW", "IN_REVIEW")]
+               if s["attributes"]["state"] in ("WAITING_FOR_REVIEW", "IN_REVIEW",
+                                               "UNRESOLVED_ISSUES")]
     for s in pending:
         sub_id = s["id"]
         state = s["attributes"]["state"]
         vers = _submission_versions(c, sub_id)
-        if target_version in vers:
+        rejected = state == "UNRESOLVED_ISSUES"
+        if target_version in vers and not rejected:
             print(f"  reviewSubmission {sub_id} already carries {target_version} — leaving it")
             continue
+        why = ("rejected by App Review — frees the version for resubmission"
+               if rejected else f"superseded by {target_version}")
         print(f"  cancelling {state} reviewSubmission {sub_id} "
-              f"(version {','.join(vers) or '?'}) — superseded by {target_version}")
+              f"(version {','.join(vers) or '?'}) — {why}")
         c.patch(f"/reviewSubmissions/{sub_id}", {
             "data": {"type": "reviewSubmissions", "id": sub_id,
                      "attributes": {"canceled": True}},
