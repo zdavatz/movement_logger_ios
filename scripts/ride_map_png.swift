@@ -7,9 +7,10 @@
 //  - ONE continuous line (no hole-splitting): valid fixes, stall-duplicates
 //    collapsed, 1-sample GPS spikes removed, gaps bridged (the accuracy gate
 //    already removes the only across-town outlier).
-//  - Dark map tiles, and coloured by inferred activity when the ride carries the
-//    Ultra's `WaterTemp [C]` submersion column: wet + slow → In water (cyan),
-//    ≥6 km/h → On board (crimson), dry + slow → On land (amber).
+//  - Coloured by inferred activity when the ride carries the Ultra's
+//    `WaterTemp [C]` submersion column: wet + slow → In water (cyan),
+//    ≥6 km/h → On board (crimson), dry + slow → On land (amber). Tiles follow
+//    the system appearance (MLDARK=1 forces dark); MLDEBUG=1 prints the runs.
 //  - Rides with no submersion column can't tell water from land, so they
 //    degrade to a speed gradient (blue slow → red fast) with a note.
 //
@@ -165,9 +166,9 @@ let boardKmh = 6.0
 let ticksArr = pts.map { $0.ticks }
 let smoothSpeed = rollMed(pts.map { $0.speed }, 5)
 // Mode keys: 0=swim(blue) 1=board(green) 2=land(orange).
-// Palette + dark tiles mirror RideMode.color / the snapshot trait collection in
-// the app: the light map's pale-blue sea gave the old green/blue track almost no
-// contrast, and "in water" blue was invisible on the water it named.
+// Palette mirrors RideMode.color in the app: the old green/blue pair was chosen
+// for meaning, not legibility — green sat on the light map's pale-blue sea at
+// barely any contrast, and "in water" blue was invisible on the water it named.
 // Mode keys: 0=swim(cyan) 1=board(crimson) 2=land(amber).
 let modeColors: [NSColor] = [
     NSColor(calibratedRed: 0.13, green: 0.83, blue: 0.93, alpha: 1),
@@ -312,7 +313,11 @@ opts.region = MKCoordinateRegion(rect)
 opts.size = CGSize(width: W, height: mapH)
 let renderScale: CGFloat = 2   // macOS Options has no `scale`; upscale the bitmap ourselves
 opts.mapType = .standard
-opts.appearance = NSAppearance(named: .darkAqua)   // dark tiles (see palette note)
+// Tiles follow the system appearance, like the app (which passes the view's
+// colorScheme into the snapshot). MLDARK=1 forces dark to preview that side.
+if ProcessInfo.processInfo.environment["MLDARK"] != nil {
+    opts.appearance = NSAppearance(named: .darkAqua)
+}
 opts.showsBuildings = true
 opts.pointOfInterestFilter = .excludingAll
 

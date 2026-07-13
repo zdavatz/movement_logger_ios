@@ -24,6 +24,7 @@ struct RideMapView: View {
     let url: URL
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var colorScheme
     @State private var loadError: String?
     @State private var camera: MapCameraPosition = .automatic
     @State private var rendering = false
@@ -111,10 +112,6 @@ struct RideMapView: View {
                 camera = .rect(rect)
             }
         }
-        // Dark tiles even in light mode — same reason as the shared PNG: the
-        // track has to read against the sea, and Apple's light sea is pale blue.
-        // Scoped to the map + its legend, so the rest of the app is untouched.
-        .environment(\.colorScheme, .dark)
     }
 
     /// Small translucent legend in the map corner — mode swatches when the
@@ -172,7 +169,8 @@ struct RideMapView: View {
         rendering = true
         defer { rendering = false }
         let png = await RideMapRenderer.render(
-            rows: rows, title: url.deletingPathExtension().lastPathComponent)
+            rows: rows, title: url.deletingPathExtension().lastPathComponent,
+            dark: colorScheme == .dark)
         guard let png else { return }
         let dir = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -647,7 +645,7 @@ enum RideMapRenderer {
 
     /// Render the shareable PNG. Returns PNG `Data` (nil if the map snapshot
     /// fails or there are <2 points).
-    static func render(rows: [GpsRow], title: String,
+    static func render(rows: [GpsRow], title: String, dark: Bool = false,
                        width: CGFloat = 1080, mapHeight: CGFloat = 1440,
                        footerHeight: CGFloat = 260) async -> Data? {
         let clean = cleanTrack(rows: rows)
@@ -663,12 +661,11 @@ enum RideMapRenderer {
         opts.mapType = .standard
         opts.showsBuildings = true
         opts.pointOfInterestFilter = .excludingAll
-        // DARK tiles regardless of the phone's appearance. Apple's light map
-        // paints the sea in a pale blue that a track has to fight; on the dark
-        // map the sea is deep navy, so the whole palette pops off it (and the
-        // tiles then match the dark footer). Snapshots don't inherit the app's
-        // trait collection, so it has to be set explicitly.
-        opts.traitCollection = UITraitCollection(userInterfaceStyle: .dark)
+        // Tiles follow the phone's appearance — but a snapshot rendered off the
+        // main actor does NOT inherit it, so the caller passes it down explicitly
+        // (`RideMapView` reads `\.colorScheme`). Without this the PNG would come
+        // out light-mapped for a user whose whole phone is in dark mode.
+        opts.traitCollection = UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
 
         guard let snap = try? await start(MKMapSnapshotter(options: opts)) else { return nil }
 
