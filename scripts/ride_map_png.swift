@@ -8,9 +8,10 @@
 //    collapsed, 1-sample GPS spikes removed, gaps bridged (the accuracy gate
 //    already removes the only across-town outlier).
 //  - Coloured by inferred activity when the ride carries the Ultra's
-//    `WaterTemp [C]` submersion column: wet + slow → In water (cyan),
-//    ≥6 km/h → On board (crimson), dry + slow → On land (amber). Tiles follow
-//    the system appearance (MLDARK=1 forces dark); MLDEBUG=1 prints the runs.
+//    `WaterTemp [C]` submersion column: wet + slow → In water, ≥6 km/h → On
+//    board, dry + slow → On land (amber). Swim/board colours flip with the map
+//    appearance (dark blue + dark green on light tiles, light blue + crimson on
+//    dark). MLDARK=1 forces dark tiles; MLDEBUG=1 prints the classified runs.
 //  - Rides with no submersion column can't tell water from land, so they
 //    degrade to a speed gradient (blue slow → red fast) with a note.
 //
@@ -166,14 +167,21 @@ let boardKmh = 6.0
 let ticksArr = pts.map { $0.ticks }
 let smoothSpeed = rollMed(pts.map { $0.speed }, 5)
 // Mode keys: 0=swim(blue) 1=board(green) 2=land(orange).
-// Palette mirrors RideMode.color in the app: the old green/blue pair was chosen
-// for meaning, not legibility — green sat on the light map's pale-blue sea at
-// barely any contrast, and "in water" blue was invisible on the water it named.
-// Mode keys: 0=swim(cyan) 1=board(crimson) 2=land(amber).
-let modeColors: [NSColor] = [
-    NSColor(calibratedRed: 0.13, green: 0.83, blue: 0.93, alpha: 1),
-    NSColor(calibratedRed: 0.93, green: 0.11, blue: 0.31, alpha: 1),
-    NSColor(calibratedRed: 1.00, green: 0.65, blue: 0.00, alpha: 1)]
+// Palette mirrors RideMode.color(dark:) in the app: the old fixed blue/green
+// pair was picked for meaning, not legibility — green sat on the light map's
+// pale-blue sea at barely any contrast, and blue "in water" was invisible on the
+// water it named. Swim and board each take opposite ends of their scale
+// depending on the tiles; amber (land) reads on both.
+// Mode keys: 0=swim 1=board 2=land.
+let darkTiles = ProcessInfo.processInfo.environment["MLDARK"] != nil
+let modeColors: [NSColor] = darkTiles ? [
+    NSColor(calibratedRed: 0.13, green: 0.83, blue: 0.93, alpha: 1),   // light blue
+    NSColor(calibratedRed: 0.93, green: 0.11, blue: 0.31, alpha: 1),   // crimson
+    NSColor(calibratedRed: 1.00, green: 0.65, blue: 0.00, alpha: 1)]   // amber
+  : [
+    NSColor(calibratedRed: 0.04, green: 0.24, blue: 0.60, alpha: 1),   // dark blue
+    NSColor(calibratedRed: 0.04, green: 0.45, blue: 0.24, alpha: 1),   // dark green
+    NSColor(calibratedRed: 1.00, green: 0.65, blue: 0.00, alpha: 1)]   // amber
 let modeLabels = ["In water", "On board", "On land"]
 var modes: [Int] = []
 if submerged {
@@ -315,9 +323,7 @@ let renderScale: CGFloat = 2   // macOS Options has no `scale`; upscale the bitm
 opts.mapType = .standard
 // Tiles follow the system appearance, like the app (which passes the view's
 // colorScheme into the snapshot). MLDARK=1 forces dark to preview that side.
-if ProcessInfo.processInfo.environment["MLDARK"] != nil {
-    opts.appearance = NSAppearance(named: .darkAqua)
-}
+if darkTiles { opts.appearance = NSAppearance(named: .darkAqua) }
 opts.showsBuildings = true
 opts.pointOfInterestFilter = .excludingAll
 

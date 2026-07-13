@@ -35,6 +35,7 @@ struct RideMapView: View {
     /// recompute the cleaning/classification.
     @State private var rows: [GpsRow] = []
     @State private var trackPoints: [CLLocationCoordinate2D] = []
+    @State private var cleanTrack: RideMapRenderer.CleanTrack?
     @State private var mapRuns: [MapRun] = []
     @State private var legend: RideLegend = .speed(vMax: 0)
 
@@ -77,6 +78,7 @@ struct RideMapView: View {
                 }
             }
             .task { load() }
+            .onChange(of: colorScheme) { recolor() }
         }
         .sheet(item: $shareItem) { item in
             ActivityView(items: [item.url])
@@ -122,7 +124,8 @@ struct RideMapView: View {
             case .modes(let modes):
                 ForEach(modes, id: \.self) { m in
                     HStack(spacing: 6) {
-                        Circle().fill(m.swiftUIColor).frame(width: 11, height: 11)
+                        Circle().fill(m.swiftUIColor(dark: colorScheme == .dark))
+                            .frame(width: 11, height: 11)
                         Text(m.label).font(.caption2)
                     }
                 }
@@ -157,12 +160,20 @@ struct RideMapView: View {
         do {
             rows = try CsvParsers.parseGpsFile(url)
             let clean = RideMapRenderer.cleanTrack(rows: rows)
+            cleanTrack = clean
             trackPoints = clean.points.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
-            (mapRuns, legend) = RideMapRenderer.mapRuns(clean: clean)
+            recolor()
             loadError = rows.isEmpty ? "no rows parsed" : nil
         } catch {
             loadError = error.localizedDescription
         }
+    }
+
+    /// The "on board" colour flips with the appearance, so the runs have to be
+    /// rebuilt when the user switches light/dark with the map open.
+    private func recolor() {
+        guard let clean = cleanTrack else { return }
+        (mapRuns, legend) = RideMapRenderer.mapRuns(clean: clean, dark: colorScheme == .dark)
     }
 
     private func share() async {
@@ -213,19 +224,22 @@ enum RideMode: Int, CaseIterable {
     case board  // on the water, on the board / foil
     case land   // walking on land
 
-    /// Palette picked for contrast against DARK map tiles (navy water, near-black
-    /// land) — see `darkTiles` below. The old blue/green pair was chosen for
-    /// meaning, not legibility: green sat on light-blue water at barely any
-    /// contrast and blue "in water" was all but invisible on the water it named.
-    /// These three read clearly against the water, the land, and each other.
-    var color: UIColor {
+    /// Colour per map appearance. The old fixed blue/green/orange was picked for
+    /// meaning, not legibility: green sat on the light map's pale-blue sea at
+    /// barely any contrast, and blue "in water" was near-invisible on the water
+    /// it named. So swim and board each take opposite ends of their scale
+    /// depending on the tiles — dark on the pale sea, bright on the navy one.
+    /// Amber (land) is the one colour that reads on both.
+    func color(dark: Bool) -> UIColor {
         switch self {
-        case .swim:  return UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 1)  // cyan
-        case .board: return UIColor(red: 0.93, green: 0.11, blue: 0.31, alpha: 1)  // crimson
-        case .land:  return UIColor(red: 1.00, green: 0.65, blue: 0.00, alpha: 1)  // amber
+        case .swim:  return dark ? UIColor(red: 0.13, green: 0.83, blue: 0.93, alpha: 1)   // light blue
+                                 : UIColor(red: 0.04, green: 0.24, blue: 0.60, alpha: 1)   // dark blue
+        case .board: return dark ? UIColor(red: 0.93, green: 0.11, blue: 0.31, alpha: 1)   // crimson
+                                 : UIColor(red: 0.04, green: 0.45, blue: 0.24, alpha: 1)   // dark green
+        case .land:  return UIColor(red: 1.00, green: 0.65, blue: 0.00, alpha: 1)          // amber
         }
     }
-    var swiftUIColor: Color { Color(color) }
+    func swiftUIColor(dark: Bool) -> Color { Color(color(dark: dark)) }
 
     var label: String {
         switch self {
@@ -558,7 +572,7 @@ enum RideMapRenderer {
     /// Build the interactive-map polyline runs + the legend for a cleaned
     /// track: activity-mode colours when submersion data exists, else a
     /// smoothed speed-band colouring approximating the PNG's gradient.
-    static func mapRuns(clean: CleanTrack) -> ([MapRun], RideLegend) {
+    static func mapRuns(clean: CleanTrack, dark: Bool) -> ([MapRun], RideLegend) {
         let pts = clean.points
         guard pts.count >= 2 else { return ([], .speed(vMax: 0)) }
         let coord = { (i: Int) in CLLocationCoordinate2D(latitude: pts[i].lat, longitude: pts[i].lon) }
@@ -570,7 +584,7 @@ enum RideMapRenderer {
         if RideActivity.hasSubmersion(pts) {
             let modes = RideActivity.modes(for: pts)
             keyForEdge = { modes[$0].rawValue }
-            keyColor = { RideMode(rawValue: $0)?.swiftUIColor ?? .teal }
+            keyColor = { RideMode(rawValue: $0)?.swiftUIColor(dark: dark) ?? .teal }
             // Present modes in canonical order for the legend.
             let present = RideMode.allCases.filter { m in modes.contains(m) }
             legend = .modes(present)
@@ -676,7 +690,7 @@ enum RideMapRenderer {
         let smoothSp = GpsMath.rollingMedian(speeds, window: 5)
         let modes: [RideMode] = submerged ? RideActivity.modes(for: pts) : []
         func edgeColor(_ i: Int) -> UIColor {
-            submerged ? modes[i].color : speedColor(smoothSp[i], vMax: vMax)
+            submerged ? modes[i].color(dark: dark) : speedColor(smoothSp[i], vMax: vMax)
         }
         let legend: RideLegend = submerged
             ? .modes(RideMode.allCases.filter { m in modes.contains(m) })
@@ -722,7 +736,8 @@ enum RideMapRenderer {
 
             // 5. Branded footer with legend.
             drawFooter(cg, full: full, footerHeight: footerHeight, title: title,
-                       topSpeed: topSpeed, distanceKm: distanceKm, durMin: durMin, legend: legend)
+                       topSpeed: topSpeed, distanceKm: distanceKm, durMin: durMin,
+                       legend: legend, dark: dark)
         }
         return img.pngData()
     }
@@ -831,7 +846,8 @@ enum RideMapRenderer {
 
     private static func drawFooter(_ cg: CGContext, full: CGSize, footerHeight: CGFloat,
                                    title: String, topSpeed: Double,
-                                   distanceKm: Double, durMin: Double, legend: RideLegend) {
+                                   distanceKm: Double, durMin: Double, legend: RideLegend,
+                                   dark: Bool) {
         let rect = CGRect(x: 0, y: full.height - footerHeight, width: full.width, height: footerHeight)
         cg.setFillColor(UIColor(white: 0.06, alpha: 0.92).cgColor)
         cg.fill(rect)
@@ -839,7 +855,7 @@ enum RideMapRenderer {
         let pad: CGFloat = 28
         // 1. Legend as a horizontal strip across the TOP of the footer — its own
         //    band, so it can never collide with the (long) source-URL line.
-        drawLegend(cg, legend, in: rect, pad: pad)
+        drawLegend(cg, legend, in: rect, pad: pad, dark: dark)
         cg.setFillColor(UIColor(white: 0.2, alpha: 1).cgColor)
         cg.fill(CGRect(x: pad, y: rect.minY + 66, width: full.width - pad * 2, height: 1))
 
@@ -869,7 +885,7 @@ enum RideMapRenderer {
     /// Legend as a horizontal strip in the footer's top band: activity swatches
     /// laid out left→right, or a speed gradient scale.
     private static func drawLegend(_ cg: CGContext, _ legend: RideLegend,
-                                   in rect: CGRect, pad: CGFloat) {
+                                   in rect: CGRect, pad: CGFloat, dark: Bool) {
         let y = rect.minY + 18
         let titleFont = UIFont.systemFont(ofSize: 25, weight: .semibold)
         let labelFont = UIFont.systemFont(ofSize: 25, weight: .regular)
@@ -879,7 +895,7 @@ enum RideMapRenderer {
             var x = pad + 170
             for m in modes {
                 let dot = CGRect(x: x, y: y + 5, width: 22, height: 22)
-                cg.setFillColor(m.color.cgColor); cg.fillEllipse(in: dot)
+                cg.setFillColor(m.color(dark: dark).cgColor); cg.fillEllipse(in: dot)
                 draw(m.label, at: CGPoint(x: x + 30, y: y), font: labelFont, color: .white)
                 x += 30 + textWidth(m.label, labelFont) + 46
             }

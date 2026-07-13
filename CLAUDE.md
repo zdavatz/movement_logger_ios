@@ -279,18 +279,18 @@ raw speed, when the ride carries the Ultra's `WaterTemp [C]` submersion column.
 Runs shorter than `minRunSec` (20 s) are absorbed into their longer neighbour
 (`smoothKeys`) so the track shows sustained bands, not per-fix flicker.
 
-**Modes are coloured cyan (in water) / crimson (on board) / amber (on land).**
-The original blue/green/orange was picked for meaning, not legibility: green sat
-on the light map's pale-blue sea at barely any contrast, and blue "in water" was
-near-invisible on the water it named. These three read against the sea, the land,
-and each other in BOTH map appearances.
-
-**Map tiles follow the system appearance.** The shared PNG must be told which —
-`MKMapSnapshotter` rendered off the main actor does NOT inherit the app's trait
-collection, so `RideMapView` reads `\.colorScheme` and passes it into
-`RideMapRenderer.render(rows:title:dark:)`. Without that a dark-mode user would
-get a light-mapped PNG. (`scripts/ride_map_png.swift` mirrors this: system
-appearance by default, `MLDARK=1` to force dark.)
+**Mode colours flip with the map appearance** (`RideMode.color(dark:)`): on light
+tiles **dark blue** (in water) / **dark green** (on board), on dark tiles **light
+blue** / **crimson**; **amber** (on land) reads on both. The original fixed
+blue/green/orange was picked for meaning, not legibility — green sat on the light
+map's pale-blue sea at barely any contrast, and blue "in water" was near-invisible
+on the water it named. Because the colour depends on the appearance, `mapRuns` is
+rebuilt on `\.colorScheme` change (`RideMapView.recolor()`), and the PNG must be
+TOLD the appearance: an `MKMapSnapshotter` rendered off the main actor does NOT
+inherit the app's trait collection, so the view passes it into
+`RideMapRenderer.render(rows:title:dark:)` — without that a dark-mode user gets a
+light-mapped PNG. (`scripts/ride_map_png.swift` mirrors both palettes;
+`MLDARK=1` renders the dark pair.)
 
 **Speed only ever rules land and swim OUT; it never tells them apart** — at
 swim/foil speeds GPS noise spikes cross any threshold, so board-vs-swim stays
