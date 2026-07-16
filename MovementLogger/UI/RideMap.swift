@@ -179,9 +179,19 @@ struct RideMapView: View {
     private func share() async {
         rendering = true
         defer { rendering = false }
+        // WeatherKit's historical wind for this ride's place + time. Returns nil
+        // offline / outside its 2022-08-01 horizon, and the footer then simply
+        // omits wind (and its attribution) — sharing a map must never depend on
+        // the network. Goes through RideStatsLoader so the row and the PNG share
+        // one cached answer rather than each spending a call.
+        var wind: RideWeather.Wind?
+        if var s = await RideStatsLoader.shared.stats(for: url) {
+            s = await RideStatsLoader.shared.addWind(to: s, url: url)
+            wind = s.wind
+        }
         let png = await RideMapRenderer.render(
             rows: rows, title: url.deletingPathExtension().lastPathComponent,
-            dark: colorScheme == .dark)
+            dark: colorScheme == .dark, wind: wind)
         guard let png else { return }
         let dir = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -692,9 +702,13 @@ enum RideMapRenderer {
 
     /// Render the shareable PNG. Returns PNG `Data` (nil if the map snapshot
     /// fails or there are <2 points).
+    /// `wind` is fetched by the caller (WeatherKit is a network round-trip, and
+    /// a nil just omits the wind + its attribution — the PNG must still render
+    /// offline).
     static func render(rows: [GpsRow], title: String, dark: Bool = false,
+                       wind: RideWeather.Wind? = nil,
                        width: CGFloat = 1080, mapHeight: CGFloat = 1440,
-                       footerHeight: CGFloat = 260) async -> Data? {
+                       footerHeight: CGFloat = 300) async -> Data? {
         let clean = cleanTrack(rows: rows)
         let pts = clean.points
         guard pts.count >= 2 else { return nil }
@@ -771,7 +785,7 @@ enum RideMapRenderer {
             // 5. Branded footer with legend.
             drawFooter(cg, full: full, footerHeight: footerHeight, title: title,
                        topSpeed: topSpeed, distanceKm: distanceKm, durMin: durMin,
-                       waterTempC: waterTempC, legend: legend, dark: dark)
+                       waterTempC: waterTempC, wind: wind, legend: legend, dark: dark)
         }
         return img.pngData()
     }
@@ -852,6 +866,17 @@ enum RideMapRenderer {
         return top
     }
 
+    /// Mean position of the plottable fixes — the point WeatherKit is asked for.
+    /// A ride spans a few km at most, well inside one WeatherKit grid cell, so a
+    /// single point per ride is all the resolution that data has anyway.
+    static func trackCentre(_ rows: [GpsRow]) -> CLLocationCoordinate2D? {
+        let v = validPoints(rows)
+        guard !v.isEmpty else { return nil }
+        return CLLocationCoordinate2D(
+            latitude: v.reduce(0) { $0 + $1.lat } / Double(v.count),
+            longitude: v.reduce(0) { $0 + $1.lon } / Double(v.count))
+    }
+
     /// Median of the Ultra's submersion-sensor samples, or nil on a ride with no
     /// `WaterTemp [C]` column (temp-less watch build, or a wrist that stayed dry).
     /// Median, not mean: the sensor's first reading after entry lags the real
@@ -890,8 +915,8 @@ enum RideMapRenderer {
     private static func drawFooter(_ cg: CGContext, full: CGSize, footerHeight: CGFloat,
                                    title: String, topSpeed: Double,
                                    distanceKm: Double, durMin: Double,
-                                   waterTempC: Double?, legend: RideLegend,
-                                   dark: Bool) {
+                                   waterTempC: Double?, wind: RideWeather.Wind?,
+                                   legend: RideLegend, dark: Bool) {
         let rect = CGRect(x: 0, y: full.height - footerHeight, width: full.width, height: footerHeight)
         cg.setFillColor(UIColor(white: 0.06, alpha: 0.92).cgColor)
         cg.fill(rect)
@@ -921,9 +946,10 @@ enum RideMapRenderer {
                      String(format: "%.2f km", distanceKm),
                      String(format: "%.0f min", max(durMin, 0))]
         if let t = waterTempC { parts.append(String(format: "Water %.1f °C", t)) }
+        if let w = wind { parts.append("Wind \(w.short)") }
         let stats = parts.joined(separator: "   ·   ")
-        // The temp makes this a four-item line; shrink to fit rather than run
-        // under the right edge (the footer has no room for a second row).
+        // Up to five items now; shrink to fit rather than run under the right
+        // edge (the footer has no room for a second row).
         let statsFont = fitted(stats, maxWidth: full.width - textX - pad,
                                size: 30, weight: .medium)
         draw(stats, at: CGPoint(x: textX, y: contentTop + 46),
@@ -931,6 +957,15 @@ enum RideMapRenderer {
         draw(sourceURL, at: CGPoint(x: textX, y: contentTop + 92),
              font: .monospacedSystemFont(ofSize: 27, weight: .regular),
              color: UIColor(red: 0.45, green: 0.8, blue: 1, alpha: 1))
+        // Apple REQUIRES the Apple Weather trademark + a legal link wherever
+        // WeatherKit data is shown. Only drawn when wind is actually displayed —
+        // attributing a source we didn't use would be its own kind of wrong.
+        if wind != nil {
+            draw("\(RideWeather.attributionText) · \(RideWeather.legalURL)",
+                 at: CGPoint(x: textX, y: contentTop + 136),
+                 font: .systemFont(ofSize: 22, weight: .regular),
+                 color: UIColor(white: 0.5, alpha: 1))
+        }
     }
 
     /// Legend as a horizontal strip in the footer's top band: activity swatches

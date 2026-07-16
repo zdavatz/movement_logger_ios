@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- WeatherKit — historical hourly wind for a recorded ride (RideWeather).
+	     The App ID must have the WeatherKit capability enabled (Apple Developer
+	     portal → Identifiers → App Services → WeatherKit; NOT the Capabilities
+	     tab, and NOT settable via the App Store Connect API — its
+	     bundleIdCapabilities enum has no WEATHERKIT value). Enabling it
+	     invalidates existing provisioning profiles, so the CI profile secret
+	     APPLE_PROVISIONING_PROFILE_BASE64 was re-rolled when this was added.
+	     Not needed for the unsigned simulator compile-check. -->
+	<key>com.apple.developer.weatherkit</key>
+	<true/>
+</dict>
+</plist>

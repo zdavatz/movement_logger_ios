@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 
 /// Rides synced from the Apple Watch — each is a Start→End session's 1 Hz GPS
 /// CSV. Tap Share to send the CSV anywhere (AirDrop, Files, Mail, …).
@@ -69,6 +70,10 @@ struct RideStats {
     let durationSec: Double
     let topSpeedKmh: Double   // outlier-hardened (RideMapRenderer.robustTopSpeed)
     let waterTempC: Double?   // median of the watch's submersion-sensor samples
+    let wind: RideWeather.Wind?  // WeatherKit historical wind; nil when offline
+    /// Where/when to ask WeatherKit for this ride's wind — kept so the row can
+    /// fetch it after the (synchronous, offline) stats parse has landed.
+    let centre: CLLocationCoordinate2D?
 }
 
 actor RideStatsLoader {
@@ -87,9 +92,27 @@ actor RideStatsLoader {
             end: start.map { $0.addingTimeInterval(durationSec) },
             durationSec: durationSec,
             topSpeedKmh: RideMapRenderer.robustTopSpeed(rows: rows),
-            waterTempC: RideMapRenderer.medianWaterTempC(rows: rows))
+            waterTempC: RideMapRenderer.medianWaterTempC(rows: rows),
+            wind: nil,
+            centre: RideMapRenderer.trackCentre(rows))
         cache[key] = stats
         return stats
+    }
+
+    /// Fill in the WeatherKit wind for an already-parsed ride. Split from
+    /// `stats(for:)` on purpose: that one is a pure offline parse the row needs
+    /// immediately, while this makes a network call that may be slow or never
+    /// answer. The row shows its stats first and the wind lands when it lands.
+    func addWind(to stats: RideStats, url: URL) async -> RideStats {
+        guard stats.wind == nil, let centre = stats.centre else { return stats }
+        guard let w = await RideWeather.wind(at: centre, start: stats.start,
+                                             durationSec: stats.durationSec) else { return stats }
+        let filled = RideStats(start: stats.start, end: stats.end,
+                               durationSec: stats.durationSec, topSpeedKmh: stats.topSpeedKmh,
+                               waterTempC: stats.waterTempC, wind: w, centre: centre)
+        let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+        cache[url.path + ":\(size)"] = filled
+        return filled
     }
 
     /// `WatchGps_yyyyMMdd_HHmmss` — the stamp is UTC (see WatchGpsLogger).
@@ -137,7 +160,13 @@ private struct RideRowLabel: View {
         }
         .padding(.vertical, 2)
         .contentShape(Rectangle())
-        .task(id: url) { stats = await RideStatsLoader.shared.stats(for: url) }
+        .task(id: url) {
+            stats = await RideStatsLoader.shared.stats(for: url)
+            // Wind is a network round-trip — never let it hold up the row.
+            if let s = stats {
+                stats = await RideStatsLoader.shared.addWind(to: s, url: url)
+            }
+        }
     }
 
     private var line1: String {
@@ -164,6 +193,7 @@ private struct RideRowLabel: View {
         if let t = s.waterTempC {
             parts.append(String(format: "Water %.1f °C", t))
         }
+        if let w = s.wind { parts.append("Wind \(w.short)") }
         return parts.joined(separator: " · ")
     }
 }
