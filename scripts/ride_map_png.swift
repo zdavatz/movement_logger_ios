@@ -76,9 +76,14 @@ func hav(_ a: Row, _ b: Row) -> Double {
     haversineM(CLLocationCoordinate2D(latitude: a.lat, longitude: a.lon),
                CLLocationCoordinate2D(latitude: b.lat, longitude: b.lon))
 }
-// Valid fixes: fix>0, finite, not null island, not flagged-inaccurate (>50 m).
+// Valid fixes: fix>0, finite, not null island, not flagged-inaccurate (>50 m),
+// and not a speed-less drifter — a blank Speed is CoreLocation's "speed
+// invalid", and a fix it couldn't solve velocity for whose accuracy is also
+// poor (>30 m) is drifting, not measuring. Both conditions: accuracy alone
+// can't identify it, since honest swim fixes reach p90 46 m.
 let validRaw = rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
-    && !($0.lat == 0 && $0.lon == 0) && !($0.hdop > 50) }
+    && !($0.lat == 0 && $0.lon == 0) && !($0.hdop > 50)
+    && !(!$0.speed.isFinite && $0.hdop > 30) }
 // Collapse consecutive identical fixes (watch stall duplicates).
 var deduped: [Row] = []
 for f in validRaw {

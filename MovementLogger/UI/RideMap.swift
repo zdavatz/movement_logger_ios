@@ -449,6 +449,24 @@ enum RideMapRenderer {
     /// accuracy 149 000 m. Dropping these is what makes bridging every other
     /// gap safe (no across-town connector line). NaN passes.
     static let maxPlausibleHdop = 50.0
+    /// A fix with **no valid speed** and an accuracy worse than this is a
+    /// DRIFTING fix, not a solved one — drop it.
+    ///
+    /// `WatchGpsLogger` writes a blank Speed whenever `CLLocation.speed < 0`,
+    /// which is Apple's documented "speed invalid" — CoreLocation telling us
+    /// straight out that it couldn't solve velocity. On the 13.7.2026 ride those
+    /// fixes are a run whose accuracy climbs monotonically 38.9 → 49.5 while the
+    /// position slides 7–9 m/s (≈30 km/h) for a rider actually doing 4.6 km/h,
+    /// ending in a 408 m snap-back when the receiver re-acquires (367 km/h —
+    /// impossible). `despike` can't help: it only drops a *lone* spike, and this
+    /// is a run.
+    ///
+    /// **Both conditions, deliberately.** Accuracy alone can't identify this —
+    /// legitimate *swim* fixes reach p90 46 m / p99 94 m (a submerged wrist), so
+    /// lowering `maxPlausibleHdop` to 35 would delete 16 % of a real swim to
+    /// remove a handful of drifters. Costs ≤18 fixes on any ride measured (5 on
+    /// the 13.7 ride — exactly the drift).
+    static let staleFixAccM = 30.0
     /// Break the drawn line only across a hop longer than this — a genuine
     /// teleport. In practice the accuracy gate above removes every such hop, so
     /// the track is one unbroken line; this is a safety valve.
@@ -469,10 +487,12 @@ enum RideMapRenderer {
         let breaks: Set<Int>
     }
 
-    /// Plottable fixes: fix>0, finite, not (0,0), not flagged-inaccurate.
+    /// Plottable fixes: fix>0, finite, not (0,0), not flagged-inaccurate, not a
+    /// speed-less drifter (see `staleFixAccM`).
     static func validPoints(_ rows: [GpsRow]) -> [GpsRow] {
         rows.filter { $0.fix > 0 && $0.lat.isFinite && $0.lon.isFinite
-            && !($0.lat == 0 && $0.lon == 0) && !($0.hdop > maxPlausibleHdop) }
+            && !($0.lat == 0 && $0.lon == 0) && !($0.hdop > maxPlausibleHdop)
+            && !(!$0.speedKmhModule.isFinite && $0.hdop > staleFixAccM) }
     }
 
     /// The watch logger rewrites the LAST KNOWN location once per second while

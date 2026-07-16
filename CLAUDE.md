@@ -305,10 +305,34 @@ win" while the map drew long straight spurs across the bay:
 Lesson: **render the PNG and look at it** — the numeric metrics actively reward
 these artifacts. `scripts/ride_map_png.swift` is the fast way (no device needed).
 
-Known, deliberately NOT fixed: the last ~10 fixes of the 13.7 ride are garbage
-(a 408 m jump in 4 s = 367 km/h) at accuracy 44–50 m, squeaking under the
-`maxPlausibleHdop` 50 gate. Tightening that gate also moves the classifier, so
-it needs its own verification pass.
+**The gate is `maxPlausibleHdop` (50) AND `staleFixAccM` (30) — and lowering the
+accuracy gate is NOT the fix (16.7.2026).** The 13.7 ride's 408 m / 367 km/h
+snap-back comes from a *drift run*: fixes whose accuracy climbs monotonically
+38.9 → 49.5 while the position slides ~30 km/h for a 4.6 km/h rider, then the
+receiver re-acquires 408 m away. `despike` can't see it (lone spikes only).
+
+The tempting fix — drop accuracy > 35 — is **wrong**, and the data says so:
+legitimate *swim* fixes reach **p90 46 m / p99 94 m** (submerged wrist), so a
+35 m gate deletes **16 %** of a real swim to remove a handful of drifters. The
+swim's honest noise looks like garbage to every accuracy-based test.
+
+What identifies the drift is that CoreLocation **disclaims it**: `CLLocation
+.speed < 0` ("speed invalid"), which `WatchGpsLogger` writes as a blank Speed.
+So `validPoints` drops a fix only when it has **no valid speed AND accuracy
+> 30 m** — both, since either alone hits honest fixes. Costs ≤18 fixes on any
+ride measured (5 on 13.7 — exactly the drift), and the 12.7 walk-back still
+classifies as land.
+
+Also tempting and also wrong: dropping fixes whose position outruns their own
+speedometer. A swimmer's noise has exactly that signature (position implies
+5–7 km/h while the speedometer says 2), so it eats the swim too.
+
+Residual, accepted: hops of ~60–70 m right after a long dropout, where the
+receiver re-acquires and takes a second or two to settle (e.g. 15.7 after an
+88 s gap). Small, and indistinguishable from real motion across the gap. Note a
+big hop is NOT automatically garbage — the 13.7 ride's 254 m hop is a genuine
+95 s dropout the rider really rode across (16.6 km/h). Judge by implied speed
+against the **UTC** column, not by distance and not by the tick counter.
 
 **Activity classification (`RideActivity`).** Colour = inferred activity, not
 raw speed, when the ride carries the Ultra's `WaterTemp [C]` submersion column.
