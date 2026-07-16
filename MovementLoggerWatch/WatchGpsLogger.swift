@@ -28,10 +28,29 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
     private(set) var loggedRows: UInt64 = 0
     private(set) var status = "Idle"
     private(set) var logName: String? = nil
-    /// Top speed (km/h) seen this session — reset on `start()`.
+    /// Top speed (km/h) seen this session — reset on `start()`. Only fixes that
+    /// pass `qualifiesForTop` count; see there for why a raw running max lies.
     private(set) var maxSpeedKmh: Double = 0
-    /// Current speed (km/h) of the freshest fix, for a live readout.
+    /// Current speed (km/h) of the freshest fix, for a live readout and the
+    /// race uplink. Deliberately NOT filtered — it's a live sample that decays
+    /// on the next fix, so a spike is transient rather than sticky.
     private(set) var speedKmh: Double = 0
+
+    // MARK: top-speed gating (see `qualifiesForTop`)
+
+    /// Ignore a fix this inaccurate for TOP. Mirrors the phone's
+    /// `RideMapRenderer.maxPlausibleHdop`.
+    private static let topMaxAccM = 50.0
+    /// Nobody on a foil does this. Mirrors `maxPlausibleSpeedKmh`.
+    private static let topClipKmh = 60.0
+    /// A delivery gap this long means the receiver lost the fix.
+    private static let topGapSec = 2.0
+    /// …and for this long after re-acquiring (or after the session starts) its
+    /// velocity solution is not to be trusted.
+    private static let topSuppressSec = 10.0
+
+    @ObservationIgnored private var lastFixAt: Date?
+    @ObservationIgnored private var topSuppressUntil: Date?
 
     @ObservationIgnored private let manager = CLLocationManager()
     @ObservationIgnored private var latest: CLLocation?
@@ -66,6 +85,11 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         fixAvailable = false
         maxSpeedKmh = 0
         speedKmh = 0
+        // The receiver is still settling for the first seconds of a session —
+        // same distrust as after a mid-ride dropout (the phone blacks out the
+        // session's opening samples for exactly this reason).
+        lastFixAt = nil
+        topSuppressUntil = Date().addingTimeInterval(Self.topSuppressSec)
         switch authStatus {
         case .notDetermined:
             status = "Requesting location permission…"
@@ -135,11 +159,48 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             fixAvailable = true
             status = "Recording · ±\(Int(newest.horizontalAccuracy.rounded())) m"
         }
+        // A delivery gap means the receiver lost the fix; distrust TOP for a
+        // while after it comes back (below).
+        let ts = newest.timestamp
+        if let last = lastFixAt, ts.timeIntervalSince(last) > Self.topGapSec {
+            topSuppressUntil = ts.addingTimeInterval(Self.topSuppressSec)
+        }
+        lastFixAt = ts
+
         // Speed / top speed (CLLocation.speed is m/s; -1 = invalid).
         if newest.speed >= 0 {
             speedKmh = newest.speed * 3.6
-            if speedKmh > maxSpeedKmh { maxSpeedKmh = speedKmh }
+            if speedKmh > maxSpeedKmh, qualifiesForTop(newest, at: ts) {
+                maxSpeedKmh = speedKmh
+            }
         }
+    }
+
+    /// Whether this fix's speed may set the session TOP.
+    ///
+    /// TOP was a raw running max, so ONE bad sample owned the readout for the
+    /// rest of the session — it never decays. On the 16.7.2026 evening ride that
+    /// showed **26.4 km/h while the wearer was swimming**: the receiver froze for
+    /// 44 s, re-acquired, and reported ~26 km/h for five straight seconds while
+    /// the positions it returned moved 2–4 m/s (≈9 km/h). It is *not* catchable
+    /// by accuracy — that fix claimed a healthy ±17.8 m — nor by demanding the
+    /// speed be sustained, since it was sustained.
+    ///
+    /// What gives it away is the 44 s hole in front of it: a receiver that just
+    /// re-acquired has a garbage velocity solution for a few seconds. So this
+    /// mirrors the phone's `RideMapRenderer.robustTopSpeed` blackout rule —
+    /// distrust everything within `topSuppressSec` of a `topGapSec` gap, and at
+    /// the session start. Verified against all 10 watch rides: the evening ride
+    /// reads 11.3 km/h vs the phone's independent post-hoc 11.0, and three other
+    /// rides land exactly on the phone's number.
+    ///
+    /// The phone stays the authority (it can look both ways around a sample);
+    /// this only has to stop the live readout being nonsense.
+    private func qualifiesForTop(_ loc: CLLocation, at ts: Date) -> Bool {
+        guard loc.horizontalAccuracy >= 0, loc.horizontalAccuracy <= Self.topMaxAccM,
+              loc.speed * 3.6 <= Self.topClipKmh else { return false }
+        if let until = topSuppressUntil, ts <= until { return false }
+        return true
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
