@@ -504,16 +504,29 @@ enum RideMapRenderer {
         return zip(pts, keep).filter { $0.1 }.map { $0.0 }
     }
 
-    /// Half-width (samples) of the accuracy-weighted position smoother below.
-    static let smoothHalfWindow = 6
+    /// Half-width (samples ≈ seconds at the watch's 1 Hz) of the position
+    /// smoother below.
+    ///
+    /// **12, not 6 (16.7.2026).** A submerged wrist wrecks the fix — CoreLocation
+    /// honestly stamps ±13 m median (p90 ±30 m) while swimming versus ±4 m on the
+    /// board — while a swimmer covers only 0.55 m/s. At ±6 the residual noise
+    /// still drew metre-per-second hops in random directions: a visible zig-zag
+    /// on the swim back that nobody could swim. `despike` can't help (it only
+    /// catches lone 45 m+ spurs) and neither can the accuracy weight alone: the
+    /// board's accuracy is no better than the swim's, so 1/acc² has nothing to
+    /// discriminate with.
+    ///
+    /// Doubling the window halves the noise it can't tell from motion. The cap
+    /// is a real turn: at ±20 the sharp U-turn of a jibe (verified on the
+    /// 13.7.2026 ride, a trusted ±7 m fix at 11.7 km/h) rounds into a loop and
+    /// the turn is lost — at ±12 it survives intact.
+    static let smoothHalfWindow = 12
 
-    /// Accuracy-weighted position smoothing. While the wrist is submerged the
-    /// fix accuracy collapses to ~27 m (vs ~5 m dry), so a swim draws a
-    /// GPS-noise zig-zag no one could actually swim. Average each point's
-    /// position with its neighbours weighted by 1/accuracy² — accurate fixes
-    /// dominate and pull the noisy ones onto the real line, while clean
-    /// low-error (dry) stretches barely move. Rebuilds rows (GpsRow is
-    /// immutable), preserving every non-position field.
+    /// Accuracy-weighted position smoothing. Average each point's position with
+    /// its neighbours weighted by 1/accuracy² — accurate fixes dominate and pull
+    /// the noisy ones onto the real line, while clean low-error (dry) stretches
+    /// barely move. Rebuilds rows (GpsRow is immutable), preserving every
+    /// non-position field.
     private static func smoothPositions(_ pts: [GpsRow]) -> [GpsRow] {
         let n = pts.count
         guard n >= 3 else { return pts }
@@ -700,6 +713,7 @@ enum RideMapRenderer {
         let topSpeed = robustTopSpeed(rows: rows)
         let distanceKm = trackDistanceKm(clean)
         let durMin = (pts.last!.ticks - pts.first!.ticks) * 0.01 / 60.0
+        let waterTempC = medianWaterTempC(rows: rows)
 
         let full = CGSize(width: width, height: mapHeight + footerHeight)
         let fmt = UIGraphicsImageRendererFormat()
@@ -737,7 +751,7 @@ enum RideMapRenderer {
             // 5. Branded footer with legend.
             drawFooter(cg, full: full, footerHeight: footerHeight, title: title,
                        topSpeed: topSpeed, distanceKm: distanceKm, durMin: durMin,
-                       legend: legend, dark: dark)
+                       waterTempC: waterTempC, legend: legend, dark: dark)
         }
         return img.pngData()
     }
@@ -818,6 +832,15 @@ enum RideMapRenderer {
         return top
     }
 
+    /// Median of the Ultra's submersion-sensor samples, or nil on a ride with no
+    /// `WaterTemp [C]` column (temp-less watch build, or a wrist that stayed dry).
+    /// Median, not mean: the sensor's first reading after entry lags the real
+    /// water temperature, so a handful of warm outliers would drag an average.
+    static func medianWaterTempC(rows: [GpsRow]) -> Double? {
+        let t = rows.map(\.waterTempC).filter { $0.isFinite }.sorted()
+        return t.isEmpty ? nil : t[t.count / 2]
+    }
+
     /// Index of the first element ≥ `key` in the sorted `arr`.
     private static func lowerBound(_ arr: [Double], _ key: Double) -> Int {
         var lo = 0, hi = arr.count
@@ -846,7 +869,8 @@ enum RideMapRenderer {
 
     private static func drawFooter(_ cg: CGContext, full: CGSize, footerHeight: CGFloat,
                                    title: String, topSpeed: Double,
-                                   distanceKm: Double, durMin: Double, legend: RideLegend,
+                                   distanceKm: Double, durMin: Double,
+                                   waterTempC: Double?, legend: RideLegend,
                                    dark: Bool) {
         let rect = CGRect(x: 0, y: full.height - footerHeight, width: full.width, height: footerHeight)
         cg.setFillColor(UIColor(white: 0.06, alpha: 0.92).cgColor)
@@ -873,10 +897,17 @@ enum RideMapRenderer {
         let textX = logoRect.maxX + 22
         draw("Movement Logger", at: CGPoint(x: textX, y: contentTop - 2),
              font: .systemFont(ofSize: 40, weight: .bold), color: .white)
-        let stats = String(format: "Top %.1f km/h   ·   %.2f km   ·   %.0f min",
-                           topSpeed, distanceKm, max(durMin, 0))
+        var parts = [String(format: "Top %.1f km/h", topSpeed),
+                     String(format: "%.2f km", distanceKm),
+                     String(format: "%.0f min", max(durMin, 0))]
+        if let t = waterTempC { parts.append(String(format: "Water %.1f °C", t)) }
+        let stats = parts.joined(separator: "   ·   ")
+        // The temp makes this a four-item line; shrink to fit rather than run
+        // under the right edge (the footer has no room for a second row).
+        let statsFont = fitted(stats, maxWidth: full.width - textX - pad,
+                               size: 30, weight: .medium)
         draw(stats, at: CGPoint(x: textX, y: contentTop + 46),
-             font: .systemFont(ofSize: 30, weight: .medium), color: UIColor(white: 0.75, alpha: 1))
+             font: statsFont, color: UIColor(white: 0.75, alpha: 1))
         draw(sourceURL, at: CGPoint(x: textX, y: contentTop + 92),
              font: .monospacedSystemFont(ofSize: 27, weight: .regular),
              color: UIColor(red: 0.45, green: 0.8, blue: 1, alpha: 1))
@@ -924,6 +955,19 @@ enum RideMapRenderer {
 
     private static func draw(_ s: String, at p: CGPoint, font: UIFont, color: UIColor) {
         (s as NSString).draw(at: p, withAttributes: [.font: font, .foregroundColor: color])
+    }
+
+    /// Largest system font at or below `size` whose rendering of `s` fits
+    /// `maxWidth`, floored at 22 pt (below that it stops being readable).
+    private static func fitted(_ s: String, maxWidth: CGFloat, size: CGFloat,
+                               weight: UIFont.Weight) -> UIFont {
+        var pt = size
+        while pt > 22 {
+            let f = UIFont.systemFont(ofSize: pt, weight: weight)
+            if (s as NSString).size(withAttributes: [.font: f]).width <= maxWidth { return f }
+            pt -= 1
+        }
+        return .systemFont(ofSize: pt, weight: weight)
     }
 }
 

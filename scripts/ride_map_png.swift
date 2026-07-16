@@ -98,15 +98,19 @@ if deduped.count >= 3 {
 }
 let pts = zip(deduped, keep).filter { $0.1 }.map { $0.0 }
 guard pts.count >= 2 else { FileHandle.standardError.write("need >=2 valid fixes (got \(pts.count))\n".data(using: .utf8)!); exit(1) }
-// Accuracy-weighted position smoothing. While the wrist is submerged the fix
-// accuracy collapses to ~27 m (vs ~5 m dry), so the swim draws a GPS-noise
-// zig-zag that no one could actually swim. Average each point with its
-// neighbours weighted by 1/accuracy² — good fixes dominate and pull the noisy
-// ones onto the real line, while clean low-error stretches barely move.
+// Accuracy-weighted position smoothing (port of RideMapRenderer.smoothPositions).
+// Average each point with its neighbours weighted by 1/accuracy² — good fixes
+// dominate and pull the noisy ones onto the real line, while clean low-error
+// stretches barely move. Half-window 12, not 6: a submerged wrist collapses the
+// fix accuracy to ±13 m median / ±30 m p90 (vs ±4 m dry) while the swimmer
+// covers only 0.55 m/s, so at ±6 the swim back still drew a GPS-noise zig-zag.
+// ±20 would smooth it further but rounds the sharp U-turn of a jibe into a loop;
+// ±12 halves the noise and keeps the turn.
+let smoothHalfWindow = 12
 func smoothCoords(_ p: [Row]) -> [(lat: Double, lon: Double)] {
     let n = p.count
     if n < 3 { return p.map { (lat: $0.lat, lon: $0.lon) } }
-    let half = 6
+    let half = smoothHalfWindow
     return (0..<n).map { i -> (lat: Double, lon: Double) in
         var sLat = 0.0, sLon = 0.0, sW = 0.0
         for j in max(0, i - half)...min(n - 1, i + half) {
@@ -306,6 +310,9 @@ func robustTopSpeed(_ rows: [Row], _ valid: [Row]) -> Double {
 }
 let topSpeed = robustTopSpeed(rows, deduped)
 let durMin = (pts.last!.ticks - pts.first!.ticks) * 0.01 / 60.0
+// Median (not mean) — the first reading after entry lags the real water temp.
+let waterTemps = rows.map { $0.waterTemp }.filter { $0.isFinite }.sorted()
+let waterTempC: Double? = waterTemps.isEmpty ? nil : waterTemps[waterTemps.count/2]
 
 // ---- region --------------------------------------------------------------
 var rect = MKMapRect.null
@@ -430,8 +437,15 @@ snapshotter.start(with: DispatchQueue.global(qos: .userInitiated)) { snap, err i
     }
     let textX = logoRect.maxX + 22
     draw("Movement Logger", x: textX, y: footerH - 128, size: 40, weight: .bold, color: .white)
-    let stats = String(format: "Top %.1f km/h   ·   %.2f km   ·   %.0f min", topSpeed, distanceKm, max(durMin,0))
-    draw(stats, x: textX, y: footerH - 174, size: 30, weight: .medium, color: NSColor(calibratedWhite: 0.78, alpha: 1))
+    var statParts = [String(format: "Top %.1f km/h", topSpeed),
+                     String(format: "%.2f km", distanceKm),
+                     String(format: "%.0f min", max(durMin,0))]
+    if let t = waterTempC { statParts.append(String(format: "Water %.1f °C", t)) }
+    let stats = statParts.joined(separator: "   ·   ")
+    // Four items with the temp — shrink to fit rather than run off the edge.
+    var statSize: CGFloat = 30
+    while statSize > 22 && width(stats, statSize, .medium) > W - textX - pad { statSize -= 1 }
+    draw(stats, x: textX, y: footerH - 174, size: statSize, weight: .medium, color: NSColor(calibratedWhite: 0.78, alpha: 1))
     draw(sourceURL, x: textX, y: footerH - 218, size: 27, weight: .regular,
          color: NSColor(calibratedRed: 0.45, green: 0.8, blue: 1, alpha: 1), mono: true)
 

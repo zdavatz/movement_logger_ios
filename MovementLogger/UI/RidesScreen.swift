@@ -82,13 +82,12 @@ actor RideStatsLoader {
         guard let rows = try? CsvParsers.parseGpsFile(url), !rows.isEmpty else { return nil }
         let start = Self.stampDate(url.deletingPathExtension().lastPathComponent)
         let durationSec = max(0, (rows.last!.ticks - rows.first!.ticks) * 0.01)
-        let temps = rows.map(\.waterTempC).filter { $0.isFinite }.sorted()
         let stats = RideStats(
             start: start,
             end: start.map { $0.addingTimeInterval(durationSec) },
             durationSec: durationSec,
             topSpeedKmh: RideMapRenderer.robustTopSpeed(rows: rows),
-            waterTempC: temps.isEmpty ? nil : temps[temps.count / 2])
+            waterTempC: RideMapRenderer.medianWaterTempC(rows: rows))
         cache[key] = stats
         return stats
     }

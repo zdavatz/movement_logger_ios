@@ -13,7 +13,17 @@ final class WaterTempManager: NSObject, CMWaterSubmersionManagerDelegate {
 
     private(set) var temperatureC: Double? = nil
 
+    /// A dry spell must last this long before the held temperature is dropped.
+    /// Clearing on the first `.notSubmerged` (the previous behaviour) blanked
+    /// the reading for most of a swim: a swimmer's wrist breaks the surface
+    /// every stroke, and the sensor's own temperature pushes are far too sparse
+    /// to re-fill the gap — so the watch showed "—" while actually swimming.
+    /// A walk back on land outlasts this window, so the stale reading still
+    /// clears there (which is why the clearing exists at all).
+    private static let dryGraceSec: TimeInterval = 60
+
     @ObservationIgnored private var manager: CMWaterSubmersionManager?
+    @ObservationIgnored private var dryClear: DispatchWorkItem?
 
     /// Begin listening for submersion temperature. Safe to call repeatedly.
     func start() {
@@ -26,34 +36,64 @@ final class WaterTempManager: NSObject, CMWaterSubmersionManagerDelegate {
     func stop() {
         manager?.delegate = nil
         manager = nil
-        temperatureC = nil
+        DispatchQueue.main.async {
+            self.dryClear?.cancel(); self.dryClear = nil
+            self.temperatureC = nil
+        }
+    }
+
+    // MARK: - submersion state → hold / expire the reading
+
+    /// Wrist is under: keep the reading and call off any pending expiry.
+    private func markSubmerged() {
+        DispatchQueue.main.async {
+            self.dryClear?.cancel(); self.dryClear = nil
+        }
+    }
+
+    /// Wrist surfaced: start (but don't restart) the grace countdown. The
+    /// sensor never signals "this reading is stale" on its own, so without an
+    /// expiry `temperatureC` would hold the last value for the rest of the
+    /// session and the walk back on land would log as "in the water".
+    private func markDry() {
+        DispatchQueue.main.async {
+            guard self.dryClear == nil else { return }   // already counting down
+            let w = DispatchWorkItem { [weak self] in
+                self?.temperatureC = nil
+                self?.dryClear = nil
+            }
+            self.dryClear = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.dryGraceSec, execute: w)
+        }
     }
 
     // MARK: - CMWaterSubmersionManagerDelegate
 
     func manager(_ manager: CMWaterSubmersionManager, didUpdate event: CMWaterSubmersionEvent) {
-        // The sensor pushes a temperature only while submerged and never signals
-        // "no longer valid" on its own, so `temperatureC` would otherwise HOLD
-        // the last reading for the rest of the session — making the walk back on
-        // land wrongly read as "in the water" in the ride CSV. Clear it the
-        // moment the wrist surfaces.
-        if event.state == .notSubmerged {
-            DispatchQueue.main.async { self.temperatureC = nil }
+        switch event.state {
+        case .notSubmerged: markDry()
+        case .submerged:    markSubmerged()
+        default:            break        // .unknown — leave the current state alone
         }
     }
 
     func manager(_ manager: CMWaterSubmersionManager, didUpdate measurement: CMWaterSubmersionMeasurement) {
-        // Same intent as above, via the depth/measurement channel: surfaced ⇒
-        // drop the held temperature so only actually-submerged seconds log a
-        // WaterTemp value.
-        if measurement.submersionState == .notSubmerged {
-            DispatchQueue.main.async { self.temperatureC = nil }
+        // Same decision via the depth channel.
+        switch measurement.submersionState {
+        case .notSubmerged: markDry()
+        case .submergedShallow, .submergedDeep, .approachingMaxDepth, .pastMaxDepth:
+            markSubmerged()
+        default:            break        // .unknown / .sensorDepthError
         }
     }
 
     func manager(_ manager: CMWaterSubmersionManager, didUpdate temperature: CMWaterTemperature) {
         let celsius = temperature.temperature.converted(to: .celsius).value
-        DispatchQueue.main.async { self.temperatureC = celsius }
+        DispatchQueue.main.async {
+            // A fresh reading means we're wet — cancel any pending expiry.
+            self.dryClear?.cancel(); self.dryClear = nil
+            self.temperatureC = celsius
+        }
     }
 
     func manager(_ manager: CMWaterSubmersionManager, errorOccurred error: Error) {}

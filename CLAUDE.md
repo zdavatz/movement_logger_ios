@@ -244,7 +244,24 @@ column — the median water temperature. Parsed once per (path, size) by the
 The watch logger (`WatchGpsLogger`) writes the temp column from
 `WaterTempManager` (`CMWaterSubmersionManager`, submersion-gated, Ultra-only;
 blank when dry or unsupported) via a provider closure set in
-`SessionController.start()`.
+`SessionController.start()`. Row and PNG footer share one source of truth,
+`RideMapRenderer.medianWaterTempC` — **median**, not mean: the sensor's first
+reading after entry lags the real water (a real file opens 32.7 / 29.3 °C before
+settling at 27.4), so a handful of warm outliers would drag an average.
+
+**Watch water temp: a dry spell must last `WaterTempManager.dryGraceSec` (60 s)
+before the reading is dropped (16.7.2026).** The sensor never signals "this
+value is stale" on its own, so an un-expired `temperatureC` holds for the rest of
+the session and the walk back on land logs as wet — that's why the clearing
+exists. But clearing on the *first* `.notSubmerged` (the 11.7 fix) was far too
+trigger-happy: a swimmer's wrist breaks the surface every stroke and the sensor's
+temperature pushes are too sparse to refill the gap, so the watch showed "—" for
+most of a swim and the CSV lost the column. Measured on the 16.7 ride: **60 dry
+gaps inside the submersion span, 40 of them ≤10 s, exactly one genuinely long**
+(55 min, out of the water). The 60 s window bridges 59 of 60 — the swim window
+goes from 15 % → 84 % of seconds carrying a temperature — while the tail still
+clears 151 s before the ride ends, so the walk back stays dry. The phone-side
+stale-run stripper in `RideActivity.confirmedWet` remains as the second belt.
 
 **One continuous track, coloured by activity (v1.0.24+ — replaced the
 blackout hole-splitting).** The old `cleanTrackSegments` broke the polyline
@@ -256,9 +273,42 @@ outlier is the *only* across-town risk, so once it's gone every gap is safe to
 bridge) → `dedupFixes` (collapse the watch's rewritten last-known-location
 stall rows) → `despike` (drop a lone fix reached+left by two >45 m hops within
 2.5 s while its neighbours sit <45 m apart — 1-sample GPS glitches of
-100–380 km/h that draw a zig-zag spur). Only a genuine >200 m teleport breaks
-the line (`CleanTrack.breaks`; never happens in practice after the accuracy
-gate). Verified against the 11.7.2026 ride: 7 segments → 1 line, no hops >150 m.
+100–380 km/h that draw a zig-zag spur) → `smoothPositions`. Only a genuine
+>200 m teleport breaks the line (`CleanTrack.breaks`; never happens in practice
+after the accuracy gate). Verified against the 11.7.2026 ride: 7 segments →
+1 line, no hops >150 m.
+
+**`smoothPositions` — `smoothHalfWindow` is 12, and DON'T get clever
+(16.7.2026).** A submerged wrist wrecks the fix: CoreLocation honestly stamps
+**±13 m median / ±30 m p90 while swimming versus ±4 m on the board** (the HDOP
+column is `horizontalAccuracy` in metres — see `WatchGpsLogger`), while a swimmer
+covers only 0.55 m/s. So metres-per-second hops in random directions on the swim
+back are pure noise — "I can't swim in a zig-zag like that". `despike` can't
+touch it (lone 45 m+ spurs only), and the 1/accuracy² weight can't either: the
+**board's accuracy is no better than the swim's**, so it has nothing to
+discriminate with. The fix is just a wider window (±6 → ±12 samples ≈ seconds at
+1 Hz), which halves the noise it can't tell from motion. **±20 is the ceiling:**
+it rounds the sharp U-turn of a jibe into a loop (verified at idx 4225 of the
+13.7 ride, a trusted ±7 m fix at 11.7 km/h).
+
+Two smarter filters were tried and **both rendered visibly worse** despite every
+numeric metric improving — hop-p90, worst-hop and reversal-count all said "big
+win" while the map drew long straight spurs across the bay:
+- a **median** filter — medianing lat and lon *independently* is not a geometric
+  median and can emit a point that never existed; its piecewise-constant output
+  draws straight jumps (and scores beautifully on hop metrics, being mostly zero);
+- a **bilateral** filter (confidence × time × range kernels) — edge-preserving
+  means **outlier-preserving**: when a noisy fix sits beyond the range kernel from
+  its neighbours every weight collapses and it keeps its raw position. Exactly
+  backwards here.
+
+Lesson: **render the PNG and look at it** — the numeric metrics actively reward
+these artifacts. `scripts/ride_map_png.swift` is the fast way (no device needed).
+
+Known, deliberately NOT fixed: the last ~10 fixes of the 13.7 ride are garbage
+(a 408 m jump in 4 s = 367 km/h) at accuracy 44–50 m, squeaking under the
+`maxPlausibleHdop` 50 gate. Tightening that gate also moves the classifier, so
+it needs its own verification pass.
 
 **Activity classification (`RideActivity`).** Colour = inferred activity, not
 raw speed, when the ride carries the Ultra's `WaterTemp [C]` submersion column.
@@ -317,7 +367,7 @@ the updated watch app.
 `RidesScreen` lists the Apple-Watch ride CSVs that `WatchRideReceiver` mirrors into `Documents/WatchRides/`. Each row is a `Button` presenting **`RideMapView`** (`UI/RideMap.swift`) as a `.fullScreenCover`; the raw CSV `ShareLink` stays on the row (with `.borderless` so the tap doesn't also fire the nav).
 
 - **Interactive view** — `RideMapView` parses the CSV with `CsvParsers.parseGpsFile` (which also accepts the watch logger's bracketed `Lat [deg]` / `Lon [deg]` / `SpeedKMh` headers — see the CSV-schema note), builds the coloured runs via `RideMapRenderer.mapRuns(clean:)` and draws **one `MapPolyline` per colour run** (adjacent runs share their boundary point so the line stays continuous across a colour change), with green **Start** / red **End** annotations and a translucent **legend card** (`.overlay(.bottomLeading)`) — mode swatches when submersion data exists, a speed-gradient bar otherwise. The speed fallback approximates the gradient with 6 smoothed speed bands. Camera frames the track via `.rect(RideMapRenderer.boundingRect(trackPoints))`.
-- **Shareable PNG** — the toolbar Share button calls `RideMapRenderer.render(rows:title:)`, which uses **`MKMapSnapshotter`** (NOT `ImageRenderer` — SwiftUI's `Map` snapshots blank because tiles render out-of-process) to grab real Apple Maps tiles, then draws over the snapshot with CoreGraphics: a white casing (one continuous sub-path per non-broken run), then the track **edge-by-edge** in the activity-mode colour (or the speed gradient `speedColor`, `robustMaxSpeed` = 95th-pct), start/end dots, and a branded footer. The footer is a **horizontal legend strip along the top** (activity swatches left→right, or a speed-gradient scale — deliberately its own band so the long source-URL line can never collide with it), a divider, then the **app logo** (`RideLogo` imageset — a copy of the app icon, since `UIImage(named:)` can't reliably load an `AppIcon` set), ride **stats** (top speed via `RideMapRenderer.robustTopSpeed` — hard 60 km/h clip + blackout adjacency + ±1 s chord consistency; distance via `trackDistanceKm` over the continuous track skipping breaks + `trackMaxHopM` glitch hops; duration), and the **GitHub source link** (`RideMapRenderer.sourceURL`). The PNG lands in `Documents/RideMaps/<name>_map.png` and is handed to a `UIActivityViewController` share sheet. `snapshot.point(for:)` returns points in the snapshot image's own space, so the track aligns to the tiles with no manual flip on iOS.
+- **Shareable PNG** — the toolbar Share button calls `RideMapRenderer.render(rows:title:)`, which uses **`MKMapSnapshotter`** (NOT `ImageRenderer` — SwiftUI's `Map` snapshots blank because tiles render out-of-process) to grab real Apple Maps tiles, then draws over the snapshot with CoreGraphics: a white casing (one continuous sub-path per non-broken run), then the track **edge-by-edge** in the activity-mode colour (or the speed gradient `speedColor`, `robustMaxSpeed` = 95th-pct), start/end dots, and a branded footer. The footer is a **horizontal legend strip along the top** (activity swatches left→right, or a speed-gradient scale — deliberately its own band so the long source-URL line can never collide with it), a divider, then the **app logo** (`RideLogo` imageset — a copy of the app icon, since `UIImage(named:)` can't reliably load an `AppIcon` set), ride **stats** (top speed via `RideMapRenderer.robustTopSpeed` — hard 60 km/h clip + blackout adjacency + ±1 s chord consistency; distance via `trackDistanceKm` over the continuous track skipping breaks + `trackMaxHopM` glitch hops; duration; and **median water temp** via `medianWaterTempC`, omitted on a ride with no submersion column — the four-item line auto-shrinks via `fitted(_:maxWidth:…)` rather than running under the right edge), and the **GitHub source link** (`RideMapRenderer.sourceURL`). The PNG lands in `Documents/RideMaps/<name>_map.png` and is handed to a `UIActivityViewController` share sheet. `snapshot.point(for:)` returns points in the snapshot image's own space, so the track aligns to the tiles with no manual flip on iOS.
 - **`scripts/ride_map_png.swift`** is the standalone macOS twin of `RideMapRenderer` (AppKit/`NSImage` instead of UIKit): `swift scripts/ride_map_png.swift <in.csv> <out.png> [logo.png]`, `MLDEBUG=1` to print the classified runs. It ports the same continuous-track cleaning + `RideActivity` classifier + legend, and is how the v1.0.24 rendering was verified on the Mac (incl. a synthesised `WaterTemp` column to exercise the 3-mode path). **It does NOT flip `point(for:)`** — that was a bug (fixed 13.7.2026): on AppKit `snapshot.point(for:)` already comes back in the same y-up space the snapshot image is drawn in, so the old `y = footerH + (mapH - p.y)` mirrored the whole track against the tiles. It silently invalidates any visual check made with this script — a due-north synthetic track drew its start at the top, and the 12.7 walk into town appeared out at sea. iOS is y-down and likewise needs no flip.
 
 ### GPS Debug tab — u-blox UBX survey over BLE
