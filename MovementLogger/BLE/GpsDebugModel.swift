@@ -22,13 +22,14 @@ import Observation
 
 enum Ubx {
     // (class, id) of the messages we poll.
-    static let navPvt: (UInt8, UInt8) = (0x01, 0x07)
-    static let navDop: (UInt8, UInt8) = (0x01, 0x04)
-    static let navSat: (UInt8, UInt8) = (0x01, 0x35)
-    static let navSig: (UInt8, UInt8) = (0x01, 0x43)
-    static let monRf:  (UInt8, UInt8) = (0x0A, 0x38)
+    static let navPvt:  (UInt8, UInt8) = (0x01, 0x07)
+    static let navDop:  (UInt8, UInt8) = (0x01, 0x04)
+    static let navSat:  (UInt8, UInt8) = (0x01, 0x35)
+    static let navSig:  (UInt8, UInt8) = (0x01, 0x43)
+    static let monRf:   (UInt8, UInt8) = (0x0A, 0x38)
+    static let monSpan: (UInt8, UInt8) = (0x0A, 0x31)
 
-    static let polls: [(UInt8, UInt8)] = [navPvt, navDop, navSat, navSig, monRf]
+    static let polls: [(UInt8, UInt8)] = [navPvt, navDop, navSat, navSig, monRf, monSpan]
 
     /// 8-bit Fletcher checksum over class..payload-end (UBX spec).
     static func checksum(_ body: [UInt8]) -> (UInt8, UInt8) {
@@ -116,6 +117,25 @@ struct SatInfo { var gnss = 0, sv = 0, cno = 0, elev = 0, azim = 0; var prResM =
 struct SigInfo { var gnss = 0, sv = 0, sig = 0, cno = 0; var prResM = 0.0; var qual = 0; var prUsed = false }
 struct MonRf { var antStatus = 0, antPower = 0, noisePerMs = 0, agcCnt = 0, jamInd = 0, jammingState = 0 }
 
+/// One RF block of a UBX-MON-SPAN reply — the receiver's coarse spectrum
+/// snapshot: 256 amplitude bins (uncalibrated) covering `spanHz` around
+/// `centerHz`. Single-band MAX-M10S reports one block (L1). Not supported on
+/// M8 receivers — those simply never answer the poll.
+struct SpanBlock {
+    var spectrum: [Int] = []
+    var spanHz = 0.0, resHz = 0.0, centerHz = 0.0
+    var pgaDb = 0
+
+    /// Frequency of bin `i` in Hz (bin 0 = center - span/2).
+    func binFreqHz(_ i: Int) -> Double { centerHz - spanHz / 2.0 + Double(i) * resHz }
+    /// (bin index, amplitude) of the strongest bin.
+    func peak() -> (Int, Int) {
+        var pi = 0, pa = 0
+        for (i, a) in spectrum.enumerated() where a > pa { pi = i; pa = a }
+        return (pi, pa)
+    }
+}
+
 private func parseNavPvt(_ p: [UInt8]) -> NavPvt? {
     guard p.count >= 78 else { return nil }
     var v = NavPvt()
@@ -180,6 +200,27 @@ private func parseMonRf(_ p: [UInt8]) -> MonRf? {
                  jamInd: Int(p[o + 16]), jammingState: Int(p[o + 1] & 0x03))
 }
 
+/// UBX-MON-SPAN: version U1, numRfBlocks U1, reserved U1[2], then per block
+/// spectrum U1[256] + span U4 + res U4 + center U4 + pga U1 + reserved U1[3]
+/// (272 B/block).
+private func parseMonSpan(_ p: [UInt8]) -> [SpanBlock] {
+    var v: [SpanBlock] = []
+    guard p.count >= 4 else { return v }
+    let n = Int(p[1])
+    for i in 0..<n {
+        let o = 4 + i * 272
+        if o + 272 > p.count { break }
+        var b = SpanBlock()
+        b.spectrum = (0..<256).map { Int(p[o + $0]) }
+        b.spanHz = Double(u32le(p, o + 256))
+        b.resHz = Double(u32le(p, o + 260))
+        b.centerHz = Double(u32le(p, o + 264))
+        b.pgaDb = Int(p[o + 268])
+        v.append(b)
+    }
+    return v
+}
+
 // MARK: - enum → text decoders (match the desktop CSV strings)
 
 private func gnssName(_ id: Int) -> String {
@@ -218,6 +259,7 @@ private struct Epoch {
     var sats: [SatInfo] = []
     var sigs: [SigInfo] = []
     var rf: MonRf?
+    var span: [SpanBlock] = []
 }
 
 // MARK: - survey engine / view state
@@ -241,6 +283,10 @@ final class GpsDebugModel {
     private(set) var log: [String] = []
     private(set) var epochCsvPath: String?
     private(set) var signalsCsvPath: String?
+    /// Set once the receiver actually answered MON-SPAN (the CSV is created
+    /// lazily — M8 receivers never answer, and an empty spectrum CSV would
+    /// read as "no interference").
+    private(set) var spectrumCsvPath: String?
 
     /// Set by `FileSyncViewModel`: toggle the box bridge (0x0D) and forward a
     /// UBX poll frame (0x0E). Kept as closures so this stays decoupled from the
@@ -255,10 +301,13 @@ final class GpsDebugModel {
     private var timer: Timer?
     private var epochHandle: FileHandle?
     private var sigHandle: FileHandle?
+    private var specHandle: FileHandle?
+    private var specURL: URL?
 
     private static let maxLogLines = 200
     private static let epochHeader = "label,host_iso,iTOW_ms,utc_date,utc_time,timeValid,fixType,gnssFixOK,numSV_used,lat_deg,lon_deg,height_m,hMSL_m,hAcc_m,vAcc_m,sAcc_mps,pDOP,hDOP,vDOP,antStatus,antPower,noisePerMS,agcCnt,cwSuppression_jamInd,jammingState\n"
     private static let sigHeader = "label,host_iso,iTOW_ms,gnssId,gnss,svId,sigId,sig,cno_dbhz,elev_deg,azim_deg,qualityInd,svUsed,prUsed,prRes_m\n"
+    private static let specHeader = "label,host_iso,iTOW_ms,block,center_hz,span_hz,res_hz,pga_db,peak_bin,peak_amp,peak_freq_hz,bins\n"
 
     private let isoFmt: DateFormatter = {
         let f = DateFormatter()
@@ -305,6 +354,7 @@ final class GpsDebugModel {
         appendLog("stopped after \(epochCount) epoch(s).")
         try? epochHandle?.close(); epochHandle = nil
         try? sigHandle?.close(); sigHandle = nil
+        try? specHandle?.close(); specHandle = nil
         running = false
         onRunningChanged?(false)
     }
@@ -324,6 +374,7 @@ final class GpsDebugModel {
             case (0x01, 0x35): cur.sats = parseNavSat(pl)
             case (0x01, 0x43): cur.sigs = parseNavSig(pl)
             case (0x0A, 0x38): cur.rf  = parseMonRf(pl)
+            case (0x0A, 0x31): cur.span = parseMonSpan(pl)
             default: break
             }
         }
@@ -348,6 +399,7 @@ final class GpsDebugModel {
     private func flushEpoch() {
         let host = isoFmt.string(from: Date())
         writeEpochRow(host: host)
+        writeSpectrumRows(host: host)
         appendLog(liveSummary())
         epochCount += 1
     }
@@ -393,19 +445,64 @@ final class GpsDebugModel {
         }
     }
 
+    /// Spectrum rows: one per RF block per epoch. `bins` is the raw 256-value
+    /// amplitude vector, space-separated inside one CSV field; peak_* pre-computes
+    /// the strongest bin. The CSV (and its log line) appear on the first MON-SPAN
+    /// reply only.
+    private func writeSpectrumRows(host: String) {
+        guard !cur.span.isEmpty else { return }
+        if specHandle == nil {
+            guard let url = specURL else { return }
+            guard (try? Self.specHeader.data(using: .utf8)?.write(to: url)) != nil,
+                  let h = try? FileHandle(forWritingTo: url) else { return }
+            h.seekToEndOfFile()
+            specHandle = h
+            spectrumCsvPath = url.path
+            appendLog("spectrum-> \(url.path)")
+        }
+        let itow = cur.pvt?.itow ?? 0
+        for (bi, b) in cur.span.enumerated() {
+            let (pi, pa) = b.peak()
+            let bins = b.spectrum.map(String.init).joined(separator: " ")
+            let row = "\(label),\(host),\(itow),\(bi),"
+                + String(format: "%.0f,%.0f,%.0f,", b.centerHz, b.spanHz, b.resHz)
+                + "\(b.pgaDb),\(pi),\(pa),"
+                + String(format: "%.0f,", b.binFreqHz(pi))
+                + "\(bins)\n"
+            write(row, to: specHandle)
+        }
+    }
+
+    /// `top4` (mean C/N0 of the 4 strongest signals) and `n35` (signals at
+    /// ≥ 35 dB-Hz) are the two EMI-experiment metrics: both collapse within a
+    /// second of closing the case / powering a noisy subsystem, long before
+    /// the fix itself reacts. Matches the desktop live line.
     private func liveSummary() -> String {
         guard let p = cur.pvt else {
             return "(no NAV-PVT reply — receiver may be NMEA-only, or the box firmware lacks the GPS bridge)"
         }
-        let maxCno = max(cur.sigs.map { $0.cno }.max() ?? 0, cur.sats.map { $0.cno }.max() ?? 0)
+        let cnos = cur.sigs.isEmpty ? cur.sats.map { $0.cno } : cur.sigs.map { $0.cno }
+        let maxCno = cnos.max() ?? 0
+        let top = cnos.sorted(by: >).prefix(4)
+        let top4 = top.isEmpty ? 0.0 : Double(top.reduce(0, +)) / Double(top.count)
+        let n35 = cnos.filter { $0 >= 35 }.count
         let used = max(cur.sigs.filter { $0.prUsed }.count, cur.sats.filter { $0.svUsed }.count)
-        let rf = cur.rf
-        let astat = rf.map { antStatusName($0.antStatus) } ?? "?"
-        let apow = rf.map { antPowerName($0.antPower) } ?? "?"
-        let jam = rf.map { jammingName($0.jammingState) } ?? "?"
-        return String(format: "%02d:%02d:%02d fix=%d ok=%d sv=%2d used=%2d maxCN0=%2d hAcc=%.1fm pDOP=%.1f | ant=%@/%@ jam=%@",
+        let rfs: String
+        if let rf = cur.rf {
+            rfs = String(format: "ant=%@/%@ jam=%d(%@) noise=%d agc=%d",
+                         antStatusName(rf.antStatus), antPowerName(rf.antPower),
+                         rf.jamInd, jammingName(rf.jammingState), rf.noisePerMs, rf.agcCnt)
+        } else {
+            rfs = "ant=?/? jam=? noise=? agc=?"
+        }
+        var spanS = ""
+        if let b = cur.span.first {
+            let (pi, pa) = b.peak()
+            spanS = String(format: " | peak %.1fMHz a=%d", b.binFreqHz(pi) / 1e6, pa)
+        }
+        return String(format: "%02d:%02d:%02d fix=%d ok=%d sv=%2d used=%2d maxCN0=%2d top4=%2.0f n35=%2d hAcc=%.1fm pDOP=%.1f | %@%@",
                       p.hour, p.min, p.sec, p.fixType, p.gnssFixOk ? 1 : 0,
-                      p.numSv, used, maxCno, p.haccM, p.pdop, astat, apow, jam)
+                      p.numSv, used, maxCno, top4, n35, p.haccM, p.pdop, rfs, spanS)
     }
 
     // MARK: CSV files
@@ -423,6 +520,14 @@ final class GpsDebugModel {
         sigHandle?.seekToEndOfFile()
         epochCsvPath = epochURL.path
         signalsCsvPath = sigURL.path
+        // Spectrum CSV path is fixed now, but the file is only created on the
+        // first MON-SPAN reply (writeSpectrumRows). Drop any stale copy from a
+        // previous run so it can't be mistaken for this run's data.
+        let spURL = docs.appendingPathComponent("\(safeLabel)_gnss_spectrum.csv")
+        try? FileManager.default.removeItem(at: spURL)
+        specURL = spURL
+        specHandle = nil
+        spectrumCsvPath = nil
     }
 
     private func write(_ s: String, to handle: FileHandle?) {

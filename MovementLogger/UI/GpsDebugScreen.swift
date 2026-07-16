@@ -24,7 +24,8 @@ struct GpsDebugScreen: View {
                         summaryCard(latest)
                     }
                     if let p = vm.gps.epochCsvPath {
-                        filesCard(epoch: p, signals: vm.gps.signalsCsvPath)
+                        filesCard(epoch: p, signals: vm.gps.signalsCsvPath,
+                                  spectrum: vm.gps.spectrumCsvPath)
                     }
                 }
                 .padding()
@@ -95,13 +96,16 @@ struct GpsDebugScreen: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 
-    private func filesCard(epoch: String, signals: String?) -> some View {
+    private func filesCard(epoch: String, signals: String?, spectrum: String?) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("CSV output (Files app → On My iPhone → Movement Logger)")
                 .font(.caption).foregroundStyle(.secondary)
             GpsOutputFileRow(path: epoch)
             if let signals {
                 GpsOutputFileRow(path: signals)
+            }
+            if let spectrum {
+                GpsOutputFileRow(path: spectrum)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
