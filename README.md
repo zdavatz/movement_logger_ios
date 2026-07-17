@@ -50,7 +50,7 @@ Screenshots in `screenshots/`. See `CLAUDE.md` for architecture details, AVFound
 Tag-driven CI. Two separate version trains (see `CLAUDE.md`):
 
 - **`0.0.x` = binary / TestFlight builds** — bumped per dev iteration, installed over USB (`devicectl`) and/or uploaded for TestFlight. **Never** auto-submitted to the public App Store.
-- **`1.x.x` = public App Store releases** — the only tags that auto-submit for review. The current store version is **1.0.23** (Rides-tab watch-GPS map + shareable PNG).
+- **`1.x.x` = public App Store releases** — the only tags that auto-submit for review. The current store version is **1.0.33**.
 
 ```sh
 git tag v1.0.17          # store release (1.x = auto-submit)
@@ -60,7 +60,7 @@ git tag v0.0.32           # 0.0.x = build + upload, no store submit
 git push origin v0.0.32
 ```
 
-The workflow at `.github/workflows/release.yml` (runs on `macos-26`) parses the tag, patches `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in the pbxproj at build time, archives Release, exports an App Store IPA, uploads it to App Store Connect via `xcrun altool`, and creates a GitHub release with the IPA attached. For `1.x.x` tags it then runs `scripts/submit_for_review.py`, which attaches the processed build, sets "What's New" from the tag message, and submits for review with `releaseType=AFTER_APPROVAL` (auto-publish once Apple approves — the iOS analogue of the Android `--track production --release-status completed` flow). Export compliance is answered by `ITSAppUsesNonExemptEncryption=false` in `Info.plist`. The submit step is gated on the tag's major version (`steps.ver.outputs.store`), so a `0.0.x` tag stops after the upload.
+The workflow at `.github/workflows/release.yml` (runs on `macos-26`) parses the tag, patches `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` in the pbxproj at build time, archives Release, exports an App Store IPA, uploads it to App Store Connect via `xcrun altool`, and creates a GitHub release with the IPA attached. For `1.x.x` tags it then runs `scripts/submit_for_review.py`, which attaches the processed build, sets "What's New" from the tag message (with commit trailers, HTML-looking angle brackets, and any sentence mentioning Android stripped — Apple rejects iOS metadata that references other mobile platforms, Guideline 2.3.10), and submits for review with `releaseType=AFTER_APPROVAL` (auto-publish once Apple approves — the iOS analogue of the Android `--track production --release-status completed` flow). Export compliance is answered by `ITSAppUsesNonExemptEncryption=false` in `Info.plist`. The submit step is gated on the tag's major version (`steps.ver.outputs.store`), so a `0.0.x` tag stops after the upload.
 
 Required GitHub Actions secrets (set once at `Settings → Secrets and variables → Actions`):
 

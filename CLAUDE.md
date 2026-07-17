@@ -49,7 +49,7 @@ release workflow, and how to re-roll certificates or provisioning profiles —
 lives in the **`release` skill** (`.claude/skills/release/SKILL.md`). Invoke it
 when cutting a release or debugging an Archive/Export/upload failure.
 
-Three rules that must NOT wait for a skill to be loaded:
+Four rules that must NOT wait for a skill to be loaded:
 
 - **Never tag `0.0.x`.** That train is dead (11.7.2026): Apple rejects any
   upload — TestFlight included — whose `CFBundleShortVersionString` is lower
@@ -61,6 +61,13 @@ Three rules that must NOT wait for a skill to be loaded:
   in the release log is that cancel — self-inflicted, not a human rejection.
 - **`git fetch origin --tags` before choosing a version.** Sibling repos take
   parallel pushes; check `git tag --sort=-v:refname | head` first.
+- **Never mention Android in a `v1.x.x` tag message.** The tag body IS the
+  App Store "What's New", and Apple rejects iOS metadata that references other
+  mobile platforms (Guideline 2.3.10 — v1.0.37 bounced within 16 minutes over
+  "matches … Android v0.0.59"; "desktop" is fine). `clean_notes` in
+  `scripts/submit_for_review.py` strips Android-mentioning sentences as a
+  backstop, but write the tag body clean — the stripped sentence is silently
+  gone from the user-facing notes.
 
 Credential *paths* are deliberately absent from this repo (it is public) — see
 the global "don't commit credential paths" rule; they are in this project's
