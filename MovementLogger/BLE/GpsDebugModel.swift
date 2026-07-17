@@ -473,19 +473,55 @@ final class GpsDebugModel {
         }
     }
 
-    /// `top4` (mean C/N0 of the 4 strongest signals) and `n35` (signals at
-    /// ≥ 35 dB-Hz) are the two EMI-experiment metrics: both collapse within a
-    /// second of closing the case / powering a noisy subsystem, long before
-    /// the fix itself reacts. Matches the desktop live line.
+    /// Per-satellite C/N0 of GPS (gnssId 0) + Galileo (gnssId 2) only,
+    /// strongest first — the live line picks the 6 strongest of these
+    /// (Peter's EMI assembly metrics). NAV-SAT already reports one
+    /// best-signal C/N0 per satellite; the NAV-SIG fallback folds per-signal
+    /// rows to max-per-satellite so a dual-band sat isn't counted twice.
+    /// cno == 0 (searched, not tracked) is skipped.
+    private func gpsGalSatCnos() -> [Int] {
+        let per: [Int]
+        if !cur.sats.isEmpty {
+            per = cur.sats.filter { ($0.gnss == 0 || $0.gnss == 2) && $0.cno > 0 }.map { $0.cno }
+        } else {
+            var best: [Int: Int] = [:]
+            for s in cur.sigs where (s.gnss == 0 || s.gnss == 2) && s.cno > 0 {
+                let key = s.gnss << 8 | s.sv
+                best[key] = max(best[key] ?? 0, s.cno)
+            }
+            per = Array(best.values)
+        }
+        return per.sorted(by: >)
+    }
+
+    /// UBX fixType rendered the way Peter reads it (0/2D/3D…), not a raw enum.
+    private func fixTypeName(_ t: Int) -> String {
+        switch t {
+        case 0: return "none"
+        case 1: return "DR"
+        case 2: return "2D"
+        case 3: return "3D"
+        case 4: return "3D+DR"
+        case 5: return "time"
+        default: return "?"
+        }
+    }
+
+    /// Peter's EMI assembly metrics (2026-07-17): `avg6`/`min6`/`max6` are
+    /// the mean/weakest/strongest of the 6 strongest **GPS + Galileo**
+    /// satellites (other constellations excluded), plus `used` (sats in the
+    /// nav solution), `jam` (narrowband jamming), `noise` (broadband noise
+    /// floor) and `agc` (antenna-signal gain). All collapse within a second
+    /// of closing the case / powering a noisy subsystem, long before the fix
+    /// itself reacts. Matches the desktop live line.
     private func liveSummary() -> String {
         guard let p = cur.pvt else {
             return "(no NAV-PVT reply — receiver may be NMEA-only, or the box firmware lacks the GPS bridge)"
         }
-        let cnos = cur.sigs.isEmpty ? cur.sats.map { $0.cno } : cur.sigs.map { $0.cno }
-        let maxCno = cnos.max() ?? 0
-        let top = cnos.sorted(by: >).prefix(4)
-        let top4 = top.isEmpty ? 0.0 : Double(top.reduce(0, +)) / Double(top.count)
-        let n35 = cnos.filter { $0 >= 35 }.count
+        let top6 = Array(gpsGalSatCnos().prefix(6))
+        let avg6 = top6.isEmpty ? 0.0 : Double(top6.reduce(0, +)) / Double(top6.count)
+        let max6 = top6.first ?? 0
+        let min6 = top6.last ?? 0
         let used = max(cur.sigs.filter { $0.prUsed }.count, cur.sats.filter { $0.svUsed }.count)
         let rfs: String
         if let rf = cur.rf {
@@ -500,9 +536,9 @@ final class GpsDebugModel {
             let (pi, pa) = b.peak()
             spanS = String(format: " | peak %.1fMHz a=%d", b.binFreqHz(pi) / 1e6, pa)
         }
-        return String(format: "%02d:%02d:%02d fix=%d ok=%d sv=%2d used=%2d maxCN0=%2d top4=%2.0f n35=%2d hAcc=%.1fm pDOP=%.1f | %@%@",
-                      p.hour, p.min, p.sec, p.fixType, p.gnssFixOk ? 1 : 0,
-                      p.numSv, used, maxCno, top4, n35, p.haccM, p.pdop, rfs, spanS)
+        return String(format: "%02d:%02d:%02d fix=%@ ok=%d sv=%2d used=%2d avg6=%4.1f min6=%2d max6=%2d hAcc=%.1fm pDOP=%.1f | %@%@",
+                      p.hour, p.min, p.sec, fixTypeName(p.fixType), p.gnssFixOk ? 1 : 0,
+                      p.numSv, used, avg6, min6, max6, p.haccM, p.pdop, rfs, spanS)
     }
 
     // MARK: CSV files
