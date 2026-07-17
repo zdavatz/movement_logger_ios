@@ -448,7 +448,13 @@ def clean_notes(raw: str) -> str:
     `<u8>` — common in commit messages — as HTML tags, error
     ENTITY_ERROR.ATTRIBUTE.INVALID.INVALID_CHARACTERS), which then leaves the
     required field empty and blocks the review submission. Neutralise the
-    brackets rather than deleting the words so the notes stay readable."""
+    brackets rather than deleting the words so the notes stay readable.
+
+    Also drop any sentence mentioning Android: App Review rejects iOS metadata
+    that references other mobile platforms (Guideline 2.3.10 — v1.0.37 was
+    bounced for a tag body ending "matches … Android v0.0.59"). The whole
+    sentence goes, not just the word, so no dangling fragment ships; the
+    removal stops at a blank line so a stray mention can't eat a paragraph."""
     out = []
     for line in raw.splitlines():
         s = line.strip()
@@ -456,6 +462,13 @@ def clean_notes(raw: str) -> str:
             continue
         out.append(line)
     text = "\n".join(out).strip()
+    # A "." is a sentence boundary only when followed by whitespace — the dots
+    # inside "v0.0.72" must not split the sentence, or half of it survives.
+    sent = r"(?:(?!\n[ \t]*\n)(?!\.\s)[^!?])*"
+    text = re.sub(sent + r"\bAndroid\b" + sent + r"[.!?]*", "", text,
+                  flags=re.IGNORECASE)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     # Comparison operators first, so `>= v0.0.18` doesn't become `)= v0.0.18`.
     text = text.replace(">=", "≥").replace("<=", "≤")
     # `<label>` -> `(label)`; any bare `<` / `>` -> a paren so nothing reads as a tag.
