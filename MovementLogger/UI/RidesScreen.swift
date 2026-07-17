@@ -46,6 +46,7 @@ struct RidesScreen: View {
                             }
                         }
                     }
+                    .safeAreaInset(edge: .bottom) { weatherAttribution }
                 }
             }
             .navigationTitle("Rides")
@@ -61,6 +62,25 @@ struct RidesScreen: View {
         .onAppear { receiver.refresh() }
     }
 
+    /// Apple's WeatherKit terms require the " Weather" trademark plus a link
+    /// to the legal-attribution page wherever the data is displayed — here,
+    /// the wind on each ride row. App Review checks for it explicitly
+    /// (Guideline 2.1, 17.7.2026), so it is pinned, not a scroll-away footer.
+    private var weatherAttribution: some View {
+        Link(destination: URL(string: "https://\(RideWeather.legalURL)")!) {
+            VStack(spacing: 1) {
+                Text("Wind data from \u{F8FF} Weather")
+                    .font(.caption2.weight(.semibold))
+                Text(RideWeather.legalURL)
+                    .font(.caption2)
+                    .underline()
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.vertical, 6)
+        .background(.bar)
+    }
 }
 
 /// Per-ride stats for the list row, parsed once per (path, size) and cached.

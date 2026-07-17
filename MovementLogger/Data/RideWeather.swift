@@ -17,9 +17,10 @@ import WeatherKit
 /// one representative value is surfaced per ride instead of a wind track: the
 /// underlying data has no more resolution than that.
 ///
-/// **Attribution is mandatory.** Apple's terms require the Apple Weather
+/// **Attribution is mandatory.** Apple's terms require the " Weather"
 /// trademark and a legal link wherever the data is displayed — see
-/// `RideWeather.attributionText` / `legalURL`, rendered in the PNG footer.
+/// `RideWeather.attributionText` / `legalURL`, rendered in the PNG footer and
+/// pinned under the Rides list (`RidesScreen.weatherAttribution`).
 enum RideWeather {
 
     struct Wind: Equatable {
@@ -38,7 +39,10 @@ enum RideWeather {
         var short: String { String(format: "%.0f km/h %@", speedKmh, compass) }
     }
 
-    static let attributionText = "Weather data from Apple Weather"
+    // U+F8FF is the Apple-logo glyph — " Weather" is the exact trademark form
+    // App Review asked for. It rasterises fine into the shared PNG (drawn with
+    // the system font on-device), so non-Apple viewers still see the mark.
+    static let attributionText = "Weather data from \u{F8FF} Weather"
     static let legalURL = "weatherkit.apple.com/legal-attribution.html"
 
     /// Cache keyed by ride identity so a re-render (or scrolling the list past
