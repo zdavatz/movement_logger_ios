@@ -57,25 +57,35 @@ enum RideWeather {
         func set(_ k: String, _ v: Wind?) { store[k] = v }
     }
 
-    /// Representative wind over a ride's window, or nil when it can't be had
-    /// (no network, no start time, WeatherKit unavailable/unauthorized, or the
-    /// ride predates WeatherKit's 2022-08-01 history horizon).
+    /// Representative wind for a ride, or nil when it can't be had (no network,
+    /// no start time, WeatherKit unavailable/unauthorized, or the ride predates
+    /// WeatherKit's 2022-08-01 history horizon).
+    ///
+    /// With `peakAt` set, the value is the single hour nearest that instant —
+    /// the wind at the time of the ride's TOP speed, which is the moment the
+    /// rider actually cares about. Without it, the median over the ride's
+    /// hours (the pre-18.7.2026 behaviour, kept as the fallback for rides
+    /// whose top-speed moment can't be pinned down).
     ///
     /// Returning nil is a normal outcome, not an error: the caller simply omits
     /// wind from the stats line. A ride map must still render on a plane.
     static func wind(at coord: CLLocationCoordinate2D,
-                     start: Date?, durationSec: Double) async -> Wind? {
+                     start: Date?, durationSec: Double,
+                     peakAt: Date? = nil) async -> Wind? {
         guard let start else { return nil }
-        let key = String(format: "%.3f,%.3f,%.0f", coord.latitude, coord.longitude,
-                         start.timeIntervalSince1970)
+        let key = String(format: "%.3f,%.3f,%.0f,%.0f", coord.latitude, coord.longitude,
+                         start.timeIntervalSince1970,
+                         peakAt?.timeIntervalSince1970 ?? -1)
         if let hit = await cache.get(key) { return hit }
-        let value = await fetch(coord: coord, start: start, durationSec: durationSec)
+        let value = await fetch(coord: coord, start: start, durationSec: durationSec,
+                                peakAt: peakAt)
         await cache.set(key, value)
         return value
     }
 
     private static func fetch(coord: CLLocationCoordinate2D,
-                              start: Date, durationSec: Double) async -> Wind? {
+                              start: Date, durationSec: Double,
+                              peakAt: Date?) async -> Wind? {
         // Pad the window: WeatherKit is hourly, so a short ride can fall
         // entirely between two stamps and return an empty set.
         let from = start.addingTimeInterval(-1800)
@@ -93,6 +103,17 @@ enum RideWeather {
             }
             let hours = inRide.isEmpty ? Array(hourly) : inRide
             guard !hours.isEmpty else { return nil }
+            // Wind at the top-speed moment: the hour whose middle is nearest
+            // that instant (hourly stamps mark the hour's START, hence +30 min).
+            if let peakAt {
+                let h = hours.min(by: {
+                    abs($0.date.addingTimeInterval(1800).timeIntervalSince(peakAt))
+                        < abs($1.date.addingTimeInterval(1800).timeIntervalSince(peakAt))
+                })!
+                return Wind(speedKmh: h.wind.speed.converted(to: .kilometersPerHour).value,
+                            gustKmh: h.wind.gust?.converted(to: .kilometersPerHour).value ?? 0,
+                            directionDeg: h.wind.direction.converted(to: .degrees).value)
+            }
             let speeds = hours.map { $0.wind.speed.converted(to: .kilometersPerHour).value }.sorted()
             let gusts = hours.compactMap { $0.wind.gust?.converted(to: .kilometersPerHour).value }.sorted()
             let dirs = hours.map { $0.wind.direction.converted(to: .degrees).value }

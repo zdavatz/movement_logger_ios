@@ -842,12 +842,20 @@ enum RideMapRenderer {
     /// the 11.7.2026 Ermioni ride, whose raw column peaked at a fantasy
     /// 27.1 km/h on a ~7 km/h session.
     static func robustTopSpeed(rows: [GpsRow]) -> Double {
+        robustTop(rows: rows).kmh
+    }
+
+    /// `robustTopSpeed` plus WHEN it happened — the tick of the winning sample,
+    /// nil when nothing qualified. The moment feeds the wind lookup: the ride
+    /// stats show the wind at the time of the top speed, not the ride median.
+    static func robustTop(rows: [GpsRow]) -> (kmh: Double, atTicks: Double?) {
         let fixes = dedupFixes(validPoints(rows))
-        guard fixes.count >= 2 else { return 0 }
+        guard fixes.count >= 2 else { return (0, nil) }
         let fixTicks = fixes.map { $0.ticks }
         let zones = blackoutZones(fixTicks)
 
         var top = 0.0
+        var topTicks: Double? = nil
         for r in rows {
             let v = r.speedKmhModule
             guard v.isFinite, v >= 0, v <= maxPlausibleSpeedKmh, v > top,
@@ -861,9 +869,12 @@ enum RideMapRenderer {
             let chordKmh = GpsMath.haversineM(fixes[a].lat, fixes[a].lon,
                                               fixes[b].lat, fixes[b].lon)
                 / (span / 100.0) * 3.6   // ticks are 10 ms
-            if v <= chordKmh * speedVsTrackFactor + speedVsTrackFloorKmh { top = v }
+            if v <= chordKmh * speedVsTrackFactor + speedVsTrackFloorKmh {
+                top = v
+                topTicks = r.ticks
+            }
         }
-        return top
+        return (top, topTicks)
     }
 
     /// Mean position of the plottable fixes — the point WeatherKit is asked for.

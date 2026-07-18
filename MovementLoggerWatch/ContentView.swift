@@ -53,15 +53,21 @@ struct ContentView: View {
         .multilineTextAlignment(.center)
     }
 
-    /// Top speed + water temperature, under the timer. Fonts are ~30% larger
-    /// than the earlier readout. Water temp shows "—" until the Ultra's
-    /// submersion sensor has a reading (i.e. the watch is in the water).
+    /// Top speed + water temperature + wind, under the timer. Water temp shows
+    /// "—" until the Ultra's submersion sensor has a reading (i.e. the watch is
+    /// in the water). WIND is the wind at the moment TOP was set — relayed from
+    /// the phone's WeatherKit (see `WindAtTop`), "—" while the phone is out of
+    /// reach and no value has landed yet.
     private var metricsRow: some View {
-        HStack(spacing: 14) {
+        let wind = WindAtTop.shared.atTop
+        return HStack(spacing: 10) {
             metric("TOP", String(format: "%.1f", controller.gps.maxSpeedKmh), "km/h")
             metric("WATER",
                    controller.waterTemp.temperatureC.map { String(format: "%.1f", $0) } ?? "—",
                    "°C")
+            metric("WIND",
+                   wind.map { String(format: "%.0f", $0.kmh) } ?? "—",
+                   wind.map { "km/h \($0.compass)" } ?? "km/h")
         }
     }
 

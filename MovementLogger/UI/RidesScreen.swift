@@ -88,9 +88,12 @@ struct RideStats {
     let start: Date?          // from the filename's UTC stamp
     let end: Date?            // start + tick span
     let durationSec: Double
-    let topSpeedKmh: Double   // outlier-hardened (RideMapRenderer.robustTopSpeed)
+    let topSpeedKmh: Double   // outlier-hardened (RideMapRenderer.robustTop)
+    /// When the top speed happened — the wind is looked up for THIS moment
+    /// (the hour containing it), not averaged over the whole ride.
+    let topSpeedAt: Date?
     let waterTempC: Double?   // median of the watch's submersion-sensor samples
-    let wind: RideWeather.Wind?  // WeatherKit historical wind; nil when offline
+    let wind: RideWeather.Wind?  // wind at the top-speed moment; nil when offline
     /// Where/when to ask WeatherKit for this ride's wind — kept so the row can
     /// fetch it after the (synchronous, offline) stats parse has landed.
     let centre: CLLocationCoordinate2D?
@@ -107,11 +110,15 @@ actor RideStatsLoader {
         guard let rows = try? CsvParsers.parseGpsFile(url), !rows.isEmpty else { return nil }
         let start = Self.stampDate(url.deletingPathExtension().lastPathComponent)
         let durationSec = max(0, (rows.last!.ticks - rows.first!.ticks) * 0.01)
+        let top = RideMapRenderer.robustTop(rows: rows)
         let stats = RideStats(
             start: start,
             end: start.map { $0.addingTimeInterval(durationSec) },
             durationSec: durationSec,
-            topSpeedKmh: RideMapRenderer.robustTopSpeed(rows: rows),
+            topSpeedKmh: top.kmh,
+            topSpeedAt: start.flatMap { s in
+                top.atTicks.map { s.addingTimeInterval(($0 - rows.first!.ticks) * 0.01) }
+            },
             waterTempC: RideMapRenderer.medianWaterTempC(rows: rows),
             wind: nil,
             centre: RideMapRenderer.trackCentre(rows))
@@ -126,9 +133,11 @@ actor RideStatsLoader {
     func addWind(to stats: RideStats, url: URL) async -> RideStats {
         guard stats.wind == nil, let centre = stats.centre else { return stats }
         guard let w = await RideWeather.wind(at: centre, start: stats.start,
-                                             durationSec: stats.durationSec) else { return stats }
+                                             durationSec: stats.durationSec,
+                                             peakAt: stats.topSpeedAt) else { return stats }
         let filled = RideStats(start: stats.start, end: stats.end,
                                durationSec: stats.durationSec, topSpeedKmh: stats.topSpeedKmh,
+                               topSpeedAt: stats.topSpeedAt,
                                waterTempC: stats.waterTempC, wind: w, centre: centre)
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
         cache[url.path + ":\(size)"] = filled

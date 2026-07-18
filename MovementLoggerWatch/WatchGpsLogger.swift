@@ -85,6 +85,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         fixAvailable = false
         maxSpeedKmh = 0
         speedKmh = 0
+        WindAtTop.shared.sessionStarted()
         // The receiver is still settling for the first seconds of a session —
         // same distrust as after a mid-ride dropout (the phone blacks out the
         // session's opening samples for exactly this reason).
@@ -172,7 +173,13 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             speedKmh = newest.speed * 3.6
             if speedKmh > maxSpeedKmh, qualifiesForTop(newest, at: ts) {
                 maxSpeedKmh = speedKmh
+                // Stamp the wind blowing at this TOP moment (WIND metric).
+                WindAtTop.shared.noteTop(newest, at: ts)
             }
+        }
+        // Feed the wind fetcher's prefetch/retry loop (throttled inside).
+        if newest.horizontalAccuracy >= 0 {
+            WindAtTop.shared.noteFix(newest)
         }
     }
 

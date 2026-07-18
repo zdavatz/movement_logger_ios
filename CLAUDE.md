@@ -239,6 +239,25 @@ blank when dry or unsupported) via a provider closure set in
 reading after entry lags the real water (a real file opens 32.7 / 29.3 °C before
 settling at 27.4), so a handful of warm outliers would drag an average.
 
+**Wind (v1.0.36+, at-top-speed since 18.7.2026):** row + PNG footer show the
+WeatherKit historical wind (`Data/RideWeather.swift` — hourly history back to
+2022-08-01, cached per ride; nil offline just omits it and its attribution).
+The value is the **wind at the moment of the ride's top speed**: `RideMapRenderer
+.robustTop` also returns the winning sample's tick, `RideStats.topSpeedAt`
+converts it to a Date, and `RideWeather.wind(… peakAt:)` picks the single hour
+nearest that instant (the ride-median remains the fallback when no sample
+qualified). Apple's terms require the " Weather" trademark + legal link
+wherever the data shows — pinned under the Rides list and drawn in the PNG
+footer only when wind actually rendered (App Review checks, Guideline 2.1).
+The **watch shows the same thing live**: a WIND metric next to TOP/WATER with
+the wind blowing when the current session TOP was set. The watch app has **no
+WeatherKit entitlement** (a portal-only capability click that would re-roll the
+pinned CI watch profile — see the asc-api memory), so `WindAtTop.swift` (watch)
+asks the paired iPhone over WCSession (`windReq` → answered in
+`WatchRideReceiver` from the phone's `RideWeather` cache), caches the answered
+hour, retries ~1/min from the 1 Hz fix stream while unreachable, and shows "—"
+until a value lands.
+
 **Watch water temp: a dry spell must last `WaterTempManager.dryGraceSec` (60 s)
 before the reading is dropped (16.7.2026).** The sensor never signals "this
 value is stale" on its own, so an un-expired `temperatureC` holds for the rest of

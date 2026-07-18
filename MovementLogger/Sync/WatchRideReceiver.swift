@@ -1,6 +1,7 @@
 import Foundation
 import WatchConnectivity
 import Observation
+import CoreLocation
 
 /// Receives ride CSVs that the Apple Watch app sends over WatchConnectivity
 /// and stores them under `Documents/WatchRides/`, so they show in the Rides
@@ -81,6 +82,28 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
         DispatchQueue.main.async {
             RaceUplink.shared.sendFix(lat: lat, lon: lon, kmh: f["kmh"], deg: f["deg"],
                                       acc: f["acc"], from: .watch)
+        }
+    }
+
+    /// Watch → phone request/reply. One request so far: `windReq` — the wind
+    /// at (lat, lon) at the instant `ts`, for the watch's live WIND metric
+    /// (the watch app has no WeatherKit entitlement, so the phone answers from
+    /// its `RideWeather` cache). An empty reply means "no wind available"
+    /// (offline, quota, …) — the watch keeps showing "—" and retries later.
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any],
+                 replyHandler: @escaping ([String: Any]) -> Void) {
+        guard let req = message["windReq"] as? [String: Double],
+              let lat = req["lat"], let lon = req["lon"], let ts = req["ts"] else {
+            replyHandler([:])
+            return
+        }
+        Task {
+            let at = Date(timeIntervalSince1970: ts)
+            let w = await RideWeather.wind(
+                at: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                start: at, durationSec: 0, peakAt: at)
+            replyHandler(w.map { ["kmh": $0.speedKmh, "gust": $0.gustKmh,
+                                  "dir": $0.directionDeg] } ?? [:])
         }
     }
 
