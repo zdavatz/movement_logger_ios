@@ -61,6 +61,13 @@ struct MergeScreen: View {
         }
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
+            // Clear the binding IMMEDIATELY (before the slow import below).
+            // Video imports take seconds; while the old code waited for them
+            // the binding still held the previous selection, so re-opening
+            // the picker re-delivered those items ticked and the next
+            // onChange appended them AGAIN — "more videos end up in the
+            // list than I select". `addClips` dedups as the second belt.
+            pickerItems = []
             Task {
                 var urls: [URL] = []
                 for item in items {
@@ -68,7 +75,6 @@ struct MergeScreen: View {
                         urls.append(movie.url)
                     }
                 }
-                pickerItems = []
                 await vm.addClips(urls)
             }
         }

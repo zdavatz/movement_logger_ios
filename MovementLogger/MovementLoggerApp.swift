@@ -37,6 +37,9 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         //    watch transfers are picked up even when the app is launched in
         //    the background to receive them.
         _ = WatchRideReceiver.shared
+        // 5) Headless merge-export diagnostic (MERGE_SELFTEST=1 launch env,
+        //    same hook family as INITIAL_TAB) — no-op in normal launches.
+        MergeSelfTest.runIfRequested()
         return true
     }
 }

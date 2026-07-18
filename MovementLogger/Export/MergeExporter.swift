@@ -71,9 +71,30 @@ enum MergeExporter {
         guard !clips.isEmpty else { throw MergeExportError.noClips }
         progress(0.001)
 
+        // Diagnostic knobs (env MERGE_DEBUG, comma-separated:
+        // noaudio,noca,nogaps,nooutro,novc,nosdr) — used by the headless
+        // `MERGE_SELFTEST` harness to bisect export failures by layer.
+        // Notably `noca` (skip the CoreAnimation overlay tool) is what makes
+        // the merge verifiable on a SIMULATOR at all: the sim's offline CA
+        // render (GLES + IOSurface xpc shmem) crashes on real layer trees —
+        // a long-standing simulator limitation; overlays need a device.
+        // Always empty in production (no env vars in a normal app launch).
+        let dbg = Set((ProcessInfo.processInfo.environment["MERGE_DEBUG"] ?? "")
+            .split(separator: ",").map(String.init))
+        let titleS = dbg.contains("nogaps") ? 0.0 : titleCardS
+        let outroSecs = (dbg.contains("nogaps") || dbg.contains("nooutro")) ? 0.0 : outroS
+
         // ----- Load per-clip assets + geometry
         struct Loaded {
             let spec: MergeClipSpec
+            /// The source asset MUST be retained here for the whole export:
+            /// `AVAssetTrack.asset` is a WEAK reference, so keeping only the
+            /// tracks deallocates each AVURLAsset at the end of its loop
+            /// iteration — the composition then can't read any source media
+            /// and AVAssetExportSession fails instantly with -11800 /
+            /// OSStatus -12780 ("The operation could not be completed").
+            /// This was the real-device 14-clip merge failure.
+            let asset: AVURLAsset
             let videoTrack: AVAssetTrack
             let audioTrack: AVAssetTrack?
             let audioRange: CMTimeRange
@@ -97,12 +118,16 @@ enum MergeExporter {
             let xform = try await vTrack.load(.preferredTransform)
             let displayed = CGRect(origin: .zero, size: natural).applying(xform)
             loaded.append(Loaded(
-                spec: spec, videoTrack: vTrack, audioTrack: aTrack, audioRange: aRange,
+                spec: spec, asset: asset,
+                videoTrack: vTrack, audioTrack: aTrack, audioRange: aRange,
                 duration: duration, naturalSize: natural, preferredTransform: xform,
                 displayedW: abs(displayed.width).rounded(),
                 displayedH: abs(displayed.height).rounded()
             ))
         }
+        // Guarantee the source assets outlive the export even under
+        // aggressive ARC (`loaded`'s last plain use is before the await).
+        defer { withExtendedLifetime(loaded) {} }
 
         // ----- Common render geometry: aspect-fit every clip into the
         // largest displayed frame (even dimensions for the H.264 encoder).
@@ -124,8 +149,10 @@ enum MergeExporter {
         guard let compVideo = composition.addMutableTrack(
             withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid
         ) else { throw MergeExportError.exportFailed("could not add video track") }
-        let compAudio = composition.addMutableTrack(
-            withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+        // Created lazily on the first clip that actually has audio — a
+        // composition track with zero segments (all clips muted) is a
+        // known export-breaker.
+        var compAudio: AVMutableCompositionTrack? = nil
 
         struct Segment {
             let loaded: Loaded
@@ -133,14 +160,16 @@ enum MergeExporter {
             let clipStart: CMTime
             let clipEnd: CMTime
         }
-        let titleDur = CMTime(value: Int64(titleCardS * 1000), timescale: 1000)
+        let titleDur = CMTime(value: Int64(titleS * 1000), timescale: 1000)
         var cursor = CMTime.zero
         var audioCursor = CMTime.zero
         var segments: [Segment] = []
         for l in loaded {
             let titleStart = cursor
             let clipStart = CMTimeAdd(titleStart, titleDur)
-            compVideo.insertEmptyTimeRange(CMTimeRange(start: titleStart, duration: titleDur))
+            if titleS > 0 {
+                compVideo.insertEmptyTimeRange(CMTimeRange(start: titleStart, duration: titleDur))
+            }
             try compVideo.insertTimeRange(
                 CMTimeRange(start: .zero, duration: l.duration),
                 of: l.videoTrack, at: clipStart
@@ -149,29 +178,60 @@ enum MergeExporter {
             // Audio passthrough at the clip's offset; title gaps stay silent.
             // Clamp to the audio track's own extent (it can trail the video
             // by a frame or two) and never let an audio hiccup kill the merge.
-            if let a = l.audioTrack, let compAudio {
-                if CMTimeCompare(audioCursor, clipStart) < 0 {
-                    compAudio.insertEmptyTimeRange(
-                        CMTimeRange(start: audioCursor, end: clipStart))
+            if !dbg.contains("noaudio"), let a = l.audioTrack {
+                if compAudio == nil {
+                    compAudio = composition.addMutableTrack(
+                        withMediaType: .audio,
+                        preferredTrackID: kCMPersistentTrackID_Invalid)
                 }
-                let aDur = CMTimeMinimum(l.audioRange.duration, l.duration)
-                try? compAudio.insertTimeRange(
-                    CMTimeRange(start: l.audioRange.start, duration: aDur),
-                    of: a, at: clipStart
-                )
-                audioCursor = CMTimeAdd(clipStart, aDur)
+                if let audioTrack = compAudio {
+                    if CMTimeCompare(audioCursor, clipStart) < 0 {
+                        audioTrack.insertEmptyTimeRange(
+                            CMTimeRange(start: audioCursor, end: clipStart))
+                    }
+                    let aDur = CMTimeMinimum(l.audioRange.duration, l.duration)
+                    try? audioTrack.insertTimeRange(
+                        CMTimeRange(start: l.audioRange.start, duration: aDur),
+                        of: a, at: clipStart
+                    )
+                    audioCursor = CMTimeAdd(clipStart, aDur)
+                }
             }
             segments.append(Segment(
                 loaded: l, titleStart: titleStart, clipStart: clipStart, clipEnd: clipEnd))
             cursor = clipEnd
         }
 
-        // ----- 5 s logo outro — one trailing empty (black) edit after the
-        // last clip's fade-out. No clip content is touched (never trimmed).
+        // ----- 5 s logo outro after the last clip's fade-out. A trailing
+        // EMPTY edit does not work here — AVFoundation silently drops empty
+        // edits at the end of a composition track, so the film would just
+        // end at the last clip (verified: 95.1 s instead of 100.1 s).
+        // Freezing a frame of the last clip across the outro was tried and
+        // is codec-dependent (a scaled 10-bit HEVC sample silently
+        // truncated the export at the last clip). The timeline is instead
+        // anchored with a tiny SYNTHESIZED black clip (AVAssetWriter,
+        // 64×64 H.264) — never rendered: the outro instruction has no
+        // layer instruction for the track, so the output is the black
+        // background + logo layer. No clip content is touched.
         let outroStart = cursor
-        let outroDur = CMTime(value: Int64(outroS * 1000), timescale: 1000)
-        compVideo.insertEmptyTimeRange(CMTimeRange(start: outroStart, duration: outroDur))
-        cursor = CMTimeAdd(outroStart, outroDur)
+        var outroAnchor: AVURLAsset? = nil
+        defer { withExtendedLifetime(outroAnchor) {} }
+        if outroSecs > 0 {
+            do {
+                let anchor = try await makeBlackAnchorAsset(durationS: outroSecs)
+                guard let anchorTrack = try await anchor.loadTracks(withMediaType: .video).first
+                else { throw MergeExportError.exportFailed("anchor clip has no video track") }
+                let outroDur = CMTime(value: Int64(outroSecs * 1000), timescale: 1000)
+                try compVideo.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: outroDur),
+                    of: anchorTrack, at: outroStart
+                )
+                outroAnchor = anchor   // keep alive through the export
+                cursor = CMTimeAdd(outroStart, outroDur)
+            } catch {
+                // No anchor — the film simply ends after the last clip.
+            }
+        }
 
         let totalDur = cursor
         let totalS = CMTimeGetSeconds(totalDur)
@@ -182,11 +242,13 @@ enum MergeExporter {
         // tiling [0, totalDur] exactly (shared CMTime boundaries).
         var instructions: [AVMutableVideoCompositionInstruction] = []
         for seg in segments {
-            let gap = AVMutableVideoCompositionInstruction()
-            gap.timeRange = CMTimeRange(start: seg.titleStart, end: seg.clipStart)
-            gap.backgroundColor = UIColor.black.cgColor
-            gap.layerInstructions = []   // just the black background
-            instructions.append(gap)
+            if titleS > 0 {
+                let gap = AVMutableVideoCompositionInstruction()
+                gap.timeRange = CMTimeRange(start: seg.titleStart, end: seg.clipStart)
+                gap.backgroundColor = UIColor.black.cgColor
+                gap.layerInstructions = []   // just the black background
+                instructions.append(gap)
+            }
 
             let inst = AVMutableVideoCompositionInstruction()
             inst.timeRange = CMTimeRange(start: seg.clipStart, end: seg.clipEnd)
@@ -229,13 +291,16 @@ enum MergeExporter {
             instructions.append(inst)
         }
 
-        // Outro instruction: plain black background — the logo itself is a
-        // CALayer opacity-gated to this segment (like the title cards).
-        let outroInst = AVMutableVideoCompositionInstruction()
-        outroInst.timeRange = CMTimeRange(start: outroStart, end: totalDur)
-        outroInst.backgroundColor = UIColor.black.cgColor
-        outroInst.layerInstructions = []
-        instructions.append(outroInst)
+        // Outro instruction: plain black background (the frozen anchor frame
+        // is deliberately NOT given a layer instruction, so it never renders)
+        // — the logo itself is a CALayer opacity-gated to this segment.
+        if outroSecs > 0, CMTimeCompare(totalDur, outroStart) > 0 {
+            let outroInst = AVMutableVideoCompositionInstruction()
+            outroInst.timeRange = CMTimeRange(start: outroStart, end: totalDur)
+            outroInst.backgroundColor = UIColor.black.cgColor
+            outroInst.layerInstructions = []
+            instructions.append(outroInst)
+        }
 
         // ----- CALayer tree: per-clip title cards + panel stacks, each
         // opacity-gated to its segment of the film timeline.
@@ -253,14 +318,13 @@ enum MergeExporter {
             let clipDurS = max(clipEndS - clipStartS, 0.001)
 
             // Title card: white date over start time, centered on black.
-            if let img = renderTitleImage(
-                startEpochMs: seg.loaded.spec.startEpochMs, size: outputSize
+            // The layer is a TIGHT text strip, not a full-canvas image —
+            // N full-canvas RGBA layers ballooned the offline renderer's
+            // IOSurface usage (a 14-clip merge crashed the simulator's CA
+            // render in xpc_shmem_create) and waste memory on device too.
+            if titleS > 0, let title = makeTitleLayer(
+                startEpochMs: seg.loaded.spec.startEpochMs, canvasSize: outputSize
             ) {
-                let title = CALayer()
-                title.frame = parentLayer.frame
-                title.isGeometryFlipped = true   // keep top-down text layout
-                title.contents = img
-                title.contentsGravity = .resize
                 gateOpacity(title, fromS: titleStartS, toS: clipStartS, totalS: totalS)
                 parentLayer.addSublayer(title)
             }
@@ -351,7 +415,7 @@ enum MergeExporter {
 
         // Logo outro layer: RideLogo centered on black at ~45% of the render
         // height, visible only during the trailing outro segment.
-        if let logo = UIImage(named: "RideLogo")?.cgImage {
+        if outroSecs > 0, let logo = UIImage(named: "RideLogo")?.cgImage {
             let imgW = CGFloat(logo.width)
             let imgH = CGFloat(logo.height)
             var h = outputSize.height * outroLogoHeightFrac
@@ -380,9 +444,22 @@ enum MergeExporter {
         let videoComp = AVMutableVideoComposition()
         videoComp.renderSize = outputSize
         videoComp.frameDuration = CMTime(value: 1, timescale: 30)
-        videoComp.animationTool = AVVideoCompositionCoreAnimationTool(
-            postProcessingAsVideoLayer: videoLayer, in: parentLayer
-        )
+        // Force an SDR (Rec.709) rendering path. iPhone camera clips are
+        // 10-bit HDR (Dolby Vision / HLG, BT.2020); letting the composition
+        // infer HDR color properties while a CoreAnimation overlay tool is
+        // attached makes AVAssetExportSession fail (-11800 / OSStatus
+        // -12780). Rec.709 output also keeps a mixed SDR+HDR clip list
+        // uniform in the merged film.
+        if !dbg.contains("nosdr") {
+            videoComp.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+            videoComp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+            videoComp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        }
+        if !dbg.contains("noca") {
+            videoComp.animationTool = AVVideoCompositionCoreAnimationTool(
+                postProcessingAsVideoLayer: videoLayer, in: parentLayer
+            )
+        }
         videoComp.instructions = instructions
 
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -395,7 +472,9 @@ enum MergeExporter {
         }
         session.outputURL = outputURL
         session.outputFileType = .mov
-        session.videoComposition = videoComp
+        if !dbg.contains("novc") {
+            session.videoComposition = videoComp
+        }
         session.shouldOptimizeForNetworkUse = true
 
         progress(0.03)
@@ -410,13 +489,78 @@ enum MergeExporter {
         case .completed:
             progress(1.0)
         case .failed:
-            throw MergeExportError.exportFailed(
-                session.error?.localizedDescription ?? "unknown")
+            // Surface the FULL failure identity — AVFoundation's
+            // localizedDescription alone ("The operation could not be
+            // completed") is undiagnosable from a user bug report. Append
+            // the NSError domain+code+underlying chain, plus the video
+            // composition's own validation findings when it is the culprit.
+            var detail = describeError(session.error)
+            let findings = validationFindings(videoComp, for: composition)
+            if !findings.isEmpty {
+                detail += " · composition invalid: " + findings.joined(separator: "; ")
+            }
+            throw MergeExportError.exportFailed(detail)
         case .cancelled:
             throw MergeExportError.exportFailed("cancelled")
         default:
             throw MergeExportError.exportFailed("status \(session.status.rawValue)")
         }
+    }
+
+    private static func describeError(_ error: Error?) -> String {
+        guard let error else { return "unknown" }
+        let ns = error as NSError
+        var msg = "\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"
+        if let reason = ns.localizedFailureReason { msg += " — \(reason)" }
+        var underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        while let u = underlying {
+            msg += " ← \(u.domain) \(u.code): \(u.localizedDescription)"
+            underlying = u.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return msg
+    }
+
+    /// Run AVFoundation's own composition validation and report what it
+    /// flags (bad instruction time ranges, gaps, bad track ids). Only
+    /// called on the failure path — costs nothing on success.
+    private static func validationFindings(
+        _ videoComp: AVVideoComposition, for composition: AVComposition
+    ) -> [String] {
+        final class Log: NSObject, AVVideoCompositionValidationHandling {
+            var findings: [String] = []
+            fileprivate func fmt(_ r: CMTimeRange) -> String {
+                String(format: "[%.4f..%.4f]",
+                       CMTimeGetSeconds(r.start), CMTimeGetSeconds(CMTimeRangeGetEnd(r)))
+            }
+            func videoComposition(
+                _ vc: AVVideoComposition,
+                shouldContinueValidatingAfterFindingInvalidValueForKey key: String
+            ) -> Bool { findings.append("invalid value for \(key)"); return true }
+            func videoComposition(
+                _ vc: AVVideoComposition,
+                shouldContinueValidatingAfterFindingEmptyTimeRange timeRange: CMTimeRange
+            ) -> Bool { findings.append("uncovered time range \(fmt(timeRange))"); return true }
+            func videoComposition(
+                _ vc: AVVideoComposition,
+                shouldContinueValidatingAfterFindingInvalidTimeRangeIn
+                    videoCompositionInstruction: AVVideoCompositionInstructionProtocol
+            ) -> Bool {
+                findings.append("bad instruction range \(fmt(videoCompositionInstruction.timeRange))")
+                return true
+            }
+            func videoComposition(
+                _ vc: AVVideoComposition,
+                shouldContinueValidatingAfterFindingInvalidTrackID trackID: CMPersistentTrackID,
+                asset: AVAsset, layerInstruction: AVVideoCompositionLayerInstruction
+            ) -> Bool { findings.append("bad track id \(trackID)"); return true }
+        }
+        let log = Log()
+        _ = videoComp.isValid(
+            for: composition,
+            timeRange: CMTimeRange(start: .zero, duration: composition.duration),
+            validationDelegate: log
+        )
+        return log.findings
     }
 
     // -------------------------------------------------------------------------
@@ -472,12 +616,79 @@ enum MergeExporter {
         layer.add(anim, forKey: "gate")
     }
 
-    /// Title card image: recording date (dd.MM.yyyy) above start time
-    /// (HH:mm:ss), local timezone, white, centered. Transparent background —
-    /// the render output behind it is already black during the gap.
-    private static func renderTitleImage(
-        startEpochMs: Int64, size: CGSize
-    ) -> CGImage? {
+    /// Write a tiny black H.264 clip of `durationS` seconds (64×64, two
+    /// frames) into tmp and return it as an asset. Used only to anchor the
+    /// outro segment of the composition timeline — its pixels are never
+    /// rendered, so size and codec are irrelevant; what matters is that
+    /// every AVFoundation reader handles it.
+    private static func makeBlackAnchorAsset(durationS: Double) async throws -> AVURLAsset {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("merge_outro_anchor.mov")
+        try? FileManager.default.removeItem(at: url)
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 64,
+            AVVideoHeightKey: 64,
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: 64,
+                kCVPixelBufferHeightKey as String: 64,
+            ]
+        )
+        writer.add(input)
+        guard writer.startWriting() else {
+            throw MergeExportError.exportFailed(
+                "anchor writer: \(writer.error?.localizedDescription ?? "startWriting failed")")
+        }
+        writer.startSession(atSourceTime: .zero)
+        guard let pool = adaptor.pixelBufferPool else {
+            throw MergeExportError.exportFailed("anchor writer: no pixel buffer pool")
+        }
+        var pbOut: CVPixelBuffer?
+        CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pbOut)
+        guard let pb = pbOut else {
+            throw MergeExportError.exportFailed("anchor writer: no pixel buffer")
+        }
+        CVPixelBufferLockBaseAddress(pb, [])
+        if let base = CVPixelBufferGetBaseAddress(pb) {
+            memset(base, 0, CVPixelBufferGetDataSize(pb))
+        }
+        CVPixelBufferUnlockBaseAddress(pb, [])
+        // Two frames: one at 0 and one near the end, so the track's media
+        // extent genuinely spans the outro duration.
+        let times = [
+            CMTime.zero,
+            CMTime(seconds: max(durationS - 1.0 / 30.0, 1.0 / 30.0), preferredTimescale: 600),
+        ]
+        for t in times {
+            while !input.isReadyForMoreMediaData {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            adaptor.append(pb, withPresentationTime: t)
+        }
+        input.markAsFinished()
+        writer.endSession(atSourceTime: CMTime(seconds: durationS, preferredTimescale: 600))
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw MergeExportError.exportFailed(
+                "anchor writer: \(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")")
+        }
+        return AVURLAsset(url: url)
+    }
+
+    /// Title card layer: recording date (dd.MM.yyyy) above start time
+    /// (HH:mm:ss), local timezone, white, centered on the (black) canvas.
+    /// The backing image is only as tall as the two text lines — the layer
+    /// is positioned so its content lands dead-center of the canvas.
+    private static func makeTitleLayer(
+        startEpochMs: Int64, canvasSize: CGSize
+    ) -> CALayer? {
         let date = Date(timeIntervalSince1970: TimeInterval(startEpochMs) / 1000.0)
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
@@ -488,38 +699,53 @@ enum MergeExporter {
         let dateText = df.string(from: date)   // local timezone (default)
         let timeText = tf.string(from: date)
 
+        let dateFont = UIFont.systemFont(
+            ofSize: max(28, canvasSize.width * 0.055), weight: .semibold)
+        let timeFont = UIFont.monospacedDigitSystemFont(
+            ofSize: max(36, canvasSize.width * 0.08), weight: .bold)
+        let dateAttrs: [NSAttributedString.Key: Any] = [
+            .font: dateFont, .foregroundColor: UIColor.white,
+        ]
+        let timeAttrs: [NSAttributedString.Key: Any] = [
+            .font: timeFont, .foregroundColor: UIColor.white,
+        ]
+        let dateSize = (dateText as NSString).size(withAttributes: dateAttrs)
+        let timeSize = (timeText as NSString).size(withAttributes: timeAttrs)
+        let gap: CGFloat = canvasSize.width * 0.02
+        let pad: CGFloat = 8
+        let stripSize = CGSize(
+            width: canvasSize.width,
+            height: (dateSize.height + gap + timeSize.height + 2 * pad).rounded(.up)
+        )
+
         let format = UIGraphicsImageRendererFormat.default()
         format.scale = 1   // export-only render — avoid the device-scale trap
         format.opaque = false
-        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let renderer = UIGraphicsImageRenderer(size: stripSize, format: format)
         let img = renderer.image { _ in
-            let dateFont = UIFont.systemFont(
-                ofSize: max(28, size.width * 0.055), weight: .semibold)
-            let timeFont = UIFont.monospacedDigitSystemFont(
-                ofSize: max(36, size.width * 0.08), weight: .bold)
-            let dateAttrs: [NSAttributedString.Key: Any] = [
-                .font: dateFont, .foregroundColor: UIColor.white,
-            ]
-            let timeAttrs: [NSAttributedString.Key: Any] = [
-                .font: timeFont, .foregroundColor: UIColor.white,
-            ]
-            let dateSize = (dateText as NSString).size(withAttributes: dateAttrs)
-            let timeSize = (timeText as NSString).size(withAttributes: timeAttrs)
-            let gap: CGFloat = size.width * 0.02
-            let totalH = dateSize.height + gap + timeSize.height
-            let top = (size.height - totalH) / 2
             (dateText as NSString).draw(
-                at: CGPoint(x: (size.width - dateSize.width) / 2, y: top),
+                at: CGPoint(x: (stripSize.width - dateSize.width) / 2, y: pad),
                 withAttributes: dateAttrs
             )
             (timeText as NSString).draw(
                 at: CGPoint(
-                    x: (size.width - timeSize.width) / 2,
-                    y: top + dateSize.height + gap
+                    x: (stripSize.width - timeSize.width) / 2,
+                    y: pad + dateSize.height + gap
                 ),
                 withAttributes: timeAttrs
             )
         }
-        return img.cgImage
+        guard let cg = img.cgImage else { return nil }
+        let layer = CALayer()
+        layer.contents = cg
+        layer.contentsGravity = .resize
+        layer.isGeometryFlipped = true   // keep top-down text layout
+        layer.frame = CGRect(
+            x: 0,
+            y: (canvasSize.height - stripSize.height) / 2,
+            width: stripSize.width,
+            height: stripSize.height
+        )
+        return layer
     }
 }

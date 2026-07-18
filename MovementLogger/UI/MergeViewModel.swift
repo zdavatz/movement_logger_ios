@@ -1,6 +1,8 @@
 import Foundation
 import Observation
 import Photos
+import AVFoundation
+import UIKit
 
 /// State + orchestration for the Merge screen.
 ///
@@ -64,9 +66,20 @@ final class MergeViewModel {
         guard !urls.isEmpty else { return }
         loadingClips = true
         error = nil
+        // Dedup by identity, NOT by URL — every PhotosPicker import copies
+        // to a fresh UUID temp path, so the same video re-delivered by a
+        // stale picker selection arrives under a different URL. The
+        // (capture time, duration) pair identifies the recording itself.
+        var seen = Set<String>(clips.map { Self.clipKey($0.startMs, $0.meta.durationMillis) })
         for url in urls {
             let meta = await VideoMetadataReader.read(url)
             let start = meta.creationTimeMillis ?? Self.fileModMillis(url)
+            let key = Self.clipKey(start, meta.durationMillis)
+            if seen.contains(key) {
+                Self.deleteTempCopy(url)   // duplicate — drop its temp copy
+                continue
+            }
+            seen.insert(key)
             clips.append(Clip(
                 url: url, meta: meta, startMs: start,
                 hasCreation: meta.creationTimeMillis != nil
@@ -77,14 +90,30 @@ final class MergeViewModel {
         loadingClips = false
     }
 
+    private static func clipKey(_ startMs: Int64, _ durationMs: Int64) -> String {
+        "\(startMs)|\(durationMs)"
+    }
+
     @MainActor
     func removeClip(_ clip: Clip) {
         clips.removeAll { $0.id == clip.id }
+        Self.deleteTempCopy(clip.url)
     }
 
     @MainActor
     func clearClips() {
+        for c in clips { Self.deleteTempCopy(c.url) }
         clips = []
+    }
+
+    /// PhotosPicker imports live in the app's tmp dir (`VideoFile`
+    /// Transferable copies them there); delete a clip's copy when it
+    /// leaves the list. Files elsewhere (e.g. Documents) are untouched.
+    private static func deleteTempCopy(_ url: URL) {
+        let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
+        if url.standardizedFileURL.path.hasPrefix(tmp) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     private static func fileModMillis(_ url: URL) -> Int64 {
@@ -283,13 +312,29 @@ final class MergeViewModel {
                 try await saveVideoToPhotos(outURL)
                 savedToPhotos = true
             } catch {
-                self.error = "saved to Documents but not Photos: \(error.localizedDescription)"
+                self.error = "saved to Documents but not Photos: \(Self.describeError(error))"
             }
             exporting = false
         } catch {
-            self.error = error.localizedDescription
+            self.error = Self.describeError(error)
             exporting = false
         }
+    }
+
+    /// Human-debuggable error text: localizedDescription PLUS the NSError
+    /// domain+code and the underlying-error chain. A bare
+    /// "The operation could not be completed" from AVFoundation is
+    /// useless in a bug report; the codes are what identify the failure.
+    static func describeError(_ error: Error) -> String {
+        if let m = error as? MergeExportError { return m.localizedDescription }
+        let ns = error as NSError
+        var msg = "\(ns.localizedDescription) [\(ns.domain) \(ns.code)]"
+        var underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError
+        while let u = underlying {
+            msg += " ← \(u.domain) \(u.code): \(u.localizedDescription)"
+            underlying = u.userInfo[NSUnderlyingErrorKey] as? NSError
+        }
+        return msg
     }
 
     /// Full-session GPS abs times: `# SYNC` anchors when present (drift-free,
@@ -404,5 +449,201 @@ final class MergeViewModel {
             let req = PHAssetCreationRequest.forAsset()
             req.addResource(with: .video, fileURL: url, options: nil)
         }
+    }
+}
+
+// MARK: - Headless merge self-test (simulator diagnostics)
+
+/// `MERGE_SELFTEST=1` launch-env hook (same family as `INITIAL_TAB`):
+/// merges every video already in Documents — plain, no panels, no Photos
+/// write, no UI — and prints the detailed result to stdout. Lets
+/// `simctl launch --console-pty` reproduce an export failure and capture
+/// the REAL NSError chain without driving the picker UI.
+enum MergeSelfTest {
+
+    static func runIfRequested() {
+        guard ProcessInfo.processInfo.environment["MERGE_SELFTEST"] == "1" else { return }
+        Task.detached(priority: .userInitiated) { await run() }
+    }
+
+    private static func run() async {
+        print("[selftest] merge self-test starting")
+        // Wait for foreground-active FIRST: this task starts at
+        // didFinishLaunching, and VideoToolbox denies codec sessions to
+        // apps that are not yet active (-12780) — which would fail the
+        // export for a reason a user-tapped merge never sees.
+        var waitedMs = 0
+        while waitedMs < 20000 {
+            let state = await MainActor.run { UIApplication.shared.applicationState }
+            if state == .active { break }
+            try? await Task.sleep(for: .milliseconds(250))
+            waitedMs += 250
+        }
+        print("[selftest] app active after \(waitedMs) ms")
+        try? await Task.sleep(for: .milliseconds(750))
+        guard let docs = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask).first else {
+            print("[selftest] FAILED: no Documents dir")
+            return
+        }
+        let exts: Set<String> = ["mov", "mp4", "m4v"]
+        // Optional name-prefix filter so device runs can select a clip set
+        // without deleting files from Documents.
+        let prefix = ProcessInfo.processInfo.environment["MERGE_SELFTEST_FILTER"] ?? ""
+        let files = ((try? FileManager.default.contentsOfDirectory(
+            at: docs, includingPropertiesForKeys: nil)) ?? [])
+            .filter {
+                exts.contains($0.pathExtension.lowercased())
+                    && !$0.lastPathComponent.hasPrefix("merged_")
+                    && (prefix.isEmpty || $0.lastPathComponent.hasPrefix(prefix))
+            }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        print("[selftest] found \(files.count) clips in Documents")
+        guard !files.isEmpty else {
+            print("[selftest] FAILED: nothing to merge")
+            return
+        }
+        // Controls: isolate the AVFoundation layer at fault before the
+        // real merge — (A) plain asset export, (B) minimal composition,
+        // then stepwise toward the merge's construction.
+        await controlPlainExport(files[0], docs: docs)
+        await controlCompositionExport(files[0], docs: docs)
+        await controlStep(files[0], docs: docs, name: "ctlC-audio",
+                          audio: true, optimize: false, poller: false)
+        await controlStep(files[0], docs: docs, name: "ctlD-optimize",
+                          audio: true, optimize: true, poller: false)
+        await controlStep(files[0], docs: docs, name: "ctlE-poller",
+                          audio: true, optimize: true, poller: true)
+
+        var specs: [MergeClipSpec] = []
+        var expectedS = 5.0   // logo outro
+        for f in files {
+            let meta = await VideoMetadataReader.read(f)
+            let start = meta.creationTimeMillis ?? 0
+            expectedS += 2.5 + Double(meta.durationMillis) / 1000.0
+            print("[selftest] clip \(f.lastPathComponent): "
+                + "dur=\(meta.durationMillis)ms size=\(Int(meta.displayedSize.width))x\(Int(meta.displayedSize.height)) "
+                + "creation=\(start)")
+            specs.append(MergeClipSpec(url: f, startEpochMs: start, panelInputs: nil))
+        }
+        specs.sort { $0.startEpochMs < $1.startEpochMs }
+        let out = docs.appendingPathComponent("merged_selftest.mov")
+        let t0 = Date()
+        do {
+            try await MergeExporter.export(clips: specs, panelKinds: [], to: out) { p in
+                let pct = Int(p * 100)
+                if pct % 25 == 0 { print("[selftest] progress \(pct)%") }
+            }
+            let asset = AVURLAsset(url: out)
+            let durS = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? -1
+            let bytes = (try? FileManager.default.attributesOfItem(
+                atPath: out.path)[.size] as? Int64) ?? 0
+            print(String(format: "[selftest] SUCCESS in %.1fs — duration=%.2fs (expected %.2fs)",
+                         Date().timeIntervalSince(t0), durS, expectedS)
+                + " bytes=\(bytes)")
+            print("[selftest] output: \(out.path)")
+        } catch {
+            print("[selftest] FAILED: \(MergeViewModel.describeError(error))")
+            let ns = error as NSError
+            print("[selftest] userInfo: \(ns.userInfo)")
+        }
+        print("[selftest] done")
+    }
+
+    /// Control A: export the raw asset — no composition, no instructions.
+    private static func controlPlainExport(_ src: URL, docs: URL) async {
+        let out = docs.appendingPathComponent("merged_ctlA.mov")
+        try? FileManager.default.removeItem(at: out)
+        let asset = AVURLAsset(url: src)
+        guard let s = AVAssetExportSession(
+            asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+            print("[selftest] ctlA: no session")
+            return
+        }
+        s.outputURL = out
+        s.outputFileType = .mov
+        await s.export()
+        let err = s.error.map { MergeViewModel.describeError($0) } ?? "nil"
+        print("[selftest] ctlA(plain asset) status=\(s.status.rawValue) err=\(err)")
+    }
+
+    /// Control B: one-track composition of the same clip — no videoComposition.
+    private static func controlCompositionExport(_ src: URL, docs: URL) async {
+        let out = docs.appendingPathComponent("merged_ctlB.mov")
+        try? FileManager.default.removeItem(at: out)
+        let asset = AVURLAsset(url: src)
+        let comp = AVMutableComposition()
+        guard let v = try? await asset.loadTracks(withMediaType: .video).first,
+              let dur = try? await asset.load(.duration),
+              let ct = comp.addMutableTrack(
+                  withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+        else {
+            print("[selftest] ctlB: setup failed")
+            return
+        }
+        do {
+            try ct.insertTimeRange(
+                CMTimeRange(start: .zero, duration: dur), of: v, at: .zero)
+        } catch {
+            print("[selftest] ctlB: insert failed \(error)")
+            return
+        }
+        guard let s = AVAssetExportSession(
+            asset: comp, presetName: AVAssetExportPresetHighestQuality) else {
+            print("[selftest] ctlB: no session")
+            return
+        }
+        s.outputURL = out
+        s.outputFileType = .mov
+        await s.export()
+        let err = s.error.map { MergeViewModel.describeError($0) } ?? "nil"
+        print("[selftest] ctlB(composition) status=\(s.status.rawValue) err=\(err)")
+    }
+
+    /// Stepwise control: ctlB + optional audio insert (merge-style clamped
+    /// range), optional shouldOptimizeForNetworkUse, optional progress
+    /// poller — the remaining deltas between ctlB and the failing merge.
+    private static func controlStep(
+        _ src: URL, docs: URL, name: String,
+        audio: Bool, optimize: Bool, poller: Bool
+    ) async {
+        let out = docs.appendingPathComponent("merged_\(name).mov")
+        try? FileManager.default.removeItem(at: out)
+        let asset = AVURLAsset(url: src)
+        let comp = AVMutableComposition()
+        guard let v = try? await asset.loadTracks(withMediaType: .video).first,
+              let dur = try? await asset.load(.duration),
+              let ct = comp.addMutableTrack(
+                  withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+        else {
+            print("[selftest] \(name): setup failed")
+            return
+        }
+        try? ct.insertTimeRange(CMTimeRange(start: .zero, duration: dur), of: v, at: .zero)
+        if audio, let a = try? await asset.loadTracks(withMediaType: .audio).first,
+           let cat = comp.addMutableTrack(
+               withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            let ar = (try? await a.load(.timeRange)) ?? .zero
+            let aDur = CMTimeMinimum(ar.duration, dur)
+            try? cat.insertTimeRange(
+                CMTimeRange(start: ar.start, duration: aDur), of: a, at: .zero)
+        }
+        guard let s = AVAssetExportSession(
+            asset: comp, presetName: AVAssetExportPresetHighestQuality) else {
+            print("[selftest] \(name): no session")
+            return
+        }
+        s.outputURL = out
+        s.outputFileType = .mov
+        if optimize { s.shouldOptimizeForNetworkUse = true }
+        var p: CompositeExporter.ProgressPoller? = nil
+        if poller {
+            p = CompositeExporter.ProgressPoller(session: s) { _ in }
+            p?.start()
+        }
+        await s.export()
+        p?.stop()
+        let err = s.error.map { MergeViewModel.describeError($0) } ?? "nil"
+        print("[selftest] \(name) status=\(s.status.rawValue) err=\(err)")
     }
 }
