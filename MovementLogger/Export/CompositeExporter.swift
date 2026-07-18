@@ -47,16 +47,18 @@ struct CompositeExportInputs {
 
 enum CompositeExporter {
 
-    private static let panelHeight: CGFloat = 320
+    static let panelHeight: CGFloat = 320
     /// Panel slots, indexed by their logical role (matches the in-app
     /// Replay screen ordering). Each kind tracks the data series it needs;
     /// `activePanelKinds` filters to only those whose data is present so a
     /// sensor-only or GPS-only export still produces a useful composite.
-    private enum PanelKind: Int {
+    /// Internal (not private) — `MergeExporter` reuses the panel painters
+    /// and cursor keyframe builders for its per-clip panel stacks.
+    enum PanelKind: Int {
         case speed = 0, pitch = 1, height = 2, gpsTrack = 3
     }
 
-    private static func activePanelKinds(_ inputs: CompositeExportInputs) -> [PanelKind] {
+    static func activePanelKinds(_ inputs: CompositeExportInputs) -> [PanelKind] {
         var out: [PanelKind] = []
         if !inputs.speedSmoothedKmh.isEmpty { out.append(.speed) }
         if !inputs.pitchDeg.isEmpty { out.append(.pitch) }
@@ -268,7 +270,7 @@ enum CompositeExporter {
     //  property; we sample it on a background timer.
     // -------------------------------------------------------------------------
 
-    private final class ProgressPoller: @unchecked Sendable {
+    final class ProgressPoller: @unchecked Sendable {
         private let session: AVAssetExportSession
         private let callback: @Sendable (Double) -> Void
         private var task: Task<Void, Never>?
@@ -299,7 +301,7 @@ enum CompositeExporter {
     //  Static panel rendering (scale = 1 to avoid the 31 MP device-scale trap)
     // -------------------------------------------------------------------------
 
-    private static func renderPanelImage(
+    static func renderPanelImage(
         index: Int, size: CGSize, inputs: CompositeExportInputs
     ) -> CGImage? {
         let format = UIGraphicsImageRendererFormat.default()
@@ -397,9 +399,13 @@ enum CompositeExporter {
     /// Build a CALayer for the given panel that shows live "now <value>"
     /// labels matching the Android Replay screen's top-left stack. Returns
     /// nil for the GPS panel (which only has the dot — no numeric labels).
-    private static func makeLiveValueLayer(
+    /// `beginOffsetS` shifts the filmstrip animation's start on the merged
+    /// timeline — 0 for the single-clip export, the clip's segment start for
+    /// `MergeExporter`, which reuses this layer per clip.
+    static func makeLiveValueLayer(
         panelIndex: Int, panelSize: CGSize,
-        durationS: Double, inputs: CompositeExportInputs
+        durationS: Double, inputs: CompositeExportInputs,
+        beginOffsetS: Double = 0
     ) -> CALayer? {
         // Update rate: 10 Hz is plenty for human-readable values (100 ms
         // refresh) and keeps the filmstrip image at a reasonable size.
@@ -509,8 +515,8 @@ enum CompositeExporter {
         anim.keyTimes = keyTimes
         anim.calculationMode = .discrete
         anim.duration = max(durationS, 0.001)
-        anim.beginTime = AVCoreAnimationBeginTimeAtZero
-        anim.fillMode = .forwards
+        anim.beginTime = AVCoreAnimationBeginTimeAtZero + beginOffsetS
+        anim.fillMode = .both
         anim.isRemovedOnCompletion = false
         layer.add(anim, forKey: "values")
 
@@ -622,7 +628,7 @@ enum CompositeExporter {
 
     /// Per-step (X-translation) keyframes for cursor lines on panels 0..2.
     /// Plot inset is applied so the cursor stays inside the data area.
-    private static func sweepCursorValues(
+    static func sweepCursorValues(
         panelIndex: Int, durationS: Double, panelWidth: CGFloat,
         inputs: CompositeExportInputs
     ) -> (values: [CGFloat], keyTimes: [Double]) {
@@ -668,7 +674,7 @@ enum CompositeExporter {
     }
 
     /// (x, y) keyframes for the GPS track dot.
-    private static func gpsDotValues(
+    static func gpsDotValues(
         durationS: Double, panelSize: CGSize, inputs: CompositeExportInputs
     ) -> (x: [CGFloat], y: [CGFloat], keyTimes: [Double]) {
         let inset = UIEdgeInsets(top: 56, left: 16, bottom: 16, right: 16)

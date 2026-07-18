@@ -425,7 +425,7 @@ final class ReplayViewModel {
             fullSensorAbsTimesMs = Self.absTimesFromSyncAnchors(
                 ticks: fullSensorRows.map { $0.ticks }, anchors: sensorSyncAnchors)
         } else {
-            fullSensorAbsTimesMs = interpolateSensorAbsTimes(
+            fullSensorAbsTimesMs = Self.interpolateSensorAbsTimes(
                 sensorRows: fullSensorRows, gpsRows: fullGpsRows,
                 gpsAbsTimesMs: fullGpsAbsTimesMs
             )
@@ -644,7 +644,8 @@ final class ReplayViewModel {
     /// Outside the GPS coverage we fall back to constant 10 ms/tick from the
     /// nearest GPS anchor; over short overshoots that's fine. Within GPS
     /// coverage this exactly matches the Rust client's behaviour.
-    private func interpolateSensorAbsTimes(
+    /// Static + internal so `MergeViewModel` reuses the same legacy fallback.
+    static func interpolateSensorAbsTimes(
         sensorRows: [SensorRow], gpsRows: [GpsRow], gpsAbsTimesMs: [Int64]
     ) -> [Int64] {
         let nSensor = sensorRows.count

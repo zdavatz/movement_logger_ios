@@ -44,6 +44,9 @@
 		A1000000000000000000010B /* ReplayViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020B /* ReplayViewModel.swift */; };
 		A1000000000000000000010C /* ReplayScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020C /* ReplayScreen.swift */; };
 		A1000000000000000000010D /* CompositeExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020D /* CompositeExporter.swift */; };
+		A10000000000000000000601 /* MergeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000602 /* MergeViewModel.swift */; };
+		A10000000000000000000603 /* MergeScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000604 /* MergeScreen.swift */; };
+		A10000000000000000000605 /* MergeExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000606 /* MergeExporter.swift */; };
 		A1000000000000000000010E /* LiveSample.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020E /* LiveSample.swift */; };
 		A1000000000000000000010F /* LiveScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000020F /* LiveScreen.swift */; };
 		A10000000000000000000301 /* AgentConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000311 /* AgentConfig.swift */; };
@@ -119,6 +122,9 @@
 		A1000000000000000000020B /* ReplayViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayViewModel.swift; sourceTree = "<group>"; };
 		A1000000000000000000020C /* ReplayScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReplayScreen.swift; sourceTree = "<group>"; };
 		A1000000000000000000020D /* CompositeExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositeExporter.swift; sourceTree = "<group>"; };
+		A10000000000000000000602 /* MergeViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergeViewModel.swift; sourceTree = "<group>"; };
+		A10000000000000000000604 /* MergeScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergeScreen.swift; sourceTree = "<group>"; };
+		A10000000000000000000606 /* MergeExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MergeExporter.swift; sourceTree = "<group>"; };
 		A1000000000000000000020E /* LiveSample.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveSample.swift; sourceTree = "<group>"; };
 		A1000000000000000000020F /* LiveScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveScreen.swift; sourceTree = "<group>"; };
 		A10000000000000000000311 /* AgentConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentConfig.swift; sourceTree = "<group>"; };
@@ -246,6 +252,8 @@
 				A10000000000000000000D12 /* GpsDebugScreen.swift */,
 				A1000000000000000000020B /* ReplayViewModel.swift */,
 				A1000000000000000000020C /* ReplayScreen.swift */,
+				A10000000000000000000602 /* MergeViewModel.swift */,
+				A10000000000000000000604 /* MergeScreen.swift */,
 				536A7998F0FA05CA9E0715BA /* RidesScreen.swift */,
 				A1000000000000000000040C /* RideMap.swift */,
 			);
@@ -282,6 +290,7 @@
 			isa = PBXGroup;
 			children = (
 				A1000000000000000000020D /* CompositeExporter.swift */,
+				A10000000000000000000606 /* MergeExporter.swift */,
 			);
 			path = Export;
 			sourceTree = "<group>";
@@ -424,6 +433,9 @@
 				A1000000000000000000010B /* ReplayViewModel.swift in Sources */,
 				A1000000000000000000010C /* ReplayScreen.swift in Sources */,
 				A1000000000000000000010D /* CompositeExporter.swift in Sources */,
+				A10000000000000000000601 /* MergeViewModel.swift in Sources */,
+				A10000000000000000000603 /* MergeScreen.swift in Sources */,
+				A10000000000000000000605 /* MergeExporter.swift in Sources */,
 				A1000000000000000000010E /* LiveSample.swift in Sources */,
 				A1000000000000000000010F /* LiveScreen.swift in Sources */,
 				A10000000000000000000301 /* AgentConfig.swift in Sources */,

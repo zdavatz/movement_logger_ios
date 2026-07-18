@@ -29,6 +29,9 @@ struct MainNav: View {
             ReplayScreen()
                 .tabItem { Label("Replay", systemImage: "play.circle") }
                 .tag(3)
+            MergeScreen()
+                .tabItem { Label("Merge", systemImage: "film.stack") }
+                .tag(6)
             RidesScreen()
                 .tabItem { Label("Rides", systemImage: "applewatch") }
                 .tag(4)
