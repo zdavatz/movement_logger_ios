@@ -157,62 +157,75 @@ private func mergeSummary(_ clips: [MergeViewModel.Clip]) -> String {
 private struct SensorDataSection: View {
     @Bindable var vm: MergeViewModel
     @Binding var recordings: [URL]
+    /// The CSV file lists only appear once the user opts in — a plain
+    /// video merge shows no session files at all.
+    @State private var includeSensorData = false
 
     var body: some View {
-        let sensorCandidates = recordings.filter { isSensCsvName($0.lastPathComponent) }
-        let gpsCandidates = recordings.filter { isGpsCsvName($0.lastPathComponent) }
-
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Session data (optional)")
+            Toggle(isOn: $includeSensorData) {
+                Text("Include sensor data")
                     .font(.subheadline.weight(.semibold))
-                Spacer()
-                Button {
+            }
+            .disabled(vm.exporting)
+            .onChange(of: includeSensorData) { _, on in
+                if on {
                     recordings = vm.listLocalRecordings()
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-            }
-            Text("Load a Sens*/Gps* CSV to composite the sensor panels under every clip — leave empty to merge plain videos.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(spacing: 12) {
-                CsvChip(label: "Sensor",
-                        detail: vm.sensorFile?.lastPathComponent,
-                        rows: vm.sensorRowCount)
-                CsvChip(label: "GPS",
-                        detail: vm.gpsFile?.lastPathComponent,
-                        rows: vm.gpsRowCount)
-                if vm.sensorFile != nil || vm.gpsFile != nil {
-                    Button("Clear") { vm.clearCsvs() }
-                        .buttonStyle(.bordered)
-                        .disabled(vm.exporting)
+                } else if vm.sensorFile != nil || vm.gpsFile != nil {
+                    vm.clearCsvs()
                 }
             }
 
-            if sensorCandidates.isEmpty && gpsCandidates.isEmpty {
-                Text("No CSVs in this app's storage — use the Sync tab to download some first.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                if !sensorCandidates.isEmpty {
-                    Text("Sensor CSV").font(.caption.weight(.semibold))
-                    CsvChooserList(files: sensorCandidates, selected: vm.sensorFile) { url in
-                        Task { await vm.pickSensorCsv(url) }
+            if includeSensorData {
+                let sensorCandidates = recordings.filter { isSensCsvName($0.lastPathComponent) }
+                let gpsCandidates = recordings.filter { isGpsCsvName($0.lastPathComponent) }
+
+                HStack {
+                    Text("Load a Sens*/Gps* CSV to composite the sensor panels under every clip.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        recordings = vm.listLocalRecordings()
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                HStack(spacing: 12) {
+                    CsvChip(label: "Sensor",
+                            detail: vm.sensorFile?.lastPathComponent,
+                            rows: vm.sensorRowCount)
+                    CsvChip(label: "GPS",
+                            detail: vm.gpsFile?.lastPathComponent,
+                            rows: vm.gpsRowCount)
+                    if vm.sensorFile != nil || vm.gpsFile != nil {
+                        Button("Clear") { vm.clearCsvs() }
+                            .buttonStyle(.bordered)
+                            .disabled(vm.exporting)
                     }
                 }
-                if !gpsCandidates.isEmpty {
-                    Text("GPS CSV").font(.caption.weight(.semibold))
-                    CsvChooserList(files: gpsCandidates, selected: vm.gpsFile) { url in
-                        Task { await vm.pickGpsCsv(url) }
+
+                if sensorCandidates.isEmpty && gpsCandidates.isEmpty {
+                    Text("No CSVs in this app's storage — use the Sync tab to download some first.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    if !sensorCandidates.isEmpty {
+                        Text("Sensor CSV").font(.caption.weight(.semibold))
+                        CsvChooserList(files: sensorCandidates, selected: vm.sensorFile) { url in
+                            Task { await vm.pickSensorCsv(url) }
+                        }
+                    }
+                    if !gpsCandidates.isEmpty {
+                        Text("GPS CSV").font(.caption.weight(.semibold))
+                        CsvChooserList(files: gpsCandidates, selected: vm.gpsFile) { url in
+                            Task { await vm.pickGpsCsv(url) }
+                        }
                     }
                 }
             }
-        }
-        .onAppear {
-            recordings = vm.listLocalRecordings()
         }
     }
 }
