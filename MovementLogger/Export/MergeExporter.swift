@@ -6,6 +6,7 @@ import UIKit
 ///
 ///   [title card 2.5 s] [clip 1, complete, 3 s fade-out]
 ///   [title card 2.5 s] [clip 2, complete, 3 s fade-out] …
+///   [Pump Tsüri logo outro 5 s]
 ///
 /// Each title card is black with the clip's recording date (dd.MM.yyyy)
 /// above its start time (HH:mm:ss), local timezone, white text. Clips are
@@ -55,6 +56,11 @@ enum MergeExporter {
     private static let titleCardS: Double = 2.5
     /// Fade-to-black over the clip's last seconds (clamped to clip length).
     private static let fadeOutS: Double = 3.0
+    /// Pump Tsüri logo outro closing the film — ONCE, after the last
+    /// clip's fade-out (not per clip). Black background, RideLogo centered.
+    private static let outroS: Double = 5.0
+    /// Logo height as a fraction of the render height.
+    private static let outroLogoHeightFrac: CGFloat = 0.45
 
     static func export(
         clips: [MergeClipSpec],
@@ -159,6 +165,14 @@ enum MergeExporter {
                 loaded: l, titleStart: titleStart, clipStart: clipStart, clipEnd: clipEnd))
             cursor = clipEnd
         }
+
+        // ----- 5 s logo outro — one trailing empty (black) edit after the
+        // last clip's fade-out. No clip content is touched (never trimmed).
+        let outroStart = cursor
+        let outroDur = CMTime(value: Int64(outroS * 1000), timescale: 1000)
+        compVideo.insertEmptyTimeRange(CMTimeRange(start: outroStart, duration: outroDur))
+        cursor = CMTimeAdd(outroStart, outroDur)
+
         let totalDur = cursor
         let totalS = CMTimeGetSeconds(totalDur)
 
@@ -214,6 +228,14 @@ enum MergeExporter {
             inst.layerInstructions = [li]
             instructions.append(inst)
         }
+
+        // Outro instruction: plain black background — the logo itself is a
+        // CALayer opacity-gated to this segment (like the title cards).
+        let outroInst = AVMutableVideoCompositionInstruction()
+        outroInst.timeRange = CMTimeRange(start: outroStart, end: totalDur)
+        outroInst.backgroundColor = UIColor.black.cgColor
+        outroInst.layerInstructions = []
+        instructions.append(outroInst)
 
         // ----- CALayer tree: per-clip title cards + panel stacks, each
         // opacity-gated to its segment of the film timeline.
@@ -325,6 +347,33 @@ enum MergeExporter {
                 container.addSublayer(panel)
             }
             parentLayer.addSublayer(container)
+        }
+
+        // Logo outro layer: RideLogo centered on black at ~45% of the render
+        // height, visible only during the trailing outro segment.
+        if let logo = UIImage(named: "RideLogo")?.cgImage {
+            let imgW = CGFloat(logo.width)
+            let imgH = CGFloat(logo.height)
+            var h = outputSize.height * outroLogoHeightFrac
+            var w = imgH > 0 ? h * (imgW / imgH) : h
+            if w > outputSize.width * 0.8 {
+                let shrink = outputSize.width * 0.8 / w
+                w *= shrink
+                h *= shrink
+            }
+            let logoLayer = CALayer()
+            logoLayer.contents = logo
+            logoLayer.contentsGravity = .resize
+            logoLayer.frame = CGRect(
+                x: (outputSize.width - w) / 2,
+                y: (outputSize.height - h) / 2,
+                width: w, height: h
+            )
+            gateOpacity(
+                logoLayer,
+                fromS: CMTimeGetSeconds(outroStart), toS: totalS, totalS: totalS
+            )
+            parentLayer.addSublayer(logoLayer)
         }
 
         // ----- Video composition + export
