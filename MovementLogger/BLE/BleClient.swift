@@ -1206,6 +1206,12 @@ final class BleClient: NSObject {
     /// GettingVersion notify arm.
     private func handleVersionNotify(_ value: Data) {
         guard case .gettingVersion = op else { return }
+        // A 1-byte payload here is a stale single-byte reply (GET_MODE /
+        // GPS_POWER / status) that the stack delivered after its own op
+        // already timed out — a version string is ≥5 ASCII chars ("0.0.x").
+        // Decoding it would yield an unparseable "version" → spurious
+        // update banner. Ignore it; the real reply or the watchdog follows.
+        guard value.count > 1 else { return }
         let v = String(decoding: value, as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         emit(.firmwareVersion(v.isEmpty ? nil : v))

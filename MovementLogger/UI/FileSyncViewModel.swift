@@ -451,6 +451,13 @@ final class FileSyncViewModel {
     /// The box half of the check has resolved (a GET_VERSION reply arrived, or
     /// the query timed out / the box was too busy → version stays `nil`).
     private var fwBoxVersionKnown = false
+    /// GET_VERSION timeouts re-tried before the box version is declared
+    /// unknown. The box's reply notify is best-effort (firmware
+    /// `ble_notify_try` gives up after 500 ms when the stack is busy — most
+    /// likely right after an OTA trial boot), and "unknown" shows the update
+    /// banner, so ONE dropped packet must not read as "legacy box". Genuine
+    /// legacy firmware (< v0.0.29) simply times out all three attempts.
+    private var fwVersionRetries = 0
 
     /// First-sample box-timestamp; sparkline X axis is
     /// `(s.timestampMs - liveT0Ms) / 1000`. Tracked outside `LiveState` so
@@ -907,6 +914,7 @@ final class FileSyncViewModel {
         fwCheckActive = true
         fwLatestRelease = nil
         fwBoxVersionKnown = false
+        fwVersionRetries = 0
         boxFirmwareVersion = nil
         firmwareUpdateAvailable = nil
         logLine("fw-check: querying box version + latest firmware release")
@@ -1417,10 +1425,23 @@ final class FileSyncViewModel {
             // half of the firmware check and try to decide (the GitHub half may
             // already be in). Releases the worker like `.logMode` does.
             briefOpInFlight = false
-            boxFirmwareVersion = v
-            fwBoxVersionKnown = true
-            logLine("box firmware version: \(v ?? "unknown (legacy / no reply)")")
-            fwMaybeDecide()
+            if v == nil, fwCheckActive, fwVersionRetries < 2 {
+                // No reply is EITHER legacy firmware OR one dropped notify —
+                // and "unknown" shows the update banner, which on an
+                // up-to-date box claims an update it already runs. Retry
+                // before concluding; legacy boxes time out every attempt.
+                fwVersionRetries += 1
+                logLine("fw-check: no version reply — retry \(fwVersionRetries)/2")
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(1))
+                    self?.queryBoxFirmwareVersion(attempt: 0)
+                }
+            } else {
+                boxFirmwareVersion = v
+                fwBoxVersionKnown = true
+                logLine("box firmware version: \(v ?? "unknown (legacy / no reply)")")
+                fwMaybeDecide()
+            }
             pumpManualQueue()
         case .gpsPower(let on):
             // GET/SET_POWER reply — reflect the box's GPS state in the toggle.
