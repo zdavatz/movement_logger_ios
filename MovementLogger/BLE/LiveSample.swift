@@ -1,14 +1,47 @@
 import Foundation
 
+/// GPS RF extension carried in the 58-byte SensorStream (firmware v0.0.55+,
+/// bytes 46..57): Peter's assembly metrics — same values as the GPS-Debug
+/// survey live line and the firmware's `gps_rf:` errlog line — over the
+/// normal BLE link, no survey bridge needed. Mirrors desktop `ble.rs`
+/// `LiveRf` and Android `ble/LiveSample.kt` `GpsRfLive`.
+struct GpsRfLive: Equatable {
+    /// Raw NAV-PVT fixType (0 none, 2 = 2D, 3 = 3D, 4 = 3D+DR, 5 = time).
+    let fixType: UInt8
+    /// Satellites used in the solution (NAV-PVT numSV).
+    let usedSv: UInt8
+    /// Mean of the 6 strongest GPS+Galileo C/N0s, ×10 (dB-Hz). 0 = no data.
+    let avg6X10: UInt16
+    /// Weakest / strongest of that top-6 (dB-Hz).
+    let min6: UInt8
+    let max6: UInt8
+    /// MON-RF noisePerMS (broadband noise floor).
+    let noisePerMs: UInt16
+    /// MON-RF agcCnt (0..8191).
+    let agcCnt: UInt16
+    /// MON-RF jamInd (narrowband CW, 0..255).
+    let jamInd: UInt8
+    /// MON-RF jammingState (0 unk, 1 ok, 2 warn, 3 crit) — byte 57 bits 0-3.
+    let jamState: UInt8
+    /// MON-RF antStatus (0 init, 2 ok, 3 SHORT, 4 OPEN) — byte 57 bits 4-7.
+    let antStatus: UInt8
+    /// Flags bit 3: MON-RF values seen within the last 15 s.
+    let fresh: Bool
+}
+
 /// One decoded SensorStream snapshot. Mirrors the 46-byte packed layout from
 /// the PumpLogger firmware (DESIGN.md §3 in fp-sns-stbox1), scaled into
 /// convenient SI-ish units so the UI doesn't need to know the wire encoding.
+/// Firmware v0.0.55+ appends the 12-byte GPS RF extension (58 bytes total);
+/// both sizes are accepted — legacy packets just leave `rf` nil.
 ///
 /// Authoritative spec: `stbox-viz-gui/src/ble.rs` LiveSample (desktop) and the
 /// Android port at `ble/LiveSample.kt`.
 struct LiveSample: Equatable {
-    /// Wire-layout size, in bytes.
+    /// Legacy wire-layout size, in bytes.
     static let wireSize: Int = 46
+    /// v0.0.55+ wire size with the GPS RF extension (bytes 46..57).
+    static let wireSizeRf: Int = 58
 
     /// Box-local monotonic milliseconds since boot. Not wall-clock — the box has no RTC.
     let timestampMs: UInt32
@@ -43,6 +76,8 @@ struct LiveSample: Equatable {
     let gpsValid: Bool
     let loggingActive: Bool
     let lowBattery: Bool
+    /// GPS RF/signal health extension (v0.0.55+). Nil on legacy 46-byte packets.
+    var rf: GpsRfLive? = nil
 
     /// Lat/lon in degrees if the fix is valid, else nil.
     func latLonDeg() -> (Double, Double)? {
@@ -134,14 +169,32 @@ struct LiveSample: Equatable {
         return atan2(z, (x * x + y * y).squareRoot()) * 180.0 / .pi
     }
 
-    /// Decode the 46-byte little-endian wire layout. Returns nil on bad length.
+    /// Decode the little-endian wire layout — 46 bytes (legacy) or 58 bytes
+    /// (v0.0.55+ GPS RF extension). Returns nil on bad length.
     static func parse(_ data: Data) -> LiveSample? {
-        guard data.count == wireSize else { return nil }
+        guard data.count == wireSize || data.count == wireSizeRf else { return nil }
         return data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> LiveSample in
             func u32(_ offset: Int) -> UInt32 { raw.loadUnaligned(fromByteOffset: offset, as: UInt32.self) }
             func i32(_ offset: Int) -> Int32 { raw.loadUnaligned(fromByteOffset: offset, as: Int32.self) }
             func i16(_ offset: Int) -> Int16 { raw.loadUnaligned(fromByteOffset: offset, as: Int16.self) }
+            func u16(_ offset: Int) -> UInt16 { raw.loadUnaligned(fromByteOffset: offset, as: UInt16.self) }
             let flags = raw[44]
+            var rf: GpsRfLive? = nil
+            if data.count >= wireSizeRf {
+                rf = GpsRfLive(
+                    fixType: raw[46],
+                    usedSv: raw[47],
+                    avg6X10: UInt16(littleEndian: u16(48)),
+                    min6: raw[50],
+                    max6: raw[51],
+                    noisePerMs: UInt16(littleEndian: u16(52)),
+                    agcCnt: UInt16(littleEndian: u16(54)),
+                    jamInd: raw[56],
+                    jamState: raw[57] & 0x0F,
+                    antStatus: raw[57] >> 4,
+                    fresh: flags & 0x08 != 0
+                )
+            }
             return LiveSample(
                 timestampMs: UInt32(littleEndian: u32(0)),
                 accMg: (Int16(littleEndian: i16(4)),
@@ -165,7 +218,8 @@ struct LiveSample: Equatable {
                 gpsCn0Max: raw[45],
                 gpsValid: flags & 0x01 != 0,
                 loggingActive: flags & 0x04 != 0,
-                lowBattery: flags & 0x02 != 0
+                lowBattery: flags & 0x02 != 0,
+                rf: rf
             )
         }
     }
@@ -181,7 +235,7 @@ struct LiveSample: Equatable {
         lhs.gpsFixQ == rhs.gpsFixQ && lhs.gpsNsat == rhs.gpsNsat &&
         lhs.gpsCn0Max == rhs.gpsCn0Max &&
         lhs.gpsValid == rhs.gpsValid && lhs.loggingActive == rhs.loggingActive &&
-        lhs.lowBattery == rhs.lowBattery
+        lhs.lowBattery == rhs.lowBattery && lhs.rf == rhs.rf
     }
 }
 

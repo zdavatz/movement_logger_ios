@@ -999,12 +999,15 @@ final class BleClient: NSObject {
         }
     }
 
-    /// SensorStream notification handler — single 46-byte notify when the
-    /// negotiated ATT MTU is large enough, 3-chunk fallback (seq bytes
-    /// 0x00/0x01/0x02) when it isn't. Malformed packets drop silently; the
-    /// stream auto-resyncs on the next 0x00 start.
+    /// SensorStream notification handler — single 46-byte (legacy) or
+    /// 58-byte (v0.0.55+ GPS RF extension) notify when the negotiated ATT
+    /// MTU is large enough, 3-chunk fallback (seq bytes 0x00/0x01/0x02)
+    /// when it isn't. The chunked path stays legacy-46 — RF-capable
+    /// firmware always sends one 58-byte notify (Android parity).
+    /// Malformed packets drop silently; the stream auto-resyncs on the
+    /// next 0x00 start.
     private func handleStreamNotify(_ bytes: Data) {
-        if bytes.count == LiveSample.wireSize {
+        if bytes.count == LiveSample.wireSize || bytes.count == LiveSample.wireSizeRf {
             // Single-notify path. Reset any in-flight chunked frame so a
             // mid-frame MTU upgrade doesn't leave the asm in a bad state.
             streamAsm.removeAll(keepingCapacity: true)
