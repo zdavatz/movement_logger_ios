@@ -167,8 +167,10 @@ private struct ClipList: View {
 
 private func mergeSummary(_ clips: [MergeViewModel.Clip]) -> String {
     let clipMs = clips.reduce(Int64(0)) { $0 + max($1.meta.durationMillis, 0) }
-    let totalMs = clipMs + Int64(clips.count) * 2500 + 5000
-    return "\(clips.count) clip\(clips.count == 1 ? "" : "s") · merged length \(formatClipDuration(totalMs)) incl. title cards + logo outro"
+    // Per clip: 2.5 s title card + 3 s freeze fade-out; plus the 3 s
+    // gradient intro and the 5 s logo outro.
+    let totalMs = clipMs + Int64(clips.count) * (2500 + 3000) + 3000 + 5000
+    return "\(clips.count) clip\(clips.count == 1 ? "" : "s") · merged length \(formatClipDuration(totalMs)) incl. intro, cards, fade-outs + outro"
 }
 
 // MARK: - Sensor data (optional)

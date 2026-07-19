@@ -538,11 +538,12 @@ enum MergeSelfTest {
                           audio: true, optimize: true, poller: true)
 
         var specs: [MergeClipSpec] = []
-        var expectedS = 5.0   // logo outro
+        var expectedS = 3.0 + 5.0   // gradient intro + logo outro
         for f in files {
             let meta = await VideoMetadataReader.read(f)
             let start = meta.creationTimeMillis ?? 0
-            expectedS += 2.5 + Double(meta.durationMillis) / 1000.0
+            // Per clip: 2.5 s title card + full clip + 3 s freeze fade-out.
+            expectedS += 2.5 + Double(meta.durationMillis) / 1000.0 + 3.0
             print("[selftest] clip \(f.lastPathComponent): "
                 + "dur=\(meta.durationMillis)ms size=\(Int(meta.displayedSize.width))x\(Int(meta.displayedSize.height)) "
                 + "creation=\(start)")

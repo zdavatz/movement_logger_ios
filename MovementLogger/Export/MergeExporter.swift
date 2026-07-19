@@ -4,15 +4,24 @@ import UIKit
 
 /// Merge N clips (chronological order) into one film:
 ///
-///   [title card 2.5 s] [clip 1, complete, 3 s fade-out]
-///   [title card 2.5 s] [clip 2, complete, 3 s fade-out] …
+///   [MovementLogger intro card 3 s]
+///   [title card 2.5 s] [clip 1, complete] [last-frame freeze fades out 3 s]
+///   [title card 2.5 s] [clip 2, complete] [last-frame freeze fades out 3 s] …
 ///   [Pump Tsüri logo outro 5 s]
 ///
-/// Each title card is black with the clip's recording date (dd.MM.yyyy)
-/// above its start time (HH:mm:ss), local timezone, white text. Clips are
+/// The intro card shows "MovementLogger" centered on black, each letter
+/// colored along the logo gradient (orange → teal → blue → purple). Each
+/// title card is black with the clip's recording date (dd.MM.yyyy) above
+/// its start time (HH:mm:ss), local timezone, white text. Clips are
 /// inserted with their FULL time range — never trimmed ("never cut a
-/// video!" is a hard product rule); the fade is an opacity ramp to black
-/// over the clip's last 3 s, so every frame still ships.
+/// video!" is a hard product rule) — and play COMPLETELY unfaded; the
+/// fade-out happens AFTER the clip ends, on a 3 s freeze of its last
+/// frame ("play every movie till the end and then add phase out over
+/// 3 seconds"). The freeze is a rendered last-frame CALayer fading over
+/// an empty (black) composition segment — deliberately NOT an
+/// insert+scaleTimeRange of the source's tail: a scaled single-sample
+/// segment from a 10-bit HEVC tail silently truncated the export (the
+/// same codec quirk that forced the synthetic outro anchor).
 ///
 /// When `panelKinds` is non-empty each clip also carries the Replay-style
 /// sensor-panel stack below the video (same painters + cursor sweeps as
@@ -52,10 +61,17 @@ enum MergeExportError: Error, LocalizedError {
 
 enum MergeExporter {
 
+    /// "MovementLogger" gradient intro card opening the film.
+    private static let introCardS: Double = 3.0
     /// Black title card shown before every clip.
     private static let titleCardS: Double = 2.5
-    /// Fade-to-black over the clip's last seconds (clamped to clip length).
+    /// Post-clip freeze: the clip's last frame held and faded to black.
     private static let fadeOutS: Double = 3.0
+    /// Logo gradient stops for the intro lettering (orange → teal → blue
+    /// → purple), interpolated linearly per letter.
+    private static let introStops: [(r: CGFloat, g: CGFloat, b: CGFloat)] = [
+        (247, 154, 51), (36, 195, 188), (62, 141, 243), (125, 77, 240),
+    ]
     /// Pump Tsüri logo outro closing the film — ONCE, after the last
     /// clip's fade-out (not per clip). Black background, RideLogo centered.
     private static let outroS: Double = 5.0
@@ -81,7 +97,9 @@ enum MergeExporter {
         // Always empty in production (no env vars in a normal app launch).
         let dbg = Set((ProcessInfo.processInfo.environment["MERGE_DEBUG"] ?? "")
             .split(separator: ",").map(String.init))
+        let introS = dbg.contains("nogaps") ? 0.0 : introCardS
         let titleS = dbg.contains("nogaps") ? 0.0 : titleCardS
+        let freezeS = dbg.contains("nogaps") ? 0.0 : fadeOutS
         let outroSecs = (dbg.contains("nogaps") || dbg.contains("nooutro")) ? 0.0 : outroS
 
         // ----- Load per-clip assets + geometry
@@ -159,10 +177,24 @@ enum MergeExporter {
             let titleStart: CMTime
             let clipStart: CMTime
             let clipEnd: CMTime
+            /// End of the post-clip last-frame freeze (== clipEnd when the
+            /// freeze is disabled by a diagnostic knob).
+            let freezeEnd: CMTime
         }
         let titleDur = CMTime(value: Int64(titleS * 1000), timescale: 1000)
+        let freezeDur = CMTime(value: Int64(freezeS * 1000), timescale: 1000)
         var cursor = CMTime.zero
         var audioCursor = CMTime.zero
+
+        // "MovementLogger" gradient intro — a leading empty (black) edit;
+        // the lettering itself is a CALayer gated to [0, introS].
+        if introS > 0 {
+            let introDur = CMTime(value: Int64(introS * 1000), timescale: 1000)
+            compVideo.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: introDur))
+            cursor = introDur
+        }
+        let introEnd = cursor
+
         var segments: [Segment] = []
         for l in loaded {
             let titleStart = cursor
@@ -197,9 +229,19 @@ enum MergeExporter {
                     audioCursor = CMTimeAdd(clipStart, aDur)
                 }
             }
+            // Post-clip freeze: an empty (black) edit — the held last frame
+            // is a CALayer fading 1 → 0 across it. Mid-timeline empty edits
+            // are preserved (only TRAILING ones get dropped, and the last
+            // freeze is followed by the outro anchor segment).
+            let freezeEnd = freezeS > 0 ? CMTimeAdd(clipEnd, freezeDur) : clipEnd
+            if freezeS > 0 {
+                compVideo.insertEmptyTimeRange(
+                    CMTimeRange(start: clipEnd, end: freezeEnd))
+            }
             segments.append(Segment(
-                loaded: l, titleStart: titleStart, clipStart: clipStart, clipEnd: clipEnd))
-            cursor = clipEnd
+                loaded: l, titleStart: titleStart, clipStart: clipStart,
+                clipEnd: clipEnd, freezeEnd: freezeEnd))
+            cursor = freezeEnd
         }
 
         // ----- 5 s logo outro after the last clip's fade-out. A trailing
@@ -238,9 +280,17 @@ enum MergeExporter {
 
         progress(0.01)
 
-        // ----- Video composition instructions: [title gap][clip] per clip,
-        // tiling [0, totalDur] exactly (shared CMTime boundaries).
+        // ----- Video composition instructions: [intro] then per clip
+        // [title gap][clip][freeze], tiling [0, totalDur] exactly (shared
+        // CMTime boundaries).
         var instructions: [AVMutableVideoCompositionInstruction] = []
+        if introS > 0 {
+            let intro = AVMutableVideoCompositionInstruction()
+            intro.timeRange = CMTimeRange(start: .zero, end: introEnd)
+            intro.backgroundColor = UIColor.black.cgColor
+            intro.layerInstructions = []   // black; lettering is a CALayer
+            instructions.append(intro)
+        }
         for seg in segments {
             if titleS > 0 {
                 let gap = AVMutableVideoCompositionInstruction()
@@ -274,21 +324,21 @@ enum MergeExporter {
             }
             li.setTransform(xform, at: seg.clipStart)
             li.setOpacity(1.0, at: seg.clipStart)
-
-            // 3 s fade-out: opacity ramp to 0 over the clip's last seconds —
-            // the render background is black, so 0 opacity == faded to black.
-            // The clip itself stays complete; nothing is cut.
-            let clipS = CMTimeGetSeconds(l.duration)
-            let fadeS = min(fadeOutS, clipS)
-            if fadeS > 0.05 {
-                let fadeStart = CMTimeSubtract(
-                    seg.clipEnd, CMTime(seconds: fadeS, preferredTimescale: 600))
-                li.setOpacityRamp(
-                    fromStartOpacity: 1.0, toEndOpacity: 0.0,
-                    timeRange: CMTimeRange(start: fadeStart, end: seg.clipEnd))
-            }
+            // NO fade during the clip — it plays completely unfaded ("play
+            // every movie till the end and then add phase out over 3
+            // seconds"); the fade lives on the post-clip freeze layer.
             inst.layerInstructions = [li]
             instructions.append(inst)
+
+            // Post-clip freeze region: black background; the held last
+            // frame + its fade are a CALayer gated to this segment.
+            if freezeS > 0 {
+                let freeze = AVMutableVideoCompositionInstruction()
+                freeze.timeRange = CMTimeRange(start: seg.clipEnd, end: seg.freezeEnd)
+                freeze.backgroundColor = UIColor.black.cgColor
+                freeze.layerInstructions = []
+                instructions.append(freeze)
+            }
         }
 
         // Outro instruction: plain black background (the frozen anchor frame
@@ -311,11 +361,48 @@ enum MergeExporter {
         videoLayer.frame = parentLayer.frame   // FULL parent — no inner letterbox
         parentLayer.addSublayer(videoLayer)
 
+        // Intro card: "MovementLogger" in the logo gradient, centered,
+        // visible only during the leading intro segment.
+        if introS > 0, let intro = makeIntroLayer(canvasSize: outputSize) {
+            gateOpacity(intro, fromS: 0, toS: introS, totalS: totalS)
+            parentLayer.addSublayer(intro)
+        }
+
         for seg in segments {
             let titleStartS = CMTimeGetSeconds(seg.titleStart)
             let clipStartS = CMTimeGetSeconds(seg.clipStart)
             let clipEndS = CMTimeGetSeconds(seg.clipEnd)
+            let freezeEndS = CMTimeGetSeconds(seg.freezeEnd)
             let clipDurS = max(clipEndS - clipStartS, 0.001)
+
+            // Post-clip freeze: the clip's LAST FRAME (extracted with
+            // AVAssetImageGenerator — decode-tolerant, unlike composing a
+            // scaled tail sample) held over the freeze segment, fading
+            // 1 → 0 to black. On extraction failure the segment stays
+            // plain black (fade degenerates to a hard cut).
+            if freezeS > 0, freezeEndS > clipEndS,
+               let frame = await lastFrameImage(
+                   asset: seg.loaded.asset, duration: seg.loaded.duration) {
+                let iw = CGFloat(frame.width)
+                let ih = CGFloat(frame.height)
+                if iw > 0, ih > 0 {
+                    let s = min(videoW / iw, videoH / ih)
+                    let w = iw * s
+                    let h = ih * s
+                    let freezeLayer = CALayer()
+                    freezeLayer.contents = frame
+                    freezeLayer.contentsGravity = .resize
+                    freezeLayer.isGeometryFlipped = true
+                    // Y-up parent: the video region is the TOP of the canvas.
+                    freezeLayer.frame = CGRect(
+                        x: (videoW - w) / 2,
+                        y: panelStackH + (videoH - h) / 2,
+                        width: w, height: h
+                    )
+                    fadeOut(freezeLayer, fromS: clipEndS, toS: freezeEndS, totalS: totalS)
+                    parentLayer.addSublayer(freezeLayer)
+                }
+            }
 
             // Title card: white date over start time, centered on black.
             // The layer is a TIGHT text strip, not a full-canvas image —
@@ -585,6 +672,102 @@ enum MergeExporter {
         case .gpsTrack:
             return inputs.gpsRows.count >= 2 && !inputs.gpsAbsTimesMs.isEmpty
         }
+    }
+
+    /// The clip's last frame as an upright CGImage. Tolerant seek (up to
+    /// 1 s before the nominal end) so HEVC B-frame tails can't fail it.
+    private static func lastFrameImage(
+        asset: AVURLAsset, duration: CMTime
+    ) async -> CGImage? {
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.requestedTimeToleranceAfter = .zero
+        gen.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)
+        let target = CMTimeMaximum(
+            .zero, CMTimeSubtract(duration, CMTime(value: 1, timescale: 30)))
+        return try? await gen.image(at: target).image
+    }
+
+    /// Fade `layer` 1 → 0 across [fromS, toS] of the film; hidden outside
+    /// that window. Linear keyframes with a duplicated keyTime at `fromS`
+    /// produce the step 0 → 1 exactly at the freeze start.
+    private static func fadeOut(
+        _ layer: CALayer, fromS: Double, toS: Double, totalS: Double
+    ) {
+        guard totalS > 0, toS > fromS else {
+            layer.opacity = 0
+            return
+        }
+        let f = max(0, min(fromS / totalS, 1))
+        let t = max(f, min(toS / totalS, 1))
+        let anim = CAKeyframeAnimation(keyPath: "opacity")
+        anim.values = [0.0, 0.0, 1.0, 0.0, 0.0]
+        anim.keyTimes = [0, f, f, t, 1].map { NSNumber(value: $0) }
+        anim.duration = totalS
+        anim.beginTime = AVCoreAnimationBeginTimeAtZero
+        anim.fillMode = .both
+        anim.isRemovedOnCompletion = false
+        layer.add(anim, forKey: "freeze-fade")
+    }
+
+    /// Intro lettering: "MovementLogger", bold, centered, sized so the text
+    /// spans ~86% of the render width, each letter colored along the logo
+    /// gradient (orange → teal → blue → purple, per-letter interpolation).
+    private static func makeIntroLayer(canvasSize: CGSize) -> CALayer? {
+        let text = "MovementLogger"
+        func gradientColor(_ t: Double) -> UIColor {
+            let clamped = max(0, min(t, 1))
+            let scaled = clamped * Double(introStops.count - 1)
+            let seg = min(Int(scaled), introStops.count - 2)
+            let f = CGFloat(scaled - Double(seg))
+            let a = introStops[seg]
+            let b = introStops[seg + 1]
+            return UIColor(
+                red: (a.r + (b.r - a.r) * f) / 255.0,
+                green: (a.g + (b.g - a.g) * f) / 255.0,
+                blue: (a.b + (b.b - a.b) * f) / 255.0,
+                alpha: 1
+            )
+        }
+        // Size the font so the rendered string spans ~86% of the width.
+        let refFont = UIFont.systemFont(ofSize: 100, weight: .bold)
+        let refW = (text as NSString).size(withAttributes: [.font: refFont]).width
+        guard refW > 0 else { return nil }
+        let fontSize = 100.0 * canvasSize.width * 0.86 / refW
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+        let attr = NSMutableAttributedString(
+            string: text, attributes: [.font: font])
+        let n = text.count
+        for i in 0..<n {
+            let t = n > 1 ? Double(i) / Double(n - 1) : 0
+            attr.addAttribute(
+                .foregroundColor, value: gradientColor(t),
+                range: NSRange(location: i, length: 1))
+        }
+        let textSize = attr.size()
+        let pad: CGFloat = 8
+        let strip = CGSize(
+            width: (textSize.width + 2 * pad).rounded(.up),
+            height: (textSize.height + 2 * pad).rounded(.up)
+        )
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1   // export-only render — avoid the device-scale trap
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: strip, format: format)
+        let img = renderer.image { _ in
+            attr.draw(at: CGPoint(x: pad, y: pad))
+        }
+        guard let cg = img.cgImage else { return nil }
+        let layer = CALayer()
+        layer.contents = cg
+        layer.contentsGravity = .resize
+        layer.isGeometryFlipped = true
+        layer.frame = CGRect(
+            x: (canvasSize.width - strip.width) / 2,
+            y: (canvasSize.height - strip.height) / 2,
+            width: strip.width, height: strip.height
+        )
+        return layer
     }
 
     /// Show `layer` only during [fromS, toS] of the film via a discrete
