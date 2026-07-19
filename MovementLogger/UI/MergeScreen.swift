@@ -347,12 +347,18 @@ private struct MergeRow: View {
                         .font(.footnote)
                         .foregroundStyle(.tint)
                 }
-                Button {
-                    showingPlayer = true
-                } label: {
-                    Label("Play merged video", systemImage: "play.rectangle.fill")
+                HStack(spacing: 12) {
+                    Button {
+                        showingPlayer = true
+                    } label: {
+                        Label("Play merged video", systemImage: "play.rectangle.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    ShareLink(item: URL(fileURLWithPath: path)) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
             }
         }
     }
