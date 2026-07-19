@@ -81,11 +81,26 @@ struct MergeScreen: View {
             Task {
                 await MainActor.run { vm.beginImport(items.count) }
                 var urls: [URL] = []
-                for item in items {
-                    if let movie = try? await item.loadTransferable(type: VideoFile.self) {
-                        urls.append(movie.url)
+                // Import up to 4 videos concurrently — the photo-library
+                // copies are I/O-bound, so parallelism cuts the wait
+                // roughly linearly. Order is irrelevant (clips are sorted
+                // by capture time later); each finished copy ticks the bar.
+                let chunkSize = 4
+                var idx = 0
+                while idx < items.count {
+                    let chunk = Array(items[idx..<min(idx + chunkSize, items.count)])
+                    idx += chunk.count
+                    await withTaskGroup(of: URL?.self) { group in
+                        for item in chunk {
+                            group.addTask {
+                                (try? await item.loadTransferable(type: VideoFile.self))?.url
+                            }
+                        }
+                        for await maybeUrl in group {
+                            if let u = maybeUrl { urls.append(u) }
+                            await MainActor.run { vm.importTick() }
+                        }
                     }
-                    await MainActor.run { vm.importTick() }
                 }
                 await vm.addClips(urls)
                 await MainActor.run { vm.endImport() }
