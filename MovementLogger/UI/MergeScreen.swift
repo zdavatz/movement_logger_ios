@@ -31,7 +31,17 @@ struct MergeScreen: View {
                     }
                     .buttonStyle(.borderedProminent)
 
-                    if vm.loadingClips {
+                    if vm.importingTotal > 0 {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Loading videos… \(vm.importingDone)/\(vm.importingTotal)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ProgressView(
+                                value: Double(vm.importingDone),
+                                total: Double(max(vm.importingTotal, 1))
+                            )
+                        }
+                    } else if vm.loadingClips {
                         InlineSpinner(label: "reading video metadata…")
                     }
 
@@ -69,13 +79,16 @@ struct MergeScreen: View {
             // list than I select". `addClips` dedups as the second belt.
             pickerItems = []
             Task {
+                await MainActor.run { vm.beginImport(items.count) }
                 var urls: [URL] = []
                 for item in items {
                     if let movie = try? await item.loadTransferable(type: VideoFile.self) {
                         urls.append(movie.url)
                     }
+                    await MainActor.run { vm.importTick() }
                 }
                 await vm.addClips(urls)
+                await MainActor.run { vm.endImport() }
             }
         }
         .fullScreenCover(isPresented: $showingPlayer) {

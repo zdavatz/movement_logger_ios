@@ -34,6 +34,11 @@ final class MergeViewModel {
 
     var clips: [Clip] = []
     var loadingClips: Bool = false
+    /// Photo-library import progress ("Loading videos… N/M"): copying the
+    /// picked movies out of the library takes seconds per clip, so the
+    /// picker phase gets its own progress bar. total == 0 → idle.
+    var importingDone: Int = 0
+    var importingTotal: Int = 0
     var sensorFile: URL? = nil
     var gpsFile: URL? = nil
     var sensorRowCount: Int = 0
@@ -60,6 +65,23 @@ final class MergeViewModel {
     // -------------------------------------------------------------------------
     //  Clip management
     // -------------------------------------------------------------------------
+
+    @MainActor
+    func beginImport(_ total: Int) {
+        importingDone = 0
+        importingTotal = total
+    }
+
+    @MainActor
+    func importTick() {
+        importingDone += 1
+    }
+
+    @MainActor
+    func endImport() {
+        importingDone = 0
+        importingTotal = 0
+    }
 
     @MainActor
     func addClips(_ urls: [URL]) async {
