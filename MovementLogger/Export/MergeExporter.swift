@@ -382,7 +382,8 @@ enum MergeExporter {
             // plain black (fade degenerates to a hard cut).
             if freezeS > 0, freezeEndS > clipEndS,
                let frame = await lastFrameImage(
-                   asset: seg.loaded.asset, duration: seg.loaded.duration) {
+                   asset: seg.loaded.asset, duration: seg.loaded.duration,
+                   maxSize: CGSize(width: videoW, height: videoH)) {
                 let iw = CGFloat(frame.width)
                 let ih = CGFloat(frame.height)
                 if iw > 0, ih > 0 {
@@ -563,6 +564,13 @@ enum MergeExporter {
             session.videoComposition = videoComp
         }
         session.shouldOptimizeForNetworkUse = true
+        // Stamp the film with the EARLIEST clip's capture date. Without it
+        // the merged .mov has no creation_time at all, so re-picking it
+        // (e.g. merging yesterday's films into a bigger one) lands in the
+        // "no capture date — using file date" fallback.
+        if let earliest = clips.map({ $0.startEpochMs }).filter({ $0 > 0 }).min() {
+            session.metadata = CompositeExporter.creationDateMetadata(epochMs: earliest)
+        }
 
         progress(0.03)
         let poller = CompositeExporter.ProgressPoller(session: session) { p in
@@ -582,6 +590,7 @@ enum MergeExporter {
             // the NSError domain+code+underlying chain, plus the video
             // composition's own validation findings when it is the culprit.
             var detail = describeError(session.error)
+                + CompositeExporter.interruptedHint(session.error)
             let findings = validationFindings(videoComp, for: composition)
             if !findings.isEmpty {
                 detail += " · composition invalid: " + findings.joined(separator: "; ")
@@ -676,11 +685,16 @@ enum MergeExporter {
 
     /// The clip's last frame as an upright CGImage. Tolerant seek (up to
     /// 1 s before the nominal end) so HEVC B-frame tails can't fail it.
+    /// `maxSize` caps the decode to the render region: a freeze frame at
+    /// SOURCE resolution is a ~35 MB bitmap per 4K clip, and a 36-clip
+    /// merge hands the offline CA render server over a gigabyte of layer
+    /// contents — enough for mediaserverd to buckle mid-export.
     private static func lastFrameImage(
-        asset: AVURLAsset, duration: CMTime
+        asset: AVURLAsset, duration: CMTime, maxSize: CGSize
     ) async -> CGImage? {
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
+        gen.maximumSize = maxSize
         gen.requestedTimeToleranceAfter = .zero
         gen.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)
         let target = CMTimeMaximum(

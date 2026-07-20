@@ -325,6 +325,12 @@ final class MergeViewModel {
         lastExportedPath = nil
         savedToPhotos = false
         error = nil
+        // A 36-clip merge encodes for many minutes; if the screen auto-locks
+        // iOS revokes the hardware encoder and the export dies with
+        // AVError -11847 "Operation Interrupted". Keep the screen awake for
+        // the duration (restored below whatever the outcome).
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer { UIApplication.shared.isIdleTimerDisabled = false }
         do {
             try await MergeExporter.export(clips: specs, panelKinds: kinds, to: outURL) { p in
                 Task { @MainActor [weak self] in self?.exportProgress = p }

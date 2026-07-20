@@ -67,6 +67,41 @@ enum CompositeExporter {
         return out
     }
 
+    /// QuickTime creation-date metadata for an exported .mov. Without this
+    /// the output carries NO capture date, so re-picking our own export
+    /// (from Photos or Documents) hits the "no capture date — using file
+    /// date" fallback in Replay/Merge. Written as com.apple.quicktime
+    /// .creationdate (ISO 8601 with local offset — the same tag the iPhone
+    /// camera writes), which `VideoMetadataReader` reads back via
+    /// commonKeyCreationDate.
+    static func creationDateMetadata(epochMs: Int64) -> [AVMetadataItem] {
+        guard epochMs > 0 else { return [] }
+        let item = AVMutableMetadataItem()
+        item.identifier = .quickTimeMetadataCreationDate
+        item.keySpace = .quickTimeMetadata
+        item.key = AVMetadataKey.quickTimeMetadataKeyCreationDate as NSString
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        f.timeZone = .current
+        item.value = f.string(
+            from: Date(timeIntervalSince1970: TimeInterval(epochMs) / 1000.0)) as NSString
+        return [item]
+    }
+
+    /// Plain-language suffix for AVError.operationInterrupted (-11847):
+    /// iOS revoked the hardware encoder mid-export. The codes alone read
+    /// as gibberish in a bug report; the cause is almost always the app
+    /// leaving the foreground (screen lock / app switch) or system
+    /// media-services pressure.
+    static func interruptedHint(_ error: Error?) -> String {
+        guard let ns = error as NSError?,
+              ns.domain == AVFoundationErrorDomain,
+              ns.code == AVError.operationInterrupted.rawValue else { return "" }
+        return " — iOS interrupted the export (screen lock, app switch, phone"
+            + " call, or system pressure). Keep the app open with the screen on"
+            + " until the export finishes, then try again."
+    }
+
     static func export(
         _ inputs: CompositeExportInputs,
         to outputURL: URL,
@@ -246,6 +281,10 @@ enum CompositeExporter {
         session.outputFileType = .mov
         session.videoComposition = videoComp
         session.shouldOptimizeForNetworkUse = true
+        // Stamp the SOURCE clip's capture date on the composite so it stays
+        // date-sorted (and re-usable as a Merge input) after a Photos round
+        // trip.
+        session.metadata = creationDateMetadata(epochMs: inputs.videoCreationMs)
 
         // ----- Run export with progress polling
         let pollHandle = ProgressPoller(session: session, callback: progress)
@@ -257,7 +296,9 @@ enum CompositeExporter {
         case .completed:
             progress(1.0)
         case .failed:
-            throw CompositeExportError.exportFailed(session.error?.localizedDescription ?? "unknown")
+            throw CompositeExportError.exportFailed(
+                (session.error?.localizedDescription ?? "unknown")
+                    + interruptedHint(session.error))
         case .cancelled:
             throw CompositeExportError.exportFailed("cancelled")
         default:

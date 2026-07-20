@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import Photos
+import UIKit
 
 /// State + orchestration for the Replay screen.
 ///
@@ -787,6 +788,10 @@ final class ReplayViewModel {
         lastExportedPath = nil
         savedToPhotos = false
         error = nil
+        // Screen auto-lock mid-export revokes the hardware encoder
+        // (AVError -11847) — keep the screen awake for the duration.
+        UIApplication.shared.isIdleTimerDisabled = true
+        defer { UIApplication.shared.isIdleTimerDisabled = false }
 
         do {
             try await CompositeExporter.export(inputs, to: outURL) { p in
