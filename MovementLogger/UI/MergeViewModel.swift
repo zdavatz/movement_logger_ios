@@ -28,11 +28,16 @@ final class MergeViewModel {
         /// chronological sort, the title card, and the panel alignment.
         let startMs: Int64
         let hasCreation: Bool
+        var isLandscape: Bool {
+            meta.displayedSize.width > meta.displayedSize.height
+        }
     }
 
     // ----- Public state -------------------------------------------------------
 
     var clips: [Clip] = []
+    /// Landscape picks, kept out of the merge — see `addClips`.
+    var skippedClips: [Clip] = []
     var loadingClips: Bool = false
     /// Photo-library import progress ("Loading videos… N/M"): copying the
     /// picked movies out of the library takes seconds per clip, so the
@@ -102,18 +107,38 @@ final class MergeViewModel {
                 continue
             }
             seen.insert(key)
-            clips.append(Clip(
+            let clip = Clip(
                 url: url, meta: meta, startMs: start,
                 hasCreation: meta.creationTimeMillis != nil
-            ))
+            )
+            // PORTRAIT ONLY. The merge canvas is the UNION of every clip's
+            // displayed size — max width by max height — so a single
+            // landscape clip among portrait ones turns a 1080×1920 canvas
+            // into a 1920×1920 square: 78 % more pixels in every frame,
+            // bars on all of them, and a far heavier export (a mixed
+            // 30-clip merge failed where an all-portrait 50-clip merge
+            // succeeded). Landscape picks are held aside, not deleted, and
+            // listed so the user can see exactly what was left out.
+            if clip.isLandscape {
+                skippedClips.append(clip)
+            } else {
+                clips.append(clip)
+            }
         }
         // Chronological by capture time — pick order is irrelevant.
         clips.sort { $0.startMs < $1.startMs }
+        skippedClips.sort { $0.startMs < $1.startMs }
         loadingClips = false
     }
 
     private static func clipKey(_ startMs: Int64, _ durationMs: Int64) -> String {
         "\(startMs)|\(durationMs)"
+    }
+
+    @MainActor
+    func removeSkipped(_ clip: Clip) {
+        skippedClips.removeAll { $0.id == clip.id }
+        Self.deleteTempCopy(clip.url)
     }
 
     @MainActor
@@ -124,8 +149,9 @@ final class MergeViewModel {
 
     @MainActor
     func clearClips() {
-        for c in clips { Self.deleteTempCopy(c.url) }
+        for c in clips + skippedClips { Self.deleteTempCopy(c.url) }
         clips = []
+        skippedClips = []
     }
 
     /// PhotosPicker imports live in the app's tmp dir (`VideoFile`
@@ -135,6 +161,21 @@ final class MergeViewModel {
         let tmp = FileManager.default.temporaryDirectory.standardizedFileURL.path
         if url.standardizedFileURL.path.hasPrefix(tmp) {
             try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// Delete every video file in the app's tmp dir. Called once at cold
+    /// launch (before any picker can run): the only videos tmp ever holds
+    /// are PhotosPicker import copies and the outro anchor, and none of
+    /// them can be in use before a scene exists — anything found is a leak
+    /// from a force-quit or a killed import.
+    static func sweepTmpVideos() {
+        let tmp = FileManager.default.temporaryDirectory
+        let exts: Set<String> = ["mov", "mp4", "m4v"]
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: tmp, includingPropertiesForKeys: nil)) ?? []
+        for f in files where exts.contains(f.pathExtension.lowercased()) {
+            try? FileManager.default.removeItem(at: f)
         }
     }
 
@@ -487,6 +528,19 @@ final class MergeViewModel {
 /// write, no UI — and prints the detailed result to stdout. Lets
 /// `simctl launch --console-pty` reproduce an export failure and capture
 /// the REAL NSError chain without driving the picker UI.
+/// Print-throttle for the self-test's progress callback (which fires every
+/// 100 ms): emit a line only when the percentage advances by ≥5, so a
+/// failure's position on the timeline is visible without flooding the log.
+/// A class because the callback is an escaping @Sendable closure.
+final class Pct: @unchecked Sendable {
+    private var last = -5
+    func shouldPrint(_ pct: Int) -> Bool {
+        guard pct >= last + 5 else { return false }
+        last = pct
+        return true
+    }
+}
+
 enum MergeSelfTest {
 
     static func runIfRequested() {
@@ -559,9 +613,10 @@ enum MergeSelfTest {
         let out = docs.appendingPathComponent("merged_selftest.mov")
         let t0 = Date()
         do {
+            let lastPct = Pct()
             try await MergeExporter.export(clips: specs, panelKinds: [], to: out) { p in
                 let pct = Int(p * 100)
-                if pct % 25 == 0 { print("[selftest] progress \(pct)%") }
+                if lastPct.shouldPrint(pct) { print("[selftest] progress \(pct)%") }
             }
             let asset = AVURLAsset(url: out)
             let durS = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? -1

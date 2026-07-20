@@ -88,8 +88,8 @@ enum MergeExporter {
         progress(0.001)
 
         // Diagnostic knobs (env MERGE_DEBUG, comma-separated:
-        // noaudio,noca,nogaps,nooutro,novc,nosdr) — used by the headless
-        // `MERGE_SELFTEST` harness to bisect export failures by layer.
+        // noaudio,noca,nogaps,nooutro,novc,nosdr,nofreeze) — used by the
+        // headless `MERGE_SELFTEST` harness to bisect export failures.
         // Notably `noca` (skip the CoreAnimation overlay tool) is what makes
         // the merge verifiable on a SIMULATOR at all: the sim's offline CA
         // render (GLES + IOSurface xpc shmem) crashes on real layer trees —
@@ -180,17 +180,69 @@ enum MergeExporter {
             /// End of the post-clip last-frame freeze (== clipEnd when the
             /// freeze is disabled by a diagnostic knob).
             let freezeEnd: CMTime
+            /// Displayed size of the freeze segment's own video, when the
+            /// freeze was inserted as real media (nil = no freeze media, the
+            /// segment stays plain black).
+            let freezeSize: CGSize?
+            /// Whether the title card was inserted as real media (false =
+            /// the segment is an empty black edit, no layer instruction).
+            let titleHasMedia: Bool
         }
         let titleDur = CMTime(value: Int64(titleS * 1000), timescale: 1000)
         let freezeDur = CMTime(value: Int64(freezeS * 1000), timescale: 1000)
         var cursor = CMTime.zero
         var audioCursor = CMTime.zero
 
-        // "MovementLogger" gradient intro — a leading empty (black) edit;
-        // the lettering itself is a CALayer gated to [0, introS].
+        // Generated stills (intro card, title cards, freeze frames, outro),
+        // retained for the whole export — AVAssetTrack.asset is a WEAK
+        // reference, the same trap as the source clips — and deleted from
+        // tmp once the export returns.
+        //
+        // Why these are MEDIA and not CALayers: every layer's `contents`
+        // stays resident in the offline CoreAnimation renderer for the
+        // entire export, and its per-frame cost scales with them. Bisected
+        // on device with MERGE_SELFTEST over 30 clips (a 441 s film): the
+        // full layer tree died at 25 % with -11847 ← -16101 ("Operation
+        // Interrupted"), dropping the freeze layers moved it to 80 %, and
+        // both `noca` (no animation tool) and `nogaps` (empty tree)
+        // exported cleanly. So the overlays are rendered into short
+        // two-frame H.264 segments instead, which lets a plain merge run
+        // with NO animation tool at all — the configuration proven to
+        // survive any length.
+        var stillAssets: [AVURLAsset] = []
+        defer {
+            withExtendedLifetime(stillAssets) {}
+            for a in stillAssets { try? FileManager.default.removeItem(at: a.url) }
+        }
+        /// Insert a generated still as real media at `at`, returning false
+        /// when it couldn't be made (caller falls back to an empty edit).
+        let videoRegion = CGSize(width: videoW, height: videoH)
+        func insertStill(
+            _ image: CGImage?, at: CMTime, duration: CMTime, name: String
+        ) async -> Bool {
+            guard let still = try? await makeStillAsset(
+                    image: image, size: videoRegion,
+                    durationS: CMTimeGetSeconds(duration), filename: name),
+                  let track = try? await still.loadTracks(withMediaType: .video).first,
+                  ((try? compVideo.insertTimeRange(
+                      CMTimeRange(start: .zero, duration: duration),
+                      of: track, at: at)) != nil)
+            else { return false }
+            stillAssets.append(still)
+            return true
+        }
+
+        // "MovementLogger" gradient intro.
+        var introHasMedia = false
         if introS > 0 {
             let introDur = CMTime(value: Int64(introS * 1000), timescale: 1000)
-            compVideo.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: introDur))
+            introHasMedia = await insertStill(
+                makeIntroImage(size: videoRegion), at: .zero,
+                duration: introDur, name: "merge_intro.mov")
+            if !introHasMedia {
+                compVideo.insertEmptyTimeRange(
+                    CMTimeRange(start: .zero, duration: introDur))
+            }
             cursor = introDur
         }
         let introEnd = cursor
@@ -199,8 +251,16 @@ enum MergeExporter {
         for l in loaded {
             let titleStart = cursor
             let clipStart = CMTimeAdd(titleStart, titleDur)
+            var titleHasMedia = false
             if titleS > 0 {
-                compVideo.insertEmptyTimeRange(CMTimeRange(start: titleStart, duration: titleDur))
+                titleHasMedia = await insertStill(
+                    makeTitleImage(startEpochMs: l.spec.startEpochMs, size: videoRegion),
+                    at: titleStart, duration: titleDur,
+                    name: "merge_title_\(segments.count).mov")
+                if !titleHasMedia {
+                    compVideo.insertEmptyTimeRange(
+                        CMTimeRange(start: titleStart, duration: titleDur))
+                }
             }
             try compVideo.insertTimeRange(
                 CMTimeRange(start: .zero, duration: l.duration),
@@ -229,18 +289,51 @@ enum MergeExporter {
                     audioCursor = CMTimeAdd(clipStart, aDur)
                 }
             }
-            // Post-clip freeze: an empty (black) edit — the held last frame
-            // is a CALayer fading 1 → 0 across it. Mid-timeline empty edits
-            // are preserved (only TRAILING ones get dropped, and the last
-            // freeze is followed by the outro anchor segment).
+            // Post-clip freeze: the clip's last frame, held and faded to
+            // black. This is REAL MEDIA (a 2-frame H.264 still written to
+            // tmp), not a CALayer holding the bitmap — the offline
+            // CoreAnimation renderer keeps every layer's contents resident
+            // for the whole export, so N full-region freeze bitmaps grow
+            // without bound and iOS kills the export with -11847 ← -16101
+            // ("Operation Interrupted"). Bisected on device with
+            // MERGE_SELFTEST: 30 clips died at 25 %, and at 80 % with the
+            // freeze layers removed — memory pressure, not a structural
+            // fault. As media the frames stream off disk and the fade
+            // becomes a native opacity ramp on the layer instruction.
             let freezeEnd = freezeS > 0 ? CMTimeAdd(clipEnd, freezeDur) : clipEnd
-            if freezeS > 0 {
+            var freezeSize: CGSize? = nil
+            if freezeS > 0, !dbg.contains("nofreeze") {
+                let fit = min(videoW / max(l.displayedW, 1),
+                              videoH / max(l.displayedH, 1))
+                let size = CGSize(width: evenDown(l.displayedW * fit),
+                                  height: evenDown(l.displayedH * fit))
+                if let frame = await lastFrameImage(
+                       asset: l.asset, duration: l.duration, maxSize: size),
+                   let still = try? await makeStillAsset(
+                       image: frame, size: size, durationS: freezeS,
+                       filename: "merge_freeze_\(segments.count).mov"),
+                   let stillTrack = try? await still.loadTracks(
+                       withMediaType: .video).first,
+                   (try? compVideo.insertTimeRange(
+                       CMTimeRange(start: .zero, duration: freezeDur),
+                       of: stillTrack, at: clipEnd)) != nil {
+                    stillAssets.append(still)
+                    freezeSize = size
+                }
+            }
+            // No freeze media (extraction/encode failed, or the knob is
+            // set): fall back to the empty black edit the fade used to sit
+            // on. Mid-timeline empty edits are preserved — only TRAILING
+            // ones get dropped, and the last freeze is followed by the
+            // outro anchor.
+            if freezeS > 0, freezeSize == nil {
                 compVideo.insertEmptyTimeRange(
                     CMTimeRange(start: clipEnd, end: freezeEnd))
             }
             segments.append(Segment(
                 loaded: l, titleStart: titleStart, clipStart: clipStart,
-                clipEnd: clipEnd, freezeEnd: freezeEnd))
+                clipEnd: clipEnd, freezeEnd: freezeEnd, freezeSize: freezeSize,
+                titleHasMedia: titleHasMedia))
             cursor = freezeEnd
         }
 
@@ -250,29 +343,20 @@ enum MergeExporter {
         // end at the last clip (verified: 95.1 s instead of 100.1 s).
         // Freezing a frame of the last clip across the outro was tried and
         // is codec-dependent (a scaled 10-bit HEVC sample silently
-        // truncated the export at the last clip). The timeline is instead
-        // anchored with a tiny SYNTHESIZED black clip (AVAssetWriter,
-        // 64×64 H.264) — never rendered: the outro instruction has no
-        // layer instruction for the track, so the output is the black
-        // background + logo layer. No clip content is touched.
+        // truncated the export at the last clip). The outro is therefore a
+        // SYNTHESIZED clip with the logo already drawn into it — no clip
+        // content is touched, and no layer is needed to show the logo.
         let outroStart = cursor
-        var outroAnchor: AVURLAsset? = nil
-        defer { withExtendedLifetime(outroAnchor) {} }
+        var outroHasMedia = false
         if outroSecs > 0 {
-            do {
-                let anchor = try await makeBlackAnchorAsset(durationS: outroSecs)
-                guard let anchorTrack = try await anchor.loadTracks(withMediaType: .video).first
-                else { throw MergeExportError.exportFailed("anchor clip has no video track") }
-                let outroDur = CMTime(value: Int64(outroSecs * 1000), timescale: 1000)
-                try compVideo.insertTimeRange(
-                    CMTimeRange(start: .zero, duration: outroDur),
-                    of: anchorTrack, at: outroStart
-                )
-                outroAnchor = anchor   // keep alive through the export
+            let outroDur = CMTime(value: Int64(outroSecs * 1000), timescale: 1000)
+            outroHasMedia = await insertStill(
+                makeOutroImage(size: videoRegion), at: outroStart,
+                duration: outroDur, name: "merge_outro.mov")
+            if outroHasMedia {
                 cursor = CMTimeAdd(outroStart, outroDur)
-            } catch {
-                // No anchor — the film simply ends after the last clip.
             }
+            // No outro media — the film simply ends after the last clip.
         }
 
         let totalDur = cursor
@@ -284,20 +368,33 @@ enum MergeExporter {
         // [title gap][clip][freeze], tiling [0, totalDur] exactly (shared
         // CMTime boundaries).
         var instructions: [AVMutableVideoCompositionInstruction] = []
+        // Card segments (intro / title / outro) are full-video-region
+        // stills written at exactly videoW×videoH, so they need no
+        // transform — an identity layer instruction composites them at the
+        // origin, which IS the video region at the top of the canvas.
+        func cardInstruction(from: CMTime, to: CMTime, hasMedia: Bool)
+            -> AVMutableVideoCompositionInstruction {
+            let inst = AVMutableVideoCompositionInstruction()
+            inst.timeRange = CMTimeRange(start: from, end: to)
+            inst.backgroundColor = UIColor.black.cgColor
+            if hasMedia {
+                let li = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideo)
+                li.setTransform(.identity, at: from)
+                inst.layerInstructions = [li]
+            } else {
+                inst.layerInstructions = []   // just the black background
+            }
+            return inst
+        }
         if introS > 0 {
-            let intro = AVMutableVideoCompositionInstruction()
-            intro.timeRange = CMTimeRange(start: .zero, end: introEnd)
-            intro.backgroundColor = UIColor.black.cgColor
-            intro.layerInstructions = []   // black; lettering is a CALayer
-            instructions.append(intro)
+            instructions.append(cardInstruction(
+                from: .zero, to: introEnd, hasMedia: introHasMedia))
         }
         for seg in segments {
             if titleS > 0 {
-                let gap = AVMutableVideoCompositionInstruction()
-                gap.timeRange = CMTimeRange(start: seg.titleStart, end: seg.clipStart)
-                gap.backgroundColor = UIColor.black.cgColor
-                gap.layerInstructions = []   // just the black background
-                instructions.append(gap)
+                instructions.append(cardInstruction(
+                    from: seg.titleStart, to: seg.clipStart,
+                    hasMedia: seg.titleHasMedia))
             }
 
             let inst = AVMutableVideoCompositionInstruction()
@@ -330,30 +427,46 @@ enum MergeExporter {
             inst.layerInstructions = [li]
             instructions.append(inst)
 
-            // Post-clip freeze region: black background; the held last
-            // frame + its fade are a CALayer gated to this segment.
+            // Post-clip freeze region. With freeze media inserted, the held
+            // frame is composited from the track and faded by a native
+            // opacity ramp; without it the segment is plain black.
             if freezeS > 0 {
                 let freeze = AVMutableVideoCompositionInstruction()
                 freeze.timeRange = CMTimeRange(start: seg.clipEnd, end: seg.freezeEnd)
                 freeze.backgroundColor = UIColor.black.cgColor
-                freeze.layerInstructions = []
+                if let fs = seg.freezeSize {
+                    let fli = AVMutableVideoCompositionLayerInstruction(
+                        assetTrack: compVideo)
+                    // The still is written at its fitted size, so it only
+                    // needs centering in the video region at the top of the
+                    // canvas — no rotation (the frame was extracted upright).
+                    fli.setTransform(CGAffineTransform(
+                        translationX: (videoW - fs.width) / 2,
+                        y: (videoH - fs.height) / 2), at: seg.clipEnd)
+                    fli.setOpacityRamp(
+                        fromStartOpacity: 1.0, toEndOpacity: 0.0,
+                        timeRange: CMTimeRange(start: seg.clipEnd, end: seg.freezeEnd))
+                    freeze.layerInstructions = [fli]
+                } else {
+                    freeze.layerInstructions = []
+                }
                 instructions.append(freeze)
             }
         }
 
-        // Outro instruction: plain black background (the frozen anchor frame
-        // is deliberately NOT given a layer instruction, so it never renders)
-        // — the logo itself is a CALayer opacity-gated to this segment.
+        // Outro instruction: the logo is drawn INTO the outro still, so an
+        // identity layer instruction is all it needs.
         if outroSecs > 0, CMTimeCompare(totalDur, outroStart) > 0 {
-            let outroInst = AVMutableVideoCompositionInstruction()
-            outroInst.timeRange = CMTimeRange(start: outroStart, end: totalDur)
-            outroInst.backgroundColor = UIColor.black.cgColor
-            outroInst.layerInstructions = []
-            instructions.append(outroInst)
+            instructions.append(cardInstruction(
+                from: outroStart, to: totalDur, hasMedia: outroHasMedia))
         }
 
-        // ----- CALayer tree: per-clip title cards + panel stacks, each
-        // opacity-gated to its segment of the film timeline.
+        // ----- CALayer tree: ONLY the per-clip panel stacks. Intro, title
+        // cards, freeze frames and the outro are all real media now — see
+        // the composition loop for why (layer contents stay resident for
+        // the whole export and sink long merges). A plain merge therefore
+        // ends up with an EMPTY tree, and the animation tool is skipped
+        // entirely below.
         let parentLayer = CALayer()
         parentLayer.frame = CGRect(origin: .zero, size: outputSize)
         parentLayer.backgroundColor = UIColor.black.cgColor
@@ -361,61 +474,10 @@ enum MergeExporter {
         videoLayer.frame = parentLayer.frame   // FULL parent — no inner letterbox
         parentLayer.addSublayer(videoLayer)
 
-        // Intro card: "MovementLogger" in the logo gradient, centered,
-        // visible only during the leading intro segment.
-        if introS > 0, let intro = makeIntroLayer(canvasSize: outputSize) {
-            gateOpacity(intro, fromS: 0, toS: introS, totalS: totalS)
-            parentLayer.addSublayer(intro)
-        }
-
         for seg in segments {
-            let titleStartS = CMTimeGetSeconds(seg.titleStart)
             let clipStartS = CMTimeGetSeconds(seg.clipStart)
             let clipEndS = CMTimeGetSeconds(seg.clipEnd)
-            let freezeEndS = CMTimeGetSeconds(seg.freezeEnd)
             let clipDurS = max(clipEndS - clipStartS, 0.001)
-
-            // Post-clip freeze: the clip's LAST FRAME (extracted with
-            // AVAssetImageGenerator — decode-tolerant, unlike composing a
-            // scaled tail sample) held over the freeze segment, fading
-            // 1 → 0 to black. On extraction failure the segment stays
-            // plain black (fade degenerates to a hard cut).
-            if freezeS > 0, freezeEndS > clipEndS,
-               let frame = await lastFrameImage(
-                   asset: seg.loaded.asset, duration: seg.loaded.duration,
-                   maxSize: CGSize(width: videoW, height: videoH)) {
-                let iw = CGFloat(frame.width)
-                let ih = CGFloat(frame.height)
-                if iw > 0, ih > 0 {
-                    let s = min(videoW / iw, videoH / ih)
-                    let w = iw * s
-                    let h = ih * s
-                    let freezeLayer = CALayer()
-                    freezeLayer.contents = frame
-                    freezeLayer.contentsGravity = .resize
-                    freezeLayer.isGeometryFlipped = true
-                    // Y-up parent: the video region is the TOP of the canvas.
-                    freezeLayer.frame = CGRect(
-                        x: (videoW - w) / 2,
-                        y: panelStackH + (videoH - h) / 2,
-                        width: w, height: h
-                    )
-                    fadeOut(freezeLayer, fromS: clipEndS, toS: freezeEndS, totalS: totalS)
-                    parentLayer.addSublayer(freezeLayer)
-                }
-            }
-
-            // Title card: white date over start time, centered on black.
-            // The layer is a TIGHT text strip, not a full-canvas image —
-            // N full-canvas RGBA layers ballooned the offline renderer's
-            // IOSurface usage (a 14-clip merge crashed the simulator's CA
-            // render in xpc_shmem_create) and waste memory on device too.
-            if titleS > 0, let title = makeTitleLayer(
-                startEpochMs: seg.loaded.spec.startEpochMs, canvasSize: outputSize
-            ) {
-                gateOpacity(title, fromS: titleStartS, toS: clipStartS, totalS: totalS)
-                parentLayer.addSublayer(title)
-            }
 
             // Panel stack for this clip (only when sensor data was selected).
             guard !panelKinds.isEmpty, let inputs = seg.loaded.spec.panelInputs else {
@@ -501,33 +563,6 @@ enum MergeExporter {
             parentLayer.addSublayer(container)
         }
 
-        // Logo outro layer: RideLogo centered on black at ~45% of the render
-        // height, visible only during the trailing outro segment.
-        if outroSecs > 0, let logo = UIImage(named: "RideLogo")?.cgImage {
-            let imgW = CGFloat(logo.width)
-            let imgH = CGFloat(logo.height)
-            var h = outputSize.height * outroLogoHeightFrac
-            var w = imgH > 0 ? h * (imgW / imgH) : h
-            if w > outputSize.width * 0.8 {
-                let shrink = outputSize.width * 0.8 / w
-                w *= shrink
-                h *= shrink
-            }
-            let logoLayer = CALayer()
-            logoLayer.contents = logo
-            logoLayer.contentsGravity = .resize
-            logoLayer.frame = CGRect(
-                x: (outputSize.width - w) / 2,
-                y: (outputSize.height - h) / 2,
-                width: w, height: h
-            )
-            gateOpacity(
-                logoLayer,
-                fromS: CMTimeGetSeconds(outroStart), toS: totalS, totalS: totalS
-            )
-            parentLayer.addSublayer(logoLayer)
-        }
-
         // ----- Video composition + export
         let videoComp = AVMutableVideoComposition()
         videoComp.renderSize = outputSize
@@ -543,7 +578,12 @@ enum MergeExporter {
             videoComp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
             videoComp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
         }
-        if !dbg.contains("noca") {
+        // Attach the CoreAnimation tool ONLY when there is something in the
+        // tree (i.e. sensor panels). A plain merge now renders every card
+        // from media, so it skips the tool altogether — the configuration
+        // that survived a 441 s / 30-clip export on device while every
+        // layer-tree variant was interrupted at 25–80 %.
+        if !dbg.contains("noca"), parentLayer.sublayers?.count ?? 0 > 1 {
             videoComp.animationTool = AVVideoCompositionCoreAnimationTool(
                 postProcessingAsVideoLayer: videoLayer, in: parentLayer
             )
@@ -685,10 +725,8 @@ enum MergeExporter {
 
     /// The clip's last frame as an upright CGImage. Tolerant seek (up to
     /// 1 s before the nominal end) so HEVC B-frame tails can't fail it.
-    /// `maxSize` caps the decode to the render region: a freeze frame at
-    /// SOURCE resolution is a ~35 MB bitmap per 4K clip, and a 36-clip
-    /// merge hands the offline CA render server over a gigabyte of layer
-    /// contents — enough for mediaserverd to buckle mid-export.
+    /// `maxSize` caps the decode to the size the freeze is encoded at —
+    /// no point decoding a 4K frame to re-encode it at 1080.
     private static func lastFrameImage(
         asset: AVURLAsset, duration: CMTime, maxSize: CGSize
     ) async -> CGImage? {
@@ -702,32 +740,47 @@ enum MergeExporter {
         return try? await gen.image(at: target).image
     }
 
-    /// Fade `layer` 1 → 0 across [fromS, toS] of the film; hidden outside
-    /// that window. Linear keyframes with a duplicated keyTime at `fromS`
-    /// produce the step 0 → 1 exactly at the freeze start.
-    private static func fadeOut(
-        _ layer: CALayer, fromS: Double, toS: Double, totalS: Double
-    ) {
-        guard totalS > 0, toS > fromS else {
-            layer.opacity = 0
-            return
+    /// Render `draw` over an opaque black frame of `size`. The card images
+    /// (intro / title / outro) are encoded straight into short video
+    /// segments, so they are full frames rather than transparent strips.
+    private static func cardImage(
+        size: CGSize, _ draw: (CGContext) -> Void
+    ) -> CGImage? {
+        guard size.width >= 1, size.height >= 1 else { return nil }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1   // export-only render — avoid the device-scale trap
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.image { ctx in
+            UIColor.black.setFill()
+            ctx.fill(CGRect(origin: .zero, size: size))
+            draw(ctx.cgContext)
+        }.cgImage
+    }
+
+    /// Outro card: the Pump Tsüri logo centered on black at ~45 % of the
+    /// frame height.
+    private static func makeOutroImage(size: CGSize) -> CGImage? {
+        guard let logo = UIImage(named: "RideLogo") else {
+            return cardImage(size: size) { _ in }
         }
-        let f = max(0, min(fromS / totalS, 1))
-        let t = max(f, min(toS / totalS, 1))
-        let anim = CAKeyframeAnimation(keyPath: "opacity")
-        anim.values = [0.0, 0.0, 1.0, 0.0, 0.0]
-        anim.keyTimes = [0, f, f, t, 1].map { NSNumber(value: $0) }
-        anim.duration = totalS
-        anim.beginTime = AVCoreAnimationBeginTimeAtZero
-        anim.fillMode = .both
-        anim.isRemovedOnCompletion = false
-        layer.add(anim, forKey: "freeze-fade")
+        var h = size.height * outroLogoHeightFrac
+        var w = logo.size.height > 0 ? h * (logo.size.width / logo.size.height) : h
+        if w > size.width * 0.8 {
+            let shrink = size.width * 0.8 / w
+            w *= shrink
+            h *= shrink
+        }
+        return cardImage(size: size) { _ in
+            logo.draw(in: CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2,
+                                 width: w, height: h))
+        }
     }
 
     /// Intro lettering: "MovementLogger", bold, centered, sized so the text
-    /// spans ~86% of the render width, each letter colored along the logo
+    /// spans ~86% of the frame width, each letter colored along the logo
     /// gradient (orange → teal → blue → purple, per-letter interpolation).
-    private static func makeIntroLayer(canvasSize: CGSize) -> CALayer? {
+    private static func makeIntroImage(size canvasSize: CGSize) -> CGImage? {
         let text = "MovementLogger"
         func gradientColor(_ t: Double) -> UIColor {
             let clamped = max(0, min(t, 1))
@@ -759,29 +812,10 @@ enum MergeExporter {
                 range: NSRange(location: i, length: 1))
         }
         let textSize = attr.size()
-        let pad: CGFloat = 8
-        let strip = CGSize(
-            width: (textSize.width + 2 * pad).rounded(.up),
-            height: (textSize.height + 2 * pad).rounded(.up)
-        )
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1   // export-only render — avoid the device-scale trap
-        format.opaque = false
-        let renderer = UIGraphicsImageRenderer(size: strip, format: format)
-        let img = renderer.image { _ in
-            attr.draw(at: CGPoint(x: pad, y: pad))
+        return cardImage(size: canvasSize) { _ in
+            attr.draw(at: CGPoint(x: (canvasSize.width - textSize.width) / 2,
+                                  y: (canvasSize.height - textSize.height) / 2))
         }
-        guard let cg = img.cgImage else { return nil }
-        let layer = CALayer()
-        layer.contents = cg
-        layer.contentsGravity = .resize
-        layer.isGeometryFlipped = true
-        layer.frame = CGRect(
-            x: (canvasSize.width - strip.width) / 2,
-            y: (canvasSize.height - strip.height) / 2,
-            width: strip.width, height: strip.height
-        )
-        return layer
     }
 
     /// Show `layer` only during [fromS, toS] of the film via a discrete
@@ -819,14 +853,33 @@ enum MergeExporter {
     /// rendered, so size and codec are irrelevant; what matters is that
     /// every AVFoundation reader handles it.
     private static func makeBlackAnchorAsset(durationS: Double) async throws -> AVURLAsset {
+        try await makeStillAsset(
+            image: nil, size: CGSize(width: 64, height: 64),
+            durationS: durationS, filename: "merge_outro_anchor.mov")
+    }
+
+    /// Write `image` (or black when nil) as a tiny two-frame H.264 clip of
+    /// `durationS` seconds into tmp, and return it as an asset.
+    ///
+    /// Two frames — one at 0 and one near the end — make the track's media
+    /// genuinely span the duration while the decoder simply holds the first
+    /// frame throughout. Used for the outro timeline anchor AND for every
+    /// post-clip freeze: as media the frame streams off disk, whereas a
+    /// CALayer holding the same bitmap stays resident in the offline
+    /// CoreAnimation renderer for the entire export.
+    private static func makeStillAsset(
+        image: CGImage?, size: CGSize, durationS: Double, filename: String
+    ) async throws -> AVURLAsset {
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("merge_outro_anchor.mov")
+            .appendingPathComponent(filename)
         try? FileManager.default.removeItem(at: url)
+        let w = Int(max(size.width.rounded(), 2))
+        let h = Int(max(size.height.rounded(), 2))
         let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: 64,
-            AVVideoHeightKey: 64,
+            AVVideoWidthKey: w,
+            AVVideoHeightKey: h,
         ]
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         input.expectsMediaDataInRealTime = false
@@ -834,27 +887,36 @@ enum MergeExporter {
             assetWriterInput: input,
             sourcePixelBufferAttributes: [
                 kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: 64,
-                kCVPixelBufferHeightKey as String: 64,
+                kCVPixelBufferWidthKey as String: w,
+                kCVPixelBufferHeightKey as String: h,
             ]
         )
         writer.add(input)
         guard writer.startWriting() else {
             throw MergeExportError.exportFailed(
-                "anchor writer: \(writer.error?.localizedDescription ?? "startWriting failed")")
+                "still writer: \(writer.error?.localizedDescription ?? "startWriting failed")")
         }
         writer.startSession(atSourceTime: .zero)
         guard let pool = adaptor.pixelBufferPool else {
-            throw MergeExportError.exportFailed("anchor writer: no pixel buffer pool")
+            throw MergeExportError.exportFailed("still writer: no pixel buffer pool")
         }
         var pbOut: CVPixelBuffer?
         CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pbOut)
         guard let pb = pbOut else {
-            throw MergeExportError.exportFailed("anchor writer: no pixel buffer")
+            throw MergeExportError.exportFailed("still writer: no pixel buffer")
         }
         CVPixelBufferLockBaseAddress(pb, [])
         if let base = CVPixelBufferGetBaseAddress(pb) {
             memset(base, 0, CVPixelBufferGetDataSize(pb))
+            if let image, let ctx = CGContext(
+                data: base, width: w, height: h, bitsPerComponent: 8,
+                bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+                    | CGBitmapInfo.byteOrder32Little.rawValue
+            ) {
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            }
         }
         CVPixelBufferUnlockBaseAddress(pb, [])
         // Two frames: one at 0 and one near the end, so the track's media
@@ -874,18 +936,16 @@ enum MergeExporter {
         await writer.finishWriting()
         guard writer.status == .completed else {
             throw MergeExportError.exportFailed(
-                "anchor writer: \(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")")
+                "still writer: \(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")")
         }
         return AVURLAsset(url: url)
     }
 
-    /// Title card layer: recording date (dd.MM.yyyy) above start time
-    /// (HH:mm:ss), local timezone, white, centered on the (black) canvas.
-    /// The backing image is only as tall as the two text lines — the layer
-    /// is positioned so its content lands dead-center of the canvas.
-    private static func makeTitleLayer(
-        startEpochMs: Int64, canvasSize: CGSize
-    ) -> CALayer? {
+    /// Title card: recording date (dd.MM.yyyy) above start time (HH:mm:ss),
+    /// local timezone, white, centered on black.
+    private static func makeTitleImage(
+        startEpochMs: Int64, size canvasSize: CGSize
+    ) -> CGImage? {
         let date = Date(timeIntervalSince1970: TimeInterval(startEpochMs) / 1000.0)
         let df = DateFormatter()
         df.locale = Locale(identifier: "en_US_POSIX")
@@ -909,40 +969,18 @@ enum MergeExporter {
         let dateSize = (dateText as NSString).size(withAttributes: dateAttrs)
         let timeSize = (timeText as NSString).size(withAttributes: timeAttrs)
         let gap: CGFloat = canvasSize.width * 0.02
-        let pad: CGFloat = 8
-        let stripSize = CGSize(
-            width: canvasSize.width,
-            height: (dateSize.height + gap + timeSize.height + 2 * pad).rounded(.up)
-        )
-
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1   // export-only render — avoid the device-scale trap
-        format.opaque = false
-        let renderer = UIGraphicsImageRenderer(size: stripSize, format: format)
-        let img = renderer.image { _ in
+        let blockH = dateSize.height + gap + timeSize.height
+        let top = (canvasSize.height - blockH) / 2
+        return cardImage(size: canvasSize) { _ in
             (dateText as NSString).draw(
-                at: CGPoint(x: (stripSize.width - dateSize.width) / 2, y: pad),
+                at: CGPoint(x: (canvasSize.width - dateSize.width) / 2, y: top),
                 withAttributes: dateAttrs
             )
             (timeText as NSString).draw(
-                at: CGPoint(
-                    x: (stripSize.width - timeSize.width) / 2,
-                    y: pad + dateSize.height + gap
-                ),
+                at: CGPoint(x: (canvasSize.width - timeSize.width) / 2,
+                            y: top + dateSize.height + gap),
                 withAttributes: timeAttrs
             )
         }
-        guard let cg = img.cgImage else { return nil }
-        let layer = CALayer()
-        layer.contents = cg
-        layer.contentsGravity = .resize
-        layer.isGeometryFlipped = true   // keep top-down text layout
-        layer.frame = CGRect(
-            x: 0,
-            y: (canvasSize.height - stripSize.height) / 2,
-            width: stripSize.width,
-            height: stripSize.height
-        )
-        return layer
     }
 }

@@ -136,46 +136,97 @@ private struct ClipList: View {
                         .disabled(vm.exporting)
                 }
                 ForEach(Array(vm.clips.enumerated()), id: \.element.id) { idx, clip in
-                    HStack {
-                        Text("\(idx + 1).")
-                            .font(.system(size: 13, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(clip.url.lastPathComponent)
-                                .font(.footnote)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            HStack(spacing: 6) {
-                                Text(formatClipStart(clip.startMs))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(formatClipDuration(clip.meta.durationMillis))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                if !clip.hasCreation {
-                                    Text("no capture date — using file date")
-                                        .font(.caption2)
-                                        .foregroundStyle(.orange)
-                                }
-                            }
-                        }
-                        Spacer()
-                        Button {
-                            vm.removeClip(clip)
-                        } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(vm.exporting)
-                    }
-                    .padding(8)
-                    .background(Color(.secondarySystemBackground),
-                                in: RoundedRectangle(cornerRadius: 8))
+                    ClipRow(vm: vm, clip: clip, index: idx + 1, skipped: false)
                 }
                 Text(mergeSummary(vm.clips))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                SkippedClips(vm: vm)
             }
+        }
+    }
+}
+
+/// One clip row. `skipped` rows are landscape picks held out of the merge:
+/// red-tinted, numberless, and with a note saying why.
+private struct ClipRow: View {
+    @Bindable var vm: MergeViewModel
+    let clip: MergeViewModel.Clip
+    let index: Int
+    let skipped: Bool
+
+    var body: some View {
+        HStack {
+            if skipped {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            } else {
+                Text("\(index).")
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(clip.url.lastPathComponent)
+                    .font(.footnote)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(skipped ? Color.red : Color.primary)
+                HStack(spacing: 6) {
+                    Text(formatClipStart(clip.startMs))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(formatClipDuration(clip.meta.durationMillis))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if skipped {
+                        Text("landscape — not merged")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.red)
+                    }
+                    if !clip.hasCreation {
+                        Text("no capture date — using file date")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            Spacer()
+            Button {
+                if skipped { vm.removeSkipped(clip) } else { vm.removeClip(clip) }
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.bordered)
+            .disabled(vm.exporting)
+        }
+        .padding(8)
+        .background(skipped ? Color.red.opacity(0.10)
+                            : Color(.secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// The landscape picks that were left out, with the reason.
+private struct SkippedClips: View {
+    @Bindable var vm: MergeViewModel
+
+    var body: some View {
+        if !vm.skippedClips.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Not merged — landscape (\(vm.skippedClips.count))")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.red)
+                Text("The film is portrait. Mixing in a landscape clip forces a "
+                    + "square canvas, which puts bars on every clip and makes the "
+                    + "export much heavier — so these are left out.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(vm.skippedClips) { clip in
+                    ClipRow(vm: vm, clip: clip, index: 0, skipped: true)
+                }
+            }
+            .padding(.top, 4)
         }
     }
 }

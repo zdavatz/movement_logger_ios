@@ -37,7 +37,14 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         //    watch transfers are picked up even when the app is launched in
         //    the background to receive them.
         _ = WatchRideReceiver.shared
-        // 5) Headless merge-export diagnostic (MERGE_SELFTEST=1 launch env,
+        // 5) Sweep stale picker imports out of tmp. PhotosPicker video
+        //    copies (`<UUID>-<name>.mov`) are deleted when a clip leaves
+        //    the Merge/Replay list, but force-quits and mid-import kills
+        //    leak them — observed: 297 files / ~7 GB reaching back months.
+        //    At cold launch no clip list exists yet, so every video in tmp
+        //    is garbage by definition.
+        MergeViewModel.sweepTmpVideos()
+        // 6) Headless merge-export diagnostic (MERGE_SELFTEST=1 launch env,
         //    same hook family as INITIAL_TAB) — no-op in normal launches.
         MergeSelfTest.runIfRequested()
         return true
