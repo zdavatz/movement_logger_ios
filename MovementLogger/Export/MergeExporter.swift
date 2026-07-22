@@ -4,13 +4,17 @@ import UIKit
 
 /// Merge N clips (chronological order) into one film:
 ///
-///   [MovementLogger intro card 3 s]
+///   [first clip's first frame held 3 s, "MovementLogger" title over it]
 ///   [title card 2.5 s] [clip 1, complete] [last-frame freeze fades out 3 s]
 ///   [title card 2.5 s] [clip 2, complete] [last-frame freeze fades out 3 s] …
 ///   [Pump Tsüri logo outro 5 s]
 ///
-/// The intro card shows "MovementLogger" centered on black, each letter
-/// colored along the logo gradient (orange → teal → blue → purple). Each
+/// The film OPENS on a 3 s freeze of the first clip's first frame with the
+/// "MovementLogger" lettering floating semi-transparently over it (each
+/// letter colored along the logo gradient orange → teal → blue → purple),
+/// so the title reads over the actual footage rather than a black card, then
+/// the film plays. It falls back to lettering on solid black when that frame
+/// can't be extracted. Each
 /// title card is black with the clip's recording date (dd.MM.yyyy) above
 /// its start time (HH:mm:ss), local timezone, white text. Clips are
 /// inserted with their FULL time range — never trimmed ("never cut a
@@ -232,13 +236,33 @@ enum MergeExporter {
             return true
         }
 
-        // "MovementLogger" gradient intro.
+        // "MovementLogger" gradient intro — the lettering floats
+        // semi-transparently over a freeze of the FIRST clip's first frame
+        // (aspect-fit into the video region with a black letterbox, exactly
+        // where clip 1 will play), so the film opens ON the footage with the
+        // title over it instead of a black card, then the clip starts. As a
+        // rendered still it stays MEDIA (no CALayer, no animation tool). If
+        // the frame can't be extracted, `makeIntroImage` falls back to the
+        // lettering on solid black.
         var introHasMedia = false
         if introS > 0 {
             let introDur = CMTime(value: Int64(introS * 1000), timescale: 1000)
+            var introBg: CGImage? = nil
+            var introBgRect = CGRect(origin: .zero, size: videoRegion)
+            if let first = loaded.first {
+                let fit = min(videoW / max(first.displayedW, 1),
+                              videoH / max(first.displayedH, 1))
+                let fw = evenDown(first.displayedW * fit)
+                let fh = evenDown(first.displayedH * fit)
+                introBgRect = CGRect(x: (videoW - fw) / 2, y: (videoH - fh) / 2,
+                                     width: fw, height: fh)
+                introBg = await firstFrameImage(
+                    asset: first.asset, maxSize: CGSize(width: fw, height: fh))
+            }
             introHasMedia = await insertStill(
-                makeIntroImage(size: videoRegion), at: .zero,
-                duration: introDur, name: "merge_intro.mov")
+                makeIntroImage(size: videoRegion, background: introBg,
+                               backgroundRect: introBgRect),
+                at: .zero, duration: introDur, name: "merge_intro.mov")
             if !introHasMedia {
                 compVideo.insertEmptyTimeRange(
                     CMTimeRange(start: .zero, duration: introDur))
@@ -350,9 +374,28 @@ enum MergeExporter {
         var outroHasMedia = false
         if outroSecs > 0 {
             let outroDur = CMTime(value: Int64(outroSecs * 1000), timescale: 1000)
+            // The logo floats semi-transparently over a freeze of the LAST
+            // clip's last frame (same fit as when it played), so the film
+            // closes ON the footage with the logo over it rather than on a
+            // black card. Falls back to logo-on-black if the frame can't be
+            // extracted. Still MEDIA — no CALayer, no animation tool.
+            var outroBg: CGImage? = nil
+            var outroBgRect = CGRect(origin: .zero, size: videoRegion)
+            if let last = loaded.last {
+                let fit = min(videoW / max(last.displayedW, 1),
+                              videoH / max(last.displayedH, 1))
+                let fw = evenDown(last.displayedW * fit)
+                let fh = evenDown(last.displayedH * fit)
+                outroBgRect = CGRect(x: (videoW - fw) / 2, y: (videoH - fh) / 2,
+                                     width: fw, height: fh)
+                outroBg = await lastFrameImage(
+                    asset: last.asset, duration: last.duration,
+                    maxSize: CGSize(width: fw, height: fh))
+            }
             outroHasMedia = await insertStill(
-                makeOutroImage(size: videoRegion), at: outroStart,
-                duration: outroDur, name: "merge_outro.mov")
+                makeOutroImage(size: videoRegion, background: outroBg,
+                               backgroundRect: outroBgRect),
+                at: outroStart, duration: outroDur, name: "merge_outro.mov")
             if outroHasMedia {
                 cursor = CMTimeAdd(outroStart, outroDur)
             }
@@ -723,6 +766,21 @@ enum MergeExporter {
         }
     }
 
+    /// The clip's first frame as an upright CGImage. Tolerant seek (up to
+    /// 1 s after t=0) so a clip opening on a non-keyframe can't fail it.
+    /// `maxSize` caps the decode to the size it will be drawn at — no point
+    /// decoding a 4K frame to composite it behind the intro lettering.
+    private static func firstFrameImage(
+        asset: AVURLAsset, maxSize: CGSize
+    ) async -> CGImage? {
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.maximumSize = maxSize
+        gen.requestedTimeToleranceBefore = .zero
+        gen.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
+        return try? await gen.image(at: .zero).image
+    }
+
     /// The clip's last frame as an upright CGImage. Tolerant seek (up to
     /// 1 s before the nominal end) so HEVC B-frame tails can't fail it.
     /// `maxSize` caps the decode to the size the freeze is encoded at —
@@ -758,30 +816,111 @@ enum MergeExporter {
         }.cgImage
     }
 
-    /// Outro card: the Pump Tsüri logo centered on black at ~45 % of the
-    /// frame height.
-    private static func makeOutroImage(size: CGSize) -> CGImage? {
-        guard let logo = UIImage(named: "RideLogo") else {
-            return cardImage(size: size) { _ in }
+    /// Outro card: the Pump Tsüri foil logo centered at ~45 % of the frame
+    /// height. Uses `clearLogo` (background knocked out) so it composites as
+    /// just the coloured foil — over the last clip's last frame when
+    /// `background` is set, else on solid black. Over footage the foil is
+    /// drawn slightly translucent with a soft shadow so the last image shows
+    /// through while the logo stays legible.
+    private static func makeOutroImage(
+        size: CGSize, background: CGImage?, backgroundRect: CGRect
+    ) -> CGImage? {
+        // Prefer the transparent foil; fall back to the opaque asset only if
+        // the knockout failed (a light box, but better than no logo).
+        let logo = clearLogo ?? UIImage(named: "RideLogo")
+        let logoAlpha: CGFloat = background == nil ? 1.0 : 0.92
+        var w: CGFloat = 0, h: CGFloat = 0
+        if let logo {
+            h = size.height * outroLogoHeightFrac
+            w = logo.size.height > 0 ? h * (logo.size.width / logo.size.height) : h
+            if w > size.width * 0.8 {
+                let shrink = size.width * 0.8 / w
+                w *= shrink
+                h *= shrink
+            }
         }
-        var h = size.height * outroLogoHeightFrac
-        var w = logo.size.height > 0 ? h * (logo.size.width / logo.size.height) : h
-        if w > size.width * 0.8 {
-            let shrink = size.width * 0.8 / w
-            w *= shrink
-            h *= shrink
-        }
-        return cardImage(size: size) { _ in
+        return cardImage(size: size) { cg in
+            if let background {
+                UIImage(cgImage: background).draw(in: backgroundRect)
+            }
+            guard let logo else { return }
+            cg.saveGState()
+            if background != nil {
+                cg.setShadow(offset: .zero, blur: h * 0.05,
+                             color: UIColor.black.withAlphaComponent(0.55).cgColor)
+            }
             logo.draw(in: CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2,
-                                 width: w, height: h))
+                                 width: w, height: h),
+                      blendMode: .normal, alpha: logoAlpha)
+            cg.restoreGState()
         }
+    }
+
+    /// The Pump Tsüri logo with its flat near-white background knocked out to
+    /// transparency, so it composites over footage (or black) as just the
+    /// coloured foil — the raw `RideLogo` asset is an opaque 1024² app-icon
+    /// square, which draws as a light box. Neutral-light pixels are cleared;
+    /// saturated pixels (the foil) and dark neutral pixels (its edges/outline)
+    /// are kept, with a feather so anti-aliased edges stay clean. Computed
+    /// once (a one-shot ~1 MP pixel walk) and cached for the app session.
+    private static let clearLogo: UIImage? = makeClearLogo()
+    private static func makeClearLogo() -> UIImage? {
+        guard let src = UIImage(named: "RideLogo")?.cgImage else { return nil }
+        let w = src.width, h = src.height
+        guard w > 0, h > 0 else { return nil }
+        let bytesPerRow = w * 4
+        var buf = [UInt8](repeating: 0, count: bytesPerRow * h)
+        func smoothstep(_ a: Float, _ b: Float, _ x: Float) -> Float {
+            let t = max(0, min((x - a) / (b - a), 1))
+            return t * t * (3 - 2 * t)
+        }
+        let out: CGImage? = buf.withUnsafeMutableBytes { raw -> CGImage? in
+            guard let base = raw.baseAddress,
+                  let ctx = CGContext(
+                      data: base, width: w, height: h, bitsPerComponent: 8,
+                      bytesPerRow: bytesPerRow, space: CGColorSpaceCreateDeviceRGB(),
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return nil }
+            ctx.draw(src, in: CGRect(x: 0, y: 0, width: w, height: h))
+            let p = base.assumingMemoryBound(to: UInt8.self)
+            let count = bytesPerRow * h
+            var i = 0
+            while i < count {
+                let r = Float(p[i]), g = Float(p[i + 1]), b = Float(p[i + 2])
+                let mx = max(r, max(g, b)), mn = min(r, min(g, b))
+                let chroma = mx - mn
+                // Keep coloured pixels (chroma) OR dark neutral pixels (the
+                // thin outline / shading); clear neutral-light background.
+                let a = max(smoothstep(8, 26, chroma),
+                            1 - smoothstep(205, 240, mx))
+                p[i]     = UInt8((r * a).rounded())
+                p[i + 1] = UInt8((g * a).rounded())
+                p[i + 2] = UInt8((b * a).rounded())
+                p[i + 3] = UInt8((a * 255).rounded())
+                i += 4
+            }
+            return ctx.makeImage()
+        }
+        return out.map { UIImage(cgImage: $0) }
     }
 
     /// Intro lettering: "MovementLogger", bold, centered, sized so the text
     /// spans ~86% of the frame width, each letter colored along the logo
     /// gradient (orange → teal → blue → purple, per-letter interpolation).
-    private static func makeIntroImage(size canvasSize: CGSize) -> CGImage? {
+    ///
+    /// When `background` is supplied it is drawn (into `backgroundRect`, black
+    /// letterbox around it) UNDER the lettering, and the text is rendered
+    /// semi-transparently with a soft dark shadow so the first video frame
+    /// shows through while the title stays legible over arbitrary footage —
+    /// the "title over the first image" opener. With no background it renders
+    /// the lettering fully opaque on solid black (the legacy intro card).
+    private static func makeIntroImage(
+        size canvasSize: CGSize, background: CGImage?, backgroundRect: CGRect
+    ) -> CGImage? {
         let text = "MovementLogger"
+        // Over footage the lettering is translucent so the frame reads
+        // through it; on black it stays fully opaque.
+        let textAlpha: CGFloat = background == nil ? 1.0 : 0.85
         func gradientColor(_ t: Double) -> UIColor {
             let clamped = max(0, min(t, 1))
             let scaled = clamped * Double(introStops.count - 1)
@@ -793,7 +932,7 @@ enum MergeExporter {
                 red: (a.r + (b.r - a.r) * f) / 255.0,
                 green: (a.g + (b.g - a.g) * f) / 255.0,
                 blue: (a.b + (b.b - a.b) * f) / 255.0,
-                alpha: 1
+                alpha: textAlpha
             )
         }
         // Size the font so the rendered string spans ~86% of the width.
@@ -802,8 +941,14 @@ enum MergeExporter {
         guard refW > 0 else { return nil }
         let fontSize = 100.0 * canvasSize.width * 0.86 / refW
         let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+        // Soft shadow keeps the translucent lettering readable over bright or
+        // busy footage (a no-op on the solid-black fallback).
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.7)
+        shadow.shadowBlurRadius = fontSize * 0.08
+        shadow.shadowOffset = .zero
         let attr = NSMutableAttributedString(
-            string: text, attributes: [.font: font])
+            string: text, attributes: [.font: font, .shadow: shadow])
         let n = text.count
         for i in 0..<n {
             let t = n > 1 ? Double(i) / Double(n - 1) : 0
@@ -813,6 +958,9 @@ enum MergeExporter {
         }
         let textSize = attr.size()
         return cardImage(size: canvasSize) { _ in
+            if let background {
+                UIImage(cgImage: background).draw(in: backgroundRect)
+            }
             attr.draw(at: CGPoint(x: (canvasSize.width - textSize.width) / 2,
                                   y: (canvasSize.height - textSize.height) / 2))
         }
