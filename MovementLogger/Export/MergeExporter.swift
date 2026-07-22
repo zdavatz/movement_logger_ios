@@ -6,15 +6,20 @@ import UIKit
 ///
 ///   [first clip's first frame held 3 s, "MovementLogger" title over it]
 ///   [title card 2.5 s] [clip 1, complete] [last-frame freeze fades out 3 s]
-///   [title card 2.5 s] [clip 2, complete] [last-frame freeze fades out 3 s] …
-///   [Pump Tsüri logo outro 5 s]
+///   [title card 2.5 s] [clip N, complete]
+///   [last frame + Pump Tsüri logo, fading out 3 s]
 ///
 /// The film OPENS on a 3 s freeze of the first clip's first frame with the
 /// "MovementLogger" lettering floating semi-transparently over it (each
 /// letter colored along the logo gradient orange → teal → blue → purple),
 /// so the title reads over the actual footage rather than a black card, then
 /// the film plays. It falls back to lettering on solid black when that frame
-/// can't be extracted. Each
+/// can't be extracted. It CLOSES on the last clip's own fade-out freeze with
+/// the Pump Tsüri logo baked onto that frame — the last image and the logo
+/// fade to black together, rather than a separate logo card tacked on after
+/// (which read as a black-then-reappear pop). A 5 s logo-on-black outro
+/// remains only as a fallback when the last clip's freeze can't be rendered.
+/// Each
 /// title card is black with the clip's recording date (dd.MM.yyyy) above
 /// its start time (HH:mm:ss), local timezone, white text. Clips are
 /// inserted with their FULL time range — never trimmed ("never cut a
@@ -196,6 +201,10 @@ enum MergeExporter {
         let freezeDur = CMTime(value: Int64(freezeS * 1000), timescale: 1000)
         var cursor = CMTime.zero
         var audioCursor = CMTime.zero
+        // Set once the last clip's fade-out freeze got the logo baked onto it,
+        // so the separate logo outro below is skipped (it's only a fallback
+        // for when that freeze couldn't be rendered).
+        var endLogoBaked = false
 
         // Generated stills (intro card, title cards, freeze frames, outro),
         // retained for the whole export — AVAssetTrack.asset is a WEAK
@@ -324,6 +333,7 @@ enum MergeExporter {
             // freeze layers removed — memory pressure, not a structural
             // fault. As media the frames stream off disk and the fade
             // becomes a native opacity ramp on the layer instruction.
+            let isLastClip = segments.count == loaded.count - 1
             let freezeEnd = freezeS > 0 ? CMTimeAdd(clipEnd, freezeDur) : clipEnd
             var freezeSize: CGSize? = nil
             if freezeS > 0, !dbg.contains("nofreeze") {
@@ -331,18 +341,30 @@ enum MergeExporter {
                               videoH / max(l.displayedH, 1))
                 let size = CGSize(width: evenDown(l.displayedW * fit),
                                   height: evenDown(l.displayedH * fit))
-                if let frame = await lastFrameImage(
-                       asset: l.asset, duration: l.duration, maxSize: size),
-                   let still = try? await makeStillAsset(
-                       image: frame, size: size, durationS: freezeS,
-                       filename: "merge_freeze_\(segments.count).mov"),
-                   let stillTrack = try? await still.loadTracks(
-                       withMediaType: .video).first,
-                   (try? compVideo.insertTimeRange(
-                       CMTimeRange(start: .zero, duration: freezeDur),
-                       of: stillTrack, at: clipEnd)) != nil {
-                    stillAssets.append(still)
-                    freezeSize = size
+                if let frame0 = await lastFrameImage(
+                       asset: l.asset, duration: l.duration, maxSize: size) {
+                    // On the LAST clip, bake the Pump Tsüri logo onto the
+                    // frozen last frame so the film ends on the footage with
+                    // the logo over it — both fade to black together via this
+                    // freeze's opacity ramp (no separate outro card).
+                    var frame = frame0
+                    var baked = false
+                    if isLastClip, let withLogo = frameWithLogo(frame0, size: size) {
+                        frame = withLogo
+                        baked = true
+                    }
+                    if let still = try? await makeStillAsset(
+                           image: frame, size: size, durationS: freezeS,
+                           filename: "merge_freeze_\(segments.count).mov"),
+                       let stillTrack = try? await still.loadTracks(
+                           withMediaType: .video).first,
+                       (try? compVideo.insertTimeRange(
+                           CMTimeRange(start: .zero, duration: freezeDur),
+                           of: stillTrack, at: clipEnd)) != nil {
+                        stillAssets.append(still)
+                        freezeSize = size
+                        if baked { endLogoBaked = true }
+                    }
                 }
             }
             // No freeze media (extraction/encode failed, or the knob is
@@ -372,13 +394,13 @@ enum MergeExporter {
         // content is touched, and no layer is needed to show the logo.
         let outroStart = cursor
         var outroHasMedia = false
-        if outroSecs > 0 {
+        // Only a FALLBACK now: the logo normally rides the last clip's own
+        // fade-out freeze (see `endLogoBaked`). This separate outro segment
+        // runs only when that freeze couldn't be rendered, so the film still
+        // ends on a logo — over the last frame when it can be extracted, else
+        // logo-on-black.
+        if outroSecs > 0, !endLogoBaked {
             let outroDur = CMTime(value: Int64(outroSecs * 1000), timescale: 1000)
-            // The logo floats semi-transparently over a freeze of the LAST
-            // clip's last frame (same fit as when it played), so the film
-            // closes ON the footage with the logo over it rather than on a
-            // black card. Falls back to logo-on-black if the frame can't be
-            // extracted. Still MEDIA — no CALayer, no animation tool.
             var outroBg: CGImage? = nil
             var outroBgRect = CGRect(origin: .zero, size: videoRegion)
             if let last = loaded.last {
@@ -854,6 +876,37 @@ enum MergeExporter {
                       blendMode: .normal, alpha: logoAlpha)
             cg.restoreGState()
         }
+    }
+
+    /// Composite the transparent foil logo (`clearLogo`) centered on `frame`
+    /// at ~45 % of its height, semi-transparent with a soft shadow. Used for
+    /// the LAST clip's fade-out freeze so the film ends on the footage with
+    /// the logo over it, both fading to black together. Returns `frame`
+    /// unchanged (via a redraw) if the knockout logo is unavailable.
+    private static func frameWithLogo(_ frame: CGImage, size: CGSize) -> CGImage? {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1   // export-only render — avoid the device-scale trap
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.image { ctx in
+            UIImage(cgImage: frame).draw(in: CGRect(origin: .zero, size: size))
+            guard let logo = clearLogo else { return }
+            var h = size.height * outroLogoHeightFrac
+            var w = logo.size.height > 0 ? h * (logo.size.width / logo.size.height) : h
+            if w > size.width * 0.8 {
+                let shrink = size.width * 0.8 / w
+                w *= shrink
+                h *= shrink
+            }
+            let cg = ctx.cgContext
+            cg.saveGState()
+            cg.setShadow(offset: .zero, blur: h * 0.05,
+                         color: UIColor.black.withAlphaComponent(0.55).cgColor)
+            logo.draw(in: CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2,
+                                 width: w, height: h),
+                      blendMode: .normal, alpha: 0.92)
+            cg.restoreGState()
+        }.cgImage
     }
 
     /// The Pump Tsüri logo with its flat near-white background knocked out to

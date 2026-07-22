@@ -261,15 +261,19 @@ helpers, opacity-gated per segment).
   since a portrait iPhone clip reports 1920×1080 with the rotation in its
   transform) routes landscape picks into a separate red "Not merged" section
   in `MergeScreen`; only portrait clips reach `clips` and the exporter.
-- **Intro over the first frame / outro over the last frame (v1.0.43).** The
+- **Intro over the first frame / logo on the last fade-out (v1.0.43).** The
   film opens on a 3 s freeze of the **first clip's first frame**
   (`firstFrameImage`) with the gradient "MovementLogger" lettering composited
-  semi-transparently (0.85 α + soft shadow) over it, and closes on a freeze of
-  the **last clip's last frame** (`lastFrameImage`) with the foil logo over it
-  — both still rendered as media stills, so the empty-layer-tree property is
-  preserved. Each background frame is aspect-fit into the exact video region
-  (same fit as when the clip plays), so the frozen frame lines up with the
-  first/last playing frame.
+  semi-transparently (0.85 α + soft shadow) over it. It closes on the **last
+  clip's own fade-out freeze** with the foil logo baked onto that frame
+  (`frameWithLogo`), so the last image and the logo fade to black together via
+  the freeze's opacity ramp — NOT a separate outro segment (that read as a
+  black-then-reappear pop, which is what the user rejected). `endLogoBaked`
+  gates the old logo-on-black outro down to a fallback for when the last
+  freeze can't be rendered. Both intro and freeze stay media stills, so the
+  empty-layer-tree property is preserved. The intro's background frame is
+  aspect-fit into the exact video region (same fit as when the clip plays), so
+  the frozen frame lines up with the first playing frame.
 - **The logo has no alpha — knock it out at runtime.** `RideLogo` is the
   opaque 1024² app-icon (foil on a flat near-white background); drawn over
   footage it's a light box. `clearLogo` (a cached one-shot ~1 MP pixel walk in
