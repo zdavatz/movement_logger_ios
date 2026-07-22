@@ -103,6 +103,26 @@ enum FileSyncProtocol {
     /// silently ignores 0x14.
     static let opCalSet: UInt8 = 0x14
 
+    // --- BT-off GPS A/B test (firmware v0.0.57+, issue #10) -------------------
+    //
+    // "Does the BLE radio degrade GPS reception?" BLE_QUIET arms a timed window
+    // in which the box records ~3 s of BT-on pre-samples, disconnects, holds
+    // its BLE chip in hardware reset (radio provably silent) for the requested
+    // duration while sampling its GPS RF metrics at 1 Hz — also into the box
+    // ERRLOG as `gps_rfq:` lines — then re-inits + re-advertises. The phone
+    // auto-reconnects and fetches the recording; the BT-on vs BT-off C/N0
+    // delta is the verdict.
+    /// BLE_QUIET `[dur_s:u16-LE]` — arm the window (clamped 5–120 s on the
+    /// box). Replies one status byte (0x00 armed / 0xB0 busy), then the box
+    /// disconnects ~3 s later. Legacy firmware (< v0.0.57) never replies.
+    static let opBleQuiet: UInt8 = 0x15
+    /// BLE_QUIET_RESULT (no payload) — fetch the recorded window after the
+    /// reconnect: one 8-byte header (`'Q'`, version, sample_size, count
+    /// u16-LE, dur_s u16-LE, reserved), then `count` samples of `sample_size`
+    /// bytes packed into MTU-sized notifies. 0xB0 while the window (incl. its
+    /// ~5 s post phase) still runs.
+    static let opBleQuietResult: UInt8 = 0x16
+
     // Status bytes returned in single-byte FileData notifies.
     static let statusOK: UInt8 = 0x00
     static let statusBusy: UInt8 = 0xB0
@@ -212,6 +232,55 @@ enum BleCmd {
     /// the receiver mirrors it as authoritative without a second GET
     /// round-trip). Firmware v0.0.37+.
     case setCalibration(blob: Data)
+    /// BLE_QUIET (0x15) — arm the box's BT-off GPS A/B window for
+    /// `durationSeconds`. The box ACKs with a status byte (→ `.quietArmed`),
+    /// then disconnects; the client auto-reconnects once the box's radio is
+    /// back and fetches the recording with `fetchQuietResult`. Legacy
+    /// firmware (< v0.0.57) never replies → the op times out and emits
+    /// `.quietResult(durS: 0, samples: nil)`.
+    case bleQuiet(durationSeconds: Int)
+    /// BLE_QUIET_RESULT (0x16) — fetch the recorded RF samples after the
+    /// reconnect. Reply arrives as `.quietResult`.
+    case fetchQuietResult
+}
+
+/// One 1 Hz RF sample from the box's BT-off window (16 B on the wire, field
+/// order pinned in firmware DESIGN.md §"BLE quiet window"). `phase`: 0 = BT
+/// on (pre), 1 = BT off, 2 = BT back on (post). `avg6X10` = mean C/N0 of the
+/// 6 strongest GPS+Galileo satellites ×10 (0 = no data); `rfFresh` = the
+/// MON-RF EMI fields (noise/agc/jam/ant) had a reply within 15 s.
+struct QuietSample {
+    let phase: Int
+    let tS: Int
+    let fixType: Int
+    let usedSv: Int
+    let avg6X10: Int
+    let min6: Int
+    let max6: Int
+    let noise: Int
+    let agc: Int
+    let jamInd: Int
+    let jamState: Int
+    let antStatus: Int
+    let rfFresh: Bool
+
+    static let wireSize = 16
+
+    /// Parse one sample at byte offset `off`; the caller strides by the
+    /// box-declared sample size (≥ `wireSize`) so future firmware may grow
+    /// the record without breaking this parser.
+    static func parse(_ b: [UInt8], at off: Int) -> QuietSample? {
+        guard off + wireSize <= b.count else { return nil }
+        func u8(_ i: Int) -> Int { Int(b[off + i]) }
+        func u16(_ i: Int) -> Int { u8(i) | (u8(i + 1) << 8) }
+        return QuietSample(
+            phase: u8(0), tS: u8(1), fixType: u8(2), usedSv: u8(3),
+            avg6X10: u16(4), min6: u8(6), max6: u8(7),
+            noise: u16(8), agc: u16(10),
+            jamInd: u8(12), jamState: u8(13), antStatus: u8(14),
+            rfFresh: u8(15) != 0
+        )
+    }
 }
 
 enum BleEvent {
@@ -285,4 +354,14 @@ enum BleEvent {
     /// `nil` = legacy firmware / GET timed out — the receiver keeps its local
     /// `AgentConfig`.
     case calibration(Data?)
+    /// The box accepted BLE_QUIET (0x15) and goes radio-silent for
+    /// `durationSeconds` after ~3 s of pre-samples. The disconnect that
+    /// follows is expected — the client auto-reconnects once the box's chip
+    /// re-inits.
+    case quietArmed(durationSeconds: Int)
+    /// The BT-off window recording, from a BLE_QUIET_RESULT (0x16) reply.
+    /// `samples == nil` = the fetch failed (op timeout / legacy firmware /
+    /// link drop) — the `gps_rfq:` lines in the box ERRLOG still carry the
+    /// data. An empty array is a valid "window recorded nothing" reply.
+    case quietResult(durationSeconds: Int, samples: [QuietSample]?)
 }

@@ -256,7 +256,7 @@ final class BleClient: NSObject {
         // never wait — only the FileCmd ops the box would otherwise drop.
         switch cmd {
         case .list, .read, .delete, .setLogMode, .getLogMode, .setGpsPower, .getGpsPower,
-             .getCalibration, .setCalibration:
+             .getCalibration, .setCalibration, .bleQuiet, .fetchQuietResult:
             await awaitCmdSettle()
         default: break
         }
@@ -287,6 +287,8 @@ final class BleClient: NSObject {
         case .getGpsPower: sendGetGpsPower()
         case .getCalibration: sendGetCalibration()
         case .setCalibration(let blob): sendSetCalibration(blob: blob)
+        case .bleQuiet(let durS): sendBleQuiet(durationSeconds: durS)
+        case .fetchQuietResult: sendFetchQuietResult()
         }
     }
 
@@ -368,6 +370,17 @@ final class BleClient: NSObject {
             // desktop's mid-query FirmwareVersion(None) path). Not an error —
             // a lost link during the connect-time probe is benign.
             emit(.firmwareVersion(nil))
+        case .quietArm(let durS, _):
+            // The box disconnects ~3 s after an ACCEPTED 0x15 — if its status
+            // notify was eaten by ACL congestion, this disconnect IS the arm
+            // confirmation. Promote to `.quietArmed` instead of failing; the
+            // ANY-drop auto-reconnect rides back in once the box's chip
+            // re-inits.
+            emit(.quietArmed(durationSeconds: durS))
+            emitStatus("BT-off window running (status notify lost) — auto-reconnecting after")
+        case .quietFetch:
+            emitErr("BT-off result fetch aborted by disconnect")
+            emit(.quietResult(durationSeconds: 0, samples: nil))
         case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
             // A disconnect during COMMIT is the EXPECTED success path: the
             // box swaps banks + resets, dropping the link within ~200 ms.
@@ -577,6 +590,44 @@ final class BleClient: NSObject {
         let mask = blob.count >= 2 ? blob[blob.startIndex + 1] : 0
         emitStatus(String(format: "CAL_SET sent (mask=0x%02X)", mask))
         op = .calibrationReq(isSet: true, blob: blob, lastProgress: now())
+    }
+
+    /// BLE_QUIET (0x15 + dur_s u16-LE). Arm the box's BT-off GPS A/B window.
+    /// The box replies one status byte (handled by `handleQuietArmNotify`),
+    /// then disconnects ~3 s later — the ANY-drop auto-reconnect (see
+    /// `handleRaw(.disconnected)`) rides the pending connect back in once the
+    /// box's chip re-inits. Legacy firmware (< v0.0.57) never replies → the
+    /// watchdog emits `.quietResult(durationSeconds: 0, samples: nil)`.
+    private func sendBleQuiet(durationSeconds: Int) {
+        if case .idle = op {} else {
+            emitErr("BT-off test rejected — another op in flight")
+            emit(.quietResult(durationSeconds: 0, samples: nil))
+            return
+        }
+        let d = min(max(durationSeconds, 5), 120)
+        let payload = Data([FileSyncProtocol.opBleQuiet,
+                            UInt8(d & 0xFF), UInt8((d >> 8) & 0xFF)])
+        if !writeCmdBytes(payload) {
+            emit(.quietResult(durationSeconds: 0, samples: nil))
+            return
+        }
+        op = .quietArm(durS: d, lastProgress: now())
+    }
+
+    /// BLE_QUIET_RESULT (0x16). Fetch the recorded window after the
+    /// reconnect; `handleQuietFetchNotify` reassembles header + samples.
+    private func sendFetchQuietResult() {
+        if case .idle = op {} else {
+            emitErr("BT-off result fetch rejected — another op in flight")
+            emit(.quietResult(durationSeconds: 0, samples: nil))
+            return
+        }
+        if !writeCmdBytes(Data([FileSyncProtocol.opBleQuietResult])) {
+            emit(.quietResult(durationSeconds: 0, samples: nil))
+            return
+        }
+        op = .quietFetch(expected: -1, sampleSize: QuietSample.wireSize,
+                         durS: 0, buf: [], lastProgress: now())
     }
 
     /// GET_VERSION (0x10) — exact twin of `sendGetMode`: self-guard on an idle
@@ -994,8 +1045,77 @@ final class BleClient: NSObject {
             handleVersionNotify(data)
         case .calibrationReq:
             handleCalibrationNotify(data)
+        case .quietArm:
+            handleQuietArmNotify(data)
+        case .quietFetch:
+            handleQuietFetchNotify(data)
         case .uploadingFirmware:
             handleFwNotify(data)
+        }
+    }
+
+    /// BLE_QUIET status reply: 0x00 = window armed (the disconnect that
+    /// follows in ~3 s is expected — the ANY-drop auto-reconnect rides it),
+    /// anything else = rejected.
+    private func handleQuietArmNotify(_ value: Data) {
+        guard case .quietArm(let durS, _) = op else { return }
+        guard let b = value.first else { return }  // tolerate stray empty
+        op = .idle
+        if b == FileSyncProtocol.statusOK {
+            emit(.quietArmed(durationSeconds: durS))
+            emitStatus("BT-off window armed (\(durS) s) — box disconnects shortly, auto-reconnecting after")
+        } else {
+            emitErr("BT-off test rejected by box: \(FileSyncProtocol.statusMessage(b))")
+            emit(.quietResult(durationSeconds: 0, samples: nil))
+        }
+    }
+
+    /// BLE_QUIET_RESULT reassembly: first notify is the 8-byte header
+    /// (`'Q'`, version, sample_size, count u16-LE, dur_s u16-LE, reserved) —
+    /// or a single 0xB0 BUSY byte while the window (incl. its ~5 s post
+    /// phase) still runs. Then samples accumulate (the box packs as many
+    /// whole samples per notify as the MTU allows) until
+    /// `count × sample_size` bytes arrived. The box-declared sample_size is
+    /// the stride, so future firmware may grow the record without breaking
+    /// this parser.
+    private func handleQuietFetchNotify(_ value: Data) {
+        guard case .quietFetch(var expected, var sampleSize, var durS,
+                               var buf, _) = op else { return }
+        let v = [UInt8](value)
+        if expected < 0 {
+            if v.count == 1, FileSyncProtocol.isStatusByte(v[0]) {
+                op = .idle
+                emitErr("BT-off result: box replied \(FileSyncProtocol.statusMessage(v[0]))")
+                emit(.quietResult(durationSeconds: 0, samples: nil))
+                return
+            }
+            guard v.count >= 8, v[0] == UInt8(ascii: "Q") else {
+                op = .idle
+                emitErr("BT-off result: unexpected reply (\(v.count) B)")
+                emit(.quietResult(durationSeconds: 0, samples: nil))
+                return
+            }
+            sampleSize = max(Int(v[2]), QuietSample.wireSize)
+            expected = Int(v[3]) | (Int(v[4]) << 8)
+            durS = Int(v[5]) | (Int(v[6]) << 8)
+            buf.append(contentsOf: v[8...])
+        } else {
+            buf.append(contentsOf: v)
+        }
+        if buf.count >= expected * sampleSize {
+            var samples: [QuietSample] = []
+            samples.reserveCapacity(expected)
+            for i in 0..<expected {
+                if let s = QuietSample.parse(buf, at: i * sampleSize) {
+                    samples.append(s)
+                }
+            }
+            op = .idle
+            emitStatus("BT-off result: \(samples.count) samples (window \(durS) s)")
+            emit(.quietResult(durationSeconds: durS, samples: samples))
+        } else {
+            op = .quietFetch(expected: expected, sampleSize: sampleSize,
+                             durS: durS, buf: buf, lastProgress: now())
         }
     }
 
@@ -1336,6 +1456,11 @@ final class BleClient: NSObject {
         case .gpsPwrReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .gettingVersion(let lp): stale = n - lp > Self.modeReqTimeoutMs
         case .calibrationReq(_, _, let lp): stale = n - lp > Self.modeReqTimeoutMs
+        // The BLE_QUIET arm status comes within one connection interval or
+        // never (legacy firmware < v0.0.57 ignores 0x15) — short budget for
+        // the legacy verdict, like GET_VERSION.
+        case .quietArm(_, let lp): stale = n - lp > Self.modeReqTimeoutMs
+        case .quietFetch(_, _, _, _, let lp): stale = n - lp > Self.opIdleTimeoutMs
         case .uploadingFirmware(_, _, _, _, _, _, let lp): stale = n - lp > Self.fwBeginCommitTimeoutMs
         case .idle: stale = false
         }
@@ -1369,6 +1494,16 @@ final class BleClient: NSObject {
             // the client keeps its optimistic local update, and re-sending
             // it later is a normal path (not an error to surface).
             if !isSet { emit(.calibration(nil)) }
+        case .quietArm:
+            // Legacy firmware (< v0.0.57) never replies to BLE_QUIET.
+            emitErr("BT-off test: no reply — box firmware may be older than v0.0.57")
+            emit(.quietResult(durationSeconds: 0, samples: nil))
+        case .quietFetch:
+            // The recording is still in the box ERRLOG (`gps_rfq:` lines)
+            // and the buffer survives until the next test — "Fetch last
+            // result" retries.
+            emitErr("BT-off result timed out — the box ERRLOG gps_rfq lines still carry the data")
+            emit(.quietResult(durationSeconds: 0, samples: nil))
         case .uploadingFirmware(_, _, let offset, _, _, let phase, _):
             // FW_BEGIN (bank erase can take ~1 s but not 30 s) or FW_COMMIT
             // (SHA pass) never answered. FW_DATA is resent above, not here.
@@ -1437,6 +1572,17 @@ final class BleClient: NSObject {
         /// times it out (same bound as GET_MODE) and emits
         /// `.firmwareVersion(nil)`. Never reconnects (the link is fine).
         case gettingVersion(lastProgress: Int64)
+        /// BLE_QUIET (0x15) sent, awaiting the 1-byte armed/rejected status.
+        /// A disconnect while this is in flight means the status notify was
+        /// eaten but the window is running — `disconnectInner` promotes it
+        /// to `.quietArmed` instead of failing the test.
+        case quietArm(durS: Int, lastProgress: Int64)
+        /// BLE_QUIET_RESULT (0x16) reassembly. `expected` = sample count
+        /// from the header (-1 = header not yet received); `sampleSize` =
+        /// the box-declared per-sample stride; `buf` accumulates raw sample
+        /// bytes across notifies.
+        case quietFetch(expected: Int, sampleSize: Int, durS: Int,
+                        buf: [UInt8], lastProgress: Int64)
         /// Firmware OTA in flight. `offset` is the next byte to send (==
         /// the box's last ACK), `phase` tracks the FW_BEGIN → FW_DATA →
         /// FW_COMMIT handshake. ACK-gated: one chunk outstanding at a time,

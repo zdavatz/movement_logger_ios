@@ -62,6 +62,21 @@ struct LiveState: Equatable {
 /// taps Start session: the firmware reboots ~50 ms later so the BLE link
 /// dies, and the box is invisible to Scan until `durationSeconds` elapses.
 /// Used to render the countdown banner.
+/// BT-off GPS A/B test lifecycle (BLE_QUIET 0x15/0x16, firmware v0.0.57+),
+/// driven by `FileSyncViewModel` and rendered in the GPS Debug tab:
+/// arming (0x15 sent) → running (box is radio-silent for `durS`; the
+/// ANY-drop auto-reconnect rides back in) → fetching (0x16 in flight) →
+/// done (samples for the verdict card) / failed (message; the box ERRLOG
+/// `gps_rfq:` lines still carry the data, and "Fetch last result" retries).
+enum QuietTestState {
+    case idle
+    case arming(durS: Int)
+    case running(durS: Int, since: Date)
+    case fetching
+    case done(durS: Int, samples: [QuietSample], at: Date)
+    case failed(message: String)
+}
+
 struct SessionRunning: Equatable {
     let startedAt: Date
     let durationSeconds: Int
@@ -500,6 +515,11 @@ final class FileSyncViewModel {
     /// would reject. Set when such a command is sent; cleared on its
     /// completion event or any `.error`, and on `.disconnected`.
     private var briefOpInFlight = false
+    /// BT-off GPS A/B test lifecycle (BLE_QUIET 0x15/0x16, firmware
+    /// v0.0.57+), rendered in the GPS Debug tab — see `QuietTestState`.
+    /// Plain `var` (the class uses the `@Observable` macro, which instruments
+    /// stored properties itself and forbids `@Published`).
+    var quietTest: QuietTestState = .idle
     /// Total file count of the current sync pass (set at `startSyncPass`,
     /// reset on completion). Used to render "Syncing X of N".
     private(set) var syncPassTotal: Int = 0
@@ -1137,6 +1157,68 @@ final class FileSyncViewModel {
         }
     }
 
+    /// Start the BT-off GPS A/B test (BLE_QUIET 0x15, firmware v0.0.57+):
+    /// the box records ~3 s of BT-on baseline, goes radio-silent for `durS`
+    /// seconds while sampling its GPS RF metrics at 1 Hz (also into the box
+    /// ERRLOG as `gps_rfq:` lines), then re-inits its radio; the ANY-drop
+    /// auto-reconnect rides back in and the post-connect hook fetches the
+    /// recording for the GPS Debug tab.
+    func startQuietTest(durS: Int) {
+        guard connection == .connected else {
+            logLine("BT-off test: not connected")
+            return
+        }
+        guard !briefOpInFlight, !syncing, downloads.isEmpty, fwUpload == nil,
+              !gpsSurveyActive else {
+            logLine("BT-off test: box is busy — wait for the sync/transfer to finish")
+            return
+        }
+        briefOpInFlight = true
+        quietTest = .arming(durS: durS)
+        logLine("BLE_QUIET \(durS)s")
+        ble.send(.bleQuiet(durationSeconds: durS))
+    }
+
+    /// Manually (re-)fetch the most recent BT-off recording (0x16) — the
+    /// retry path after a `.failed` state; the box keeps the buffer until
+    /// the next test.
+    func fetchQuietResultNow() {
+        guard connection == .connected, !briefOpInFlight else {
+            logLine("BT-off result: not connected or busy — try again in a moment")
+            return
+        }
+        briefOpInFlight = true
+        quietTest = .fetching
+        logLine("BLE_QUIET_RESULT (manual)")
+        ble.send(.fetchQuietResult)
+    }
+
+    /// Post-reconnect fetch of the BT-off recording, deferred until the
+    /// single-op worker is idle — same self-deferring pattern as
+    /// `queryCalibration`.
+    private func fetchQuietDeferred(attempt: Int) {
+        guard connection == .connected else { return }
+        guard case .fetching = quietTest else { return }
+        let workerIdle = !listing && !syncing && downloads.isEmpty
+            && syncInFlight == nil && fwUpload == nil && !briefOpInFlight
+            && !reconnecting && !gpsSurveyActive && !clockSyncing
+        if workerIdle {
+            briefOpInFlight = true
+            logLine("BLE_QUIET_RESULT")
+            ble.send(.fetchQuietResult)
+            return
+        }
+        guard attempt < 40 else {
+            logLine("BT-off result: box stayed busy — tap \"Fetch last result\" in GPS Debug")
+            quietTest = .failed(message: "box stayed busy after reconnect")
+            return
+        }
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            await MainActor.run { self?.fetchQuietDeferred(attempt: attempt + 1) }
+        }
+    }
+
     /// Push a partial-update calibration blob to the box (`CAL_SET`, 0x14)
     /// via `BleClient` (firmware v0.0.37+). Called from every local UI tap
     /// that mutates one of the calibration fields (Zero here / Clear /
@@ -1303,9 +1385,30 @@ final class FileSyncViewModel {
             // until the worker is idle, same as the version query above.
             gpsPowerQueryPending = true
             queryGpsPower(attempt: 0)
+            // If a BT-off window was running, this connect is the post-window
+            // reconnect — fetch the recording once the box's ~5 s post phase
+            // is over (0x16 answers BUSY before that) and the connect-time
+            // query burst has drained.
+            if case .running = quietTest {
+                quietTest = .fetching
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(6))
+                    self?.fetchQuietDeferred(attempt: 0)
+                }
+            }
         case .disconnected:
             connection = .disconnected
             reconnecting = false
+            // A hard disconnect during a BT-off test means the auto-reconnect
+            // gave up (or the user disconnected) — resolve the test. The box
+            // ERRLOG still carries the gps_rfq lines, and "Fetch last result"
+            // works on the next connect (the box keeps the buffer until the
+            // next test).
+            switch quietTest {
+            case .arming, .running, .fetching:
+                quietTest = .failed(message: "link lost — reconnect and tap \"Fetch last result\"")
+            default: break
+            }
             // A GPS Debug survey can't continue without the link — stop it so
             // its files close cleanly and the poll timer doesn't keep firing.
             if gpsSurveyActive { gps.stop() }
@@ -1504,6 +1607,25 @@ final class FileSyncViewModel {
             // Raw bridged u-blox UBX reply — feed the GPS Debug survey. Only
             // meaningful while a survey is running; a no-op otherwise.
             gps.feed(data)
+        case .quietArmed(let durS):
+            briefOpInFlight = false
+            quietTest = .running(durS: durS, since: Date())
+            logLine("BT-off window armed (\(durS) s) — box goes radio-silent, auto-reconnect follows")
+        case .quietResult(let durS, let samples):
+            briefOpInFlight = false
+            if let samples {
+                quietTest = .done(durS: durS, samples: samples, at: Date())
+                logLine("BT-off result: \(samples.count) samples (window \(durS) s)")
+            } else {
+                // Only fail a test that was actually in progress — a stray
+                // failure event must not clobber a Done state.
+                switch quietTest {
+                case .arming, .running, .fetching:
+                    quietTest = .failed(message: "no result — see log; the box ERRLOG gps_rfq lines carry the data")
+                default: break
+                }
+            }
+            pumpManualQueue()
         }
     }
 

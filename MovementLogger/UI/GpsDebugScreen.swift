@@ -27,6 +27,13 @@ struct GpsDebugScreen: View {
                     if connected {
                         liveRfCard
                     }
+                    // BT-off GPS A/B test (firmware v0.0.57+, issue #10):
+                    // does the BLE radio degrade GPS reception? The box goes
+                    // radio-silent for the chosen window while sampling its
+                    // RF metrics at 1 Hz (also into the box ERRLOG as
+                    // gps_rfq lines), then re-inits; the phone auto-
+                    // reconnects and the recording + verdict land here.
+                    quietTestCard
                     controls
                     if let latest = vm.gps.log.last, vm.gps.running {
                         summaryCard(latest)
@@ -243,6 +250,162 @@ struct GpsDebugScreen: View {
         .padding()
         .background(Color.secondary.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+
+    // MARK: - BT-off GPS A/B test (BLE_QUIET 0x15/0x16, firmware v0.0.57+)
+
+    @State private var quietDurS: Int = 10
+
+    private var quietTestCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("BT-off test").font(.caption).foregroundStyle(.secondary)
+            Text("Does the BLE radio degrade GPS reception? The box goes radio-silent for the chosen window while it keeps logging its antenna values at 1 Hz (also into the box ERRLOG), then reconnects and reports here. Needs box firmware v0.0.57+.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            switch vm.quietTest {
+            case .idle, .failed, .done:
+                Picker("Window", selection: $quietDurS) {
+                    Text("10 s").tag(10)
+                    Text("30 s").tag(30)
+                    Text("60 s").tag(60)
+                    Text("120 s").tag(120)
+                }
+                .pickerStyle(.segmented)
+                HStack(spacing: 12) {
+                    Button {
+                        vm.startQuietTest(durS: quietDurS)
+                    } label: {
+                        Label("Start BT-off test", systemImage: "antenna.radiowaves.left.and.right.slash")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!connected)
+                    Button("Fetch last result") { vm.fetchQuietResultNow() }
+                        .buttonStyle(.bordered)
+                        .disabled(!connected)
+                }
+                if case .failed(let message) = vm.quietTest {
+                    Text("Failed: \(message)")
+                        .font(.footnote)
+                        .foregroundStyle(rfRed)
+                }
+                if case .done(let durS, let samples, _) = vm.quietTest {
+                    QuietResultView(durS: durS, samples: samples,
+                                    green: rfGreen, yellow: rfYellow, red: rfRed)
+                }
+            case .arming(let durS):
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Arming \(durS) s window…").font(.footnote)
+                }
+            case .running(let durS, let since):
+                // pre (3 s) + window + chip re-init (~4 s) + reconnect slack.
+                TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                    let total = 3 + durS + 9
+                    let left = max(0, total - Int(ctx.date.timeIntervalSince(since)))
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Box is radio-silent (\(durS) s window) — recording GPS RF, ~\(left) s until reconnect…")
+                            .font(.footnote)
+                    }
+                }
+            case .fetching:
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Reconnected — fetching the recording…").font(.footnote)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(Color.secondary.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+/// Verdict + per-second table for a completed BT-off window. The verdict
+/// compares the mean top-6 C/N0 with BT on (pre + post phases) against BT
+/// off; ±2 dB-Hz is treated as noise. EMI means (noise/agc) only use
+/// samples whose MON-RF data was fresh.
+private struct QuietResultView: View {
+    let durS: Int
+    let samples: [QuietSample]
+    let green: Color
+    let yellow: Color
+    let red: Color
+
+    private func meanAvg6(off: Bool) -> Double? {
+        let v = samples.filter { ($0.phase == 1) == off && $0.avg6X10 > 0 }
+            .map { Double($0.avg6X10) / 10.0 }
+        return v.isEmpty ? nil : v.reduce(0, +) / Double(v.count)
+    }
+
+    private func meanRf(off: Bool, _ f: (QuietSample) -> Int) -> Double? {
+        let v = samples.filter { ($0.phase == 1) == off && $0.rfFresh }
+            .map { Double(f($0)) }
+        return v.isEmpty ? nil : v.reduce(0, +) / Double(v.count)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if samples.isEmpty {
+                Text("Window recorded no samples.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else {
+                verdictLine
+                emiLine
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("  t  bt  fix used  avg6 min max noise  agc jam ant")
+                            .foregroundStyle(.secondary)
+                        ForEach(Array(samples.enumerated()), id: \.offset) { _, s in
+                            let bt = s.phase == 1 ? "OFF" : "on "
+                            let avg = s.avg6X10 > 0
+                                ? String(format: "%5.1f", Double(s.avg6X10) / 10.0)
+                                : "    —"
+                            Text(String(format: "%3d %@  %d  %3d %@ %3d %3d %5d %4d %3d %3d",
+                                        s.tS, bt, s.fixType, s.usedSv, avg, s.min6, s.max6,
+                                        s.noise, s.agc, s.jamInd, s.antStatus))
+                                .foregroundStyle(s.phase == 1 ? Color.blue : Color.primary)
+                        }
+                    }
+                    .font(.system(.caption2, design: .monospaced))
+                }
+                .frame(maxHeight: 240)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var verdictLine: some View {
+        if let on = meanAvg6(off: false), let off = meanAvg6(off: true) {
+            let d = off - on
+            let judged = d >= 2.0
+                ? "BT is degrading GPS — C/N0 rises when the radio is off"
+                : (d <= -2.0
+                    ? "C/N0 dropped with BT off — sky/antenna changed mid-test? Re-run"
+                    : "no meaningful BT effect (< 2 dB-Hz)")
+            Text(String(format: "avg6 BT-on %.1f vs BT-off %.1f dB-Hz (Δ %+.1f) — %@ (window %d s)",
+                        on, off, d, judged, durS))
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(d >= 2.0 ? red : (d <= -2.0 ? yellow : green))
+        } else {
+            Text("No C/N0 verdict — not enough satellite data in one of the phases (no fix / NAV-SAT sparse). The per-second rows and the box ERRLOG still count.")
+                .font(.footnote)
+                .foregroundStyle(yellow)
+        }
+    }
+
+    @ViewBuilder
+    private var emiLine: some View {
+        if let nOn = meanRf(off: false, { $0.noise }),
+           let nOff = meanRf(off: true, { $0.noise }),
+           let aOn = meanRf(off: false, { $0.agc }),
+           let aOff = meanRf(off: true, { $0.agc }) {
+            Text(String(format: "noise %.0f → %.0f · agc %.0f → %.0f (BT-on → BT-off)",
+                        nOn, nOff, aOn, aOff))
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
