@@ -5,21 +5,19 @@ import UIKit
 /// Merge N clips (chronological order) into one film:
 ///
 ///   [first clip's first frame held 3 s, "MovementLogger" title over it]
-///   [title card 2.5 s] [clip 1, complete] [last-frame freeze fades out 3 s]
-///   [title card 2.5 s] [clip N, complete]
-///   [last frame + Pump Tsüri logo, fading out 3 s]
+///   [title card 2.5 s] [clip 1, complete] [last-frame freeze fades out 3 s] …
+///   [title card 2.5 s] [clip N, complete] [last-frame freeze fades out 3 s]
+///   [foil "pumping" outro 3 s — over sky→sea, fading in/out of black]
 ///
 /// The film OPENS on a 3 s freeze of the first clip's first frame with the
 /// "MovementLogger" lettering floating semi-transparently over it (each
 /// letter colored along the logo gradient orange → teal → blue → purple),
 /// so the title reads over the actual footage rather than a black card, then
 /// the film plays. It falls back to lettering on solid black when that frame
-/// can't be extracted. It CLOSES on the last clip's own fade-out freeze with
-/// the Pump Tsüri logo baked onto that frame — the last image and the logo
-/// fade to black together, rather than a separate logo card tacked on after
-/// (which read as a black-then-reappear pop). A 5 s logo-on-black outro
-/// remains only as a fallback when the last clip's freeze can't be rendered.
-/// Each
+/// can't be extracted. It CLOSES with the foil icon PUMPING — rocking about
+/// its wings (cadence + amplitudes mapped from Ayano's pumping footage) over
+/// a sky→sea gradient, fading in from the black the last clip's freeze leaves
+/// and back out to black to end the film. Each
 /// title card is black with the clip's recording date (dd.MM.yyyy) above
 /// its start time (HH:mm:ss), local timezone, white text. Clips are
 /// inserted with their FULL time range — never trimmed ("never cut a
@@ -81,11 +79,17 @@ enum MergeExporter {
     private static let introStops: [(r: CGFloat, g: CGFloat, b: CGFloat)] = [
         (247, 154, 51), (36, 195, 188), (62, 141, 243), (125, 77, 240),
     ]
-    /// Pump Tsüri logo outro closing the film — ONCE, after the last
-    /// clip's fade-out (not per clip). Black background, RideLogo centered.
-    private static let outroS: Double = 5.0
-    /// Logo height as a fraction of the render height.
-    private static let outroLogoHeightFrac: CGFloat = 0.45
+    /// Foil-logo "pumping" outro closing the film — ONCE, after the last
+    /// clip's fade-out (not per clip). The foil icon rocks about its wings
+    /// over a sky→sea gradient, mapped from Ayano's pumping footage.
+    private static let outroS: Double = 3.0
+    /// Pumping-outro motion, matched from the source pumping footage.
+    private static let pumpFps: Int = 30
+    private static let pumpPeriodS: Double = 1.05     // ~3 pumps over 3 s
+    private static let pumpPitchDeg: Double = 11.0    // rock amplitude (°)
+    private static let pumpHeaveFrac: Double = 0.021  // vertical bob (of H)
+    private static let pumpSquash: Double = 0.035     // compress/extend
+    private static let pumpLogoHeightFrac: CGFloat = 0.55  // foil size (of H)
 
     static func export(
         clips: [MergeClipSpec],
@@ -201,10 +205,6 @@ enum MergeExporter {
         let freezeDur = CMTime(value: Int64(freezeS * 1000), timescale: 1000)
         var cursor = CMTime.zero
         var audioCursor = CMTime.zero
-        // Set once the last clip's fade-out freeze got the logo baked onto it,
-        // so the separate logo outro below is skipped (it's only a fallback
-        // for when that freeze couldn't be rendered).
-        var endLogoBaked = false
 
         // Generated stills (intro card, title cards, freeze frames, outro),
         // retained for the whole export — AVAssetTrack.asset is a WEAK
@@ -333,7 +333,6 @@ enum MergeExporter {
             // freeze layers removed — memory pressure, not a structural
             // fault. As media the frames stream off disk and the fade
             // becomes a native opacity ramp on the layer instruction.
-            let isLastClip = segments.count == loaded.count - 1
             let freezeEnd = freezeS > 0 ? CMTimeAdd(clipEnd, freezeDur) : clipEnd
             var freezeSize: CGSize? = nil
             if freezeS > 0, !dbg.contains("nofreeze") {
@@ -341,30 +340,18 @@ enum MergeExporter {
                               videoH / max(l.displayedH, 1))
                 let size = CGSize(width: evenDown(l.displayedW * fit),
                                   height: evenDown(l.displayedH * fit))
-                if let frame0 = await lastFrameImage(
-                       asset: l.asset, duration: l.duration, maxSize: size) {
-                    // On the LAST clip, bake the Pump Tsüri logo onto the
-                    // frozen last frame so the film ends on the footage with
-                    // the logo over it — both fade to black together via this
-                    // freeze's opacity ramp (no separate outro card).
-                    var frame = frame0
-                    var baked = false
-                    if isLastClip, let withLogo = frameWithLogo(frame0, size: size) {
-                        frame = withLogo
-                        baked = true
-                    }
-                    if let still = try? await makeStillAsset(
-                           image: frame, size: size, durationS: freezeS,
-                           filename: "merge_freeze_\(segments.count).mov"),
-                       let stillTrack = try? await still.loadTracks(
-                           withMediaType: .video).first,
-                       (try? compVideo.insertTimeRange(
-                           CMTimeRange(start: .zero, duration: freezeDur),
-                           of: stillTrack, at: clipEnd)) != nil {
-                        stillAssets.append(still)
-                        freezeSize = size
-                        if baked { endLogoBaked = true }
-                    }
+                if let frame = await lastFrameImage(
+                       asset: l.asset, duration: l.duration, maxSize: size),
+                   let still = try? await makeStillAsset(
+                       image: frame, size: size, durationS: freezeS,
+                       filename: "merge_freeze_\(segments.count).mov"),
+                   let stillTrack = try? await still.loadTracks(
+                       withMediaType: .video).first,
+                   (try? compVideo.insertTimeRange(
+                       CMTimeRange(start: .zero, duration: freezeDur),
+                       of: stillTrack, at: clipEnd)) != nil {
+                    stillAssets.append(still)
+                    freezeSize = size
                 }
             }
             // No freeze media (extraction/encode failed, or the knob is
@@ -383,45 +370,33 @@ enum MergeExporter {
             cursor = freezeEnd
         }
 
-        // ----- 5 s logo outro after the last clip's fade-out. A trailing
-        // EMPTY edit does not work here — AVFoundation silently drops empty
-        // edits at the end of a composition track, so the film would just
-        // end at the last clip (verified: 95.1 s instead of 100.1 s).
-        // Freezing a frame of the last clip across the outro was tried and
-        // is codec-dependent (a scaled 10-bit HEVC sample silently
-        // truncated the export at the last clip). The outro is therefore a
-        // SYNTHESIZED clip with the logo already drawn into it — no clip
-        // content is touched, and no layer is needed to show the logo.
+        // ----- Pumping-foil outro after the last clip's fade-out. The foil
+        // icon rocks about its wings (mapped from Ayano's pumping footage)
+        // over a sky→sea gradient, fading IN from black — which bridges the
+        // last clip's own fade-to-black seamlessly — and back OUT to black to
+        // close the film. Pre-rendered as an H.264 media segment (NOT a
+        // CALayer animation), so the empty-layer-tree / no-animation-tool
+        // property is preserved. A trailing EMPTY edit does not work here —
+        // AVFoundation silently drops empty edits at the end of a track — so
+        // a real media clip is needed to anchor the film's end regardless.
         let outroStart = cursor
         var outroHasMedia = false
-        // Only a FALLBACK now: the logo normally rides the last clip's own
-        // fade-out freeze (see `endLogoBaked`). This separate outro segment
-        // runs only when that freeze couldn't be rendered, so the film still
-        // ends on a logo — over the last frame when it can be extracted, else
-        // logo-on-black.
-        if outroSecs > 0, !endLogoBaked {
+        if outroSecs > 0 {
             let outroDur = CMTime(value: Int64(outroSecs * 1000), timescale: 1000)
-            var outroBg: CGImage? = nil
-            var outroBgRect = CGRect(origin: .zero, size: videoRegion)
-            if let last = loaded.last {
-                let fit = min(videoW / max(last.displayedW, 1),
-                              videoH / max(last.displayedH, 1))
-                let fw = evenDown(last.displayedW * fit)
-                let fh = evenDown(last.displayedH * fit)
-                outroBgRect = CGRect(x: (videoW - fw) / 2, y: (videoH - fh) / 2,
-                                     width: fw, height: fh)
-                outroBg = await lastFrameImage(
-                    asset: last.asset, duration: last.duration,
-                    maxSize: CGSize(width: fw, height: fh))
-            }
-            outroHasMedia = await insertStill(
-                makeOutroImage(size: videoRegion, background: outroBg,
-                               backgroundRect: outroBgRect),
-                at: outroStart, duration: outroDur, name: "merge_outro.mov")
-            if outroHasMedia {
+            if let pump = try? await makeVideoAsset(
+                   size: videoRegion, durationS: outroSecs, fps: pumpFps,
+                   filename: "merge_pump_outro.mov",
+                   frame: { i, n in pumpFrameImage(i, n, size: videoRegion) }),
+               let track = try? await pump.loadTracks(withMediaType: .video).first,
+               (try? compVideo.insertTimeRange(
+                   CMTimeRange(start: .zero, duration: outroDur),
+                   of: track, at: outroStart)) != nil {
+                stillAssets.append(pump)
+                outroHasMedia = true
                 cursor = CMTimeAdd(outroStart, outroDur)
             }
-            // No outro media — the film simply ends after the last clip.
+            // No outro media (render failed) — the film simply ends after the
+            // last clip's fade-out.
         }
 
         let totalDur = cursor
@@ -838,75 +813,147 @@ enum MergeExporter {
         }.cgImage
     }
 
-    /// Outro card: the Pump Tsüri foil logo centered at ~45 % of the frame
-    /// height. Uses `clearLogo` (background knocked out) so it composites as
-    /// just the coloured foil — over the last clip's last frame when
-    /// `background` is set, else on solid black. Over footage the foil is
-    /// drawn slightly translucent with a soft shadow so the last image shows
-    /// through while the logo stays legible.
-    private static func makeOutroImage(
-        size: CGSize, background: CGImage?, backgroundRect: CGRect
-    ) -> CGImage? {
-        // Prefer the transparent foil; fall back to the opaque asset only if
-        // the knockout failed (a light box, but better than no logo).
-        let logo = clearLogo ?? UIImage(named: "RideLogo")
-        let logoAlpha: CGFloat = background == nil ? 1.0 : 0.92
-        var w: CGFloat = 0, h: CGFloat = 0
-        if let logo {
-            h = size.height * outroLogoHeightFrac
-            w = logo.size.height > 0 ? h * (logo.size.width / logo.size.height) : h
-            if w > size.width * 0.8 {
-                let shrink = size.width * 0.8 / w
-                w *= shrink
-                h *= shrink
-            }
+    /// One frame of the foil "pumping" outro: the foil icon rocking about its
+    /// wings + a synced vertical bob + squash, over a sky→sea gradient, with a
+    /// fade-IN from black at the start (bridges the last clip's fade-to-black)
+    /// and a fade-OUT to black at the end. `i` of `n` frames. The cadence and
+    /// amplitudes are mapped from Ayano's pumping footage.
+    ///
+    /// Rendered in a native y-up `CGContext` (same transforms verified in the
+    /// macOS preview) so `ctx.draw(logo,…)` composites the foil upright; the
+    /// resulting photo-oriented CGImage streams through `makeVideoAsset` into
+    /// the pixel buffer exactly like the freeze frames, so it exports upright.
+    private static func pumpFrameImage(_ i: Int, _ n: Int, size: CGSize) -> CGImage? {
+        let W = Int(size.width.rounded()), H = Int(size.height.rounded())
+        guard W >= 2, H >= 2, let logoCG = clearLogo?.cgImage else { return nil }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0,
+            space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        let fW = CGFloat(W), fH = CGFloat(H)
+
+        // Sky → sea gradient (y-up: y = fH is the top of the frame).
+        if let grad = CGGradient(colorsSpace: cs, colors: [
+            CGColor(red: 0.74, green: 0.89, blue: 0.96, alpha: 1),   // sky
+            CGColor(red: 0.42, green: 0.72, blue: 0.83, alpha: 1),   // horizon
+            CGColor(red: 0.11, green: 0.34, blue: 0.50, alpha: 1),   // sea
+        ] as CFArray, locations: [0, 0.52, 1]) {
+            ctx.drawLinearGradient(grad, start: CGPoint(x: 0, y: fH),
+                                   end: CGPoint(x: 0, y: 0), options: [])
         }
-        return cardImage(size: size) { cg in
-            if let background {
-                UIImage(cgImage: background).draw(in: backgroundRect)
-            }
-            guard let logo else { return }
-            cg.saveGState()
-            if background != nil {
-                cg.setShadow(offset: .zero, blur: h * 0.05,
-                             color: UIColor.black.withAlphaComponent(0.55).cgColor)
-            }
-            logo.draw(in: CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2,
-                                 width: w, height: h),
-                      blendMode: .normal, alpha: logoAlpha)
-            cg.restoreGState()
+
+        let dur = Double(n) / Double(pumpFps)
+        let secs = Double(i) / Double(pumpFps)
+        let phase = (2.0 * Double.pi / pumpPeriodS) * secs
+
+        // Foil geometry + pump motion (rock about the wings, bob, squash).
+        let logoH = fH * pumpLogoHeightFrac
+        let logoW = logoH   // square asset
+        let logoRect = CGRect(x: (fW - logoW) / 2, y: (fH - logoH) / 2,
+                              width: logoW, height: logoH)
+        // Wings sit ~72 % down the asset; y-up pivot measured from the bottom.
+        let pivot = CGPoint(x: logoRect.midX,
+                            y: logoRect.minY + (1 - 0.72) * logoH)
+        let theta = pumpPitchDeg * sin(phase) * .pi / 180.0
+        let dy = -pumpHeaveFrac * Double(fH) * sin(phase)   // rise on nose-up
+        let sy = 1.0 - pumpSquash * cos(phase)              // squash at compress
+
+        ctx.saveGState()
+        ctx.translateBy(x: 0, y: CGFloat(dy))               // heave
+        ctx.translateBy(x: pivot.x, y: pivot.y)             // rock + squash
+        ctx.rotate(by: CGFloat(theta))                      //   about the wings
+        ctx.scaleBy(x: 1, y: CGFloat(sy))
+        ctx.translateBy(x: -pivot.x, y: -pivot.y)
+        ctx.setShadow(offset: CGSize(width: 0, height: -8), blur: 22,
+                      color: UIColor.black.withAlphaComponent(0.35).cgColor)
+        ctx.draw(logoCG, in: logoRect)
+        ctx.restoreGState()
+
+        // Fade in from black, then out to black.
+        let fadeInS = 0.35, fadeOutS = 0.75
+        var cover = 0.0
+        if secs < fadeInS { cover = 1.0 - secs / fadeInS }
+        else if secs > dur - fadeOutS { cover = (secs - (dur - fadeOutS)) / fadeOutS }
+        if cover > 0.001 {
+            ctx.setFillColor(UIColor.black.withAlphaComponent(
+                CGFloat(max(0, min(cover, 1)))).cgColor)
+            ctx.fill(CGRect(x: 0, y: 0, width: fW, height: fH))
         }
+        return ctx.makeImage()
     }
 
-    /// Composite the transparent foil logo (`clearLogo`) centered on `frame`
-    /// at ~45 % of its height, semi-transparent with a soft shadow. Used for
-    /// the LAST clip's fade-out freeze so the film ends on the footage with
-    /// the logo over it, both fading to black together. Returns `frame`
-    /// unchanged (via a redraw) if the knockout logo is unavailable.
-    private static func frameWithLogo(_ frame: CGImage, size: CGSize) -> CGImage? {
-        let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1   // export-only render — avoid the device-scale trap
-        format.opaque = true
-        let renderer = UIGraphicsImageRenderer(size: size, format: format)
-        return renderer.image { ctx in
-            UIImage(cgImage: frame).draw(in: CGRect(origin: .zero, size: size))
-            guard let logo = clearLogo else { return }
-            var h = size.height * outroLogoHeightFrac
-            var w = logo.size.height > 0 ? h * (logo.size.width / logo.size.height) : h
-            if w > size.width * 0.8 {
-                let shrink = size.width * 0.8 / w
-                w *= shrink
-                h *= shrink
+    /// Write a rendered frame sequence as an H.264 clip of `durationS` seconds
+    /// at `fps` into tmp, returning it as an asset. `frame(i, n)` supplies the
+    /// CGImage for frame i of n, drawn into the pixel buffer exactly like
+    /// `makeStillAsset` (so a photo-oriented CGImage comes out upright). Used
+    /// for the animated pumping outro; kept MEDIA so the export never needs
+    /// the CoreAnimation tool.
+    private static func makeVideoAsset(
+        size: CGSize, durationS: Double, fps: Int, filename: String,
+        frame: (Int, Int) -> CGImage?
+    ) async throws -> AVURLAsset {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(filename)
+        try? FileManager.default.removeItem(at: url)
+        let w = Int(max(size.width.rounded(), 2))
+        let h = Int(max(size.height.rounded(), 2))
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: w, AVVideoHeightKey: h,
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: w,
+                kCVPixelBufferHeightKey as String: h,
+            ])
+        writer.add(input)
+        guard writer.startWriting() else {
+            throw MergeExportError.exportFailed(
+                "video writer: \(writer.error?.localizedDescription ?? "startWriting failed")")
+        }
+        writer.startSession(atSourceTime: .zero)
+        guard let pool = adaptor.pixelBufferPool else {
+            throw MergeExportError.exportFailed("video writer: no pixel buffer pool")
+        }
+        let n = max(Int((durationS * Double(fps)).rounded()), 1)
+        for i in 0..<n {
+            while !input.isReadyForMoreMediaData {
+                try? await Task.sleep(for: .milliseconds(5))
             }
-            let cg = ctx.cgContext
-            cg.saveGState()
-            cg.setShadow(offset: .zero, blur: h * 0.05,
-                         color: UIColor.black.withAlphaComponent(0.55).cgColor)
-            logo.draw(in: CGRect(x: (size.width - w) / 2, y: (size.height - h) / 2,
-                                 width: w, height: h),
-                      blendMode: .normal, alpha: 0.92)
-            cg.restoreGState()
-        }.cgImage
+            var pbOut: CVPixelBuffer?
+            CVPixelBufferPoolCreatePixelBuffer(nil, pool, &pbOut)
+            guard let pb = pbOut else { continue }
+            CVPixelBufferLockBaseAddress(pb, [])
+            if let base = CVPixelBufferGetBaseAddress(pb) {
+                memset(base, 0, CVPixelBufferGetDataSize(pb))
+                if let img = frame(i, n), let ctx = CGContext(
+                    data: base, width: w, height: h, bitsPerComponent: 8,
+                    bytesPerRow: CVPixelBufferGetBytesPerRow(pb),
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue
+                        | CGBitmapInfo.byteOrder32Little.rawValue
+                ) {
+                    ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(pb, [])
+            adaptor.append(pb, withPresentationTime:
+                CMTime(value: Int64(i), timescale: Int32(fps)))
+        }
+        input.markAsFinished()
+        writer.endSession(atSourceTime:
+            CMTime(seconds: durationS, preferredTimescale: 600))
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            throw MergeExportError.exportFailed(
+                "video writer: \(writer.error?.localizedDescription ?? "status \(writer.status.rawValue)")")
+        }
+        return AVURLAsset(url: url)
     }
 
     /// The Pump Tsüri logo with its flat near-white background knocked out to

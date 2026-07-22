@@ -261,19 +261,24 @@ helpers, opacity-gated per segment).
   since a portrait iPhone clip reports 1920×1080 with the rotation in its
   transform) routes landscape picks into a separate red "Not merged" section
   in `MergeScreen`; only portrait clips reach `clips` and the exporter.
-- **Intro over the first frame / logo on the last fade-out (v1.0.43).** The
-  film opens on a 3 s freeze of the **first clip's first frame**
-  (`firstFrameImage`) with the gradient "MovementLogger" lettering composited
-  semi-transparently (0.85 α + soft shadow) over it. It closes on the **last
-  clip's own fade-out freeze** with the foil logo baked onto that frame
-  (`frameWithLogo`), so the last image and the logo fade to black together via
-  the freeze's opacity ramp — NOT a separate outro segment (that read as a
-  black-then-reappear pop, which is what the user rejected). `endLogoBaked`
-  gates the old logo-on-black outro down to a fallback for when the last
-  freeze can't be rendered. Both intro and freeze stay media stills, so the
-  empty-layer-tree property is preserved. The intro's background frame is
-  aspect-fit into the exact video region (same fit as when the clip plays), so
-  the frozen frame lines up with the first playing frame.
+- **Intro over the first frame (v1.0.43).** The film opens on a 3 s freeze of
+  the **first clip's first frame** (`firstFrameImage`) with the gradient
+  "MovementLogger" lettering composited semi-transparently (0.85 α + soft
+  shadow) over it, as a media still (empty-layer-tree property preserved). The
+  background frame is aspect-fit into the exact video region (same fit as when
+  the clip plays), so the frozen frame lines up with the first playing frame.
+- **Pumping-foil outro (v1.0.44).** The film closes with the foil icon
+  PUMPING — rocking about its wings + a synced vertical bob + squash, over a
+  sky→sea gradient — mapped from Ayano's `IMG_5266.MOV` pumping footage (~1.05 s
+  cadence ≈ 3 pumps / 3 s, ±11° pitch, ±2.1 % heave). It fades IN from black
+  (which bridges the last clip's own fade-to-black seamlessly) and back OUT to
+  black. Rendered by `pumpFrameImage(i,n,size:)` in a native y-up `CGContext`
+  (same transforms verified in `scratchpad`'s macOS preview), then streamed
+  frame-by-frame through `makeVideoAsset(...)` — a multi-frame sibling of
+  `makeStillAsset` — into an H.264 media segment. So the outro is MEDIA, not a
+  CALayer animation: the empty-layer-tree / no-animation-tool config survives.
+  The old logo-on-black / logo-on-last-frame outro was replaced by this. The
+  `clearLogo` background-knockout is reused to draw just the coloured foil.
 - **The logo has no alpha — knock it out at runtime.** `RideLogo` is the
   opaque 1024² app-icon (foil on a flat near-white background); drawn over
   footage it's a light box. `clearLogo` (a cached one-shot ~1 MP pixel walk in
