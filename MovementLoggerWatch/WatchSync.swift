@@ -41,6 +41,11 @@ final class WatchSync: NSObject, WCSessionDelegate {
     private static let deliveredKey = "deliveredRides"
     private static let manifestKey = "deliveredRidesManifestSeen"
 
+    /// Immediate re-queue attempts per ride, so one unsendable file can't spin
+    /// forever. Reset on success; in-memory on purpose — a relaunch retries.
+    private static let maxRetries = 3
+    @ObservationIgnored private var retries: [String: Int] = [:]
+
     private override init() {
         super.init()
         if WCSession.isSupported() {
@@ -193,6 +198,17 @@ final class WatchSync: NSObject, WCSessionDelegate {
         if hasManifest { resendPending() }
     }
 
+    /// The phone's manifest, delivered as queued user-info rather than an
+    /// application context. This is the path that does NOT need the user to
+    /// open the watch app: `transferUserInfo` is queued FIFO and delivered in
+    /// the background, launching this app if it isn't running — so a ride
+    /// stranded by a dropped transfer is re-sent on the phone's next launch
+    /// instead of waiting for someone to raise their wrist and tap.
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any]) {
+        applyPhoneContext(userInfo)
+        if hasManifest { resendPending() }
+    }
+
     /// The phone came back in range — a good moment to drain anything the
     /// last attempt couldn't deliver.
     func sessionReachabilityDidChange(_ session: WCSession) {
@@ -205,10 +221,20 @@ final class WatchSync: NSObject, WCSessionDelegate {
     /// is retried by the next `resendPending()`.
     func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer,
                  error: Error?) {
+        let name = (fileTransfer.file.metadata?["name"] as? String)
+            ?? fileTransfer.file.fileURL.lastPathComponent
         if error == nil {
-            let name = (fileTransfer.file.metadata?["name"] as? String)
-                ?? fileTransfer.file.fileURL.lastPathComponent
             var d = delivered; d.insert(name); delivered = d
+            retries[name] = nil
+        } else {
+            // A failed transfer would otherwise sit untouched until the next
+            // activation — i.e. until someone opens the watch app. Re-queue it
+            // straight away, bounded so a permanently broken file can't spin.
+            let n = (retries[name] ?? 0) + 1
+            retries[name] = n
+            if n <= Self.maxRetries, WCSession.default.activationState == .activated {
+                transfer(fileTransfer.file.fileURL, on: WCSession.default)
+            }
         }
         refreshPendingCount()
     }

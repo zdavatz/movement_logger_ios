@@ -70,6 +70,10 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
         set { UserDefaults.standard.set(Array(newValue), forKey: Self.receivedKey) }
     }
 
+    /// Last manifest actually queued to the watch, so an unchanged one isn't
+    /// re-queued. Session-scoped: a relaunch re-pushing once is harmless.
+    private var lastPushedManifest: Set<String>?
+
     private func noteReceived(_ names: [String]) {
         var s = receivedNames
         let before = s.count
@@ -86,9 +90,25 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
     func pushRideManifest() {
         guard WCSession.isSupported(),
               WCSession.default.activationState == .activated else { return }
+        let have = Array(receivedNames)
         var ctx = WCSession.default.applicationContext
-        ctx["haveRides"] = Array(receivedNames)
+        ctx["haveRides"] = have
         try? WCSession.default.updateApplicationContext(ctx)
+        // Also as queued user-info. An application context is only observed
+        // when the watch app next runs, so on its own it makes recovery wait
+        // for the user to open the watch app. `transferUserInfo` is delivered
+        // in the background and launches the watch app if needed, so a ride
+        // stranded by a dropped transfer comes back on the phone's next
+        // launch instead of on a wrist-raise.
+        //
+        // Only on an actual change: this runs once per received file, and the
+        // user-info queue is FIFO and persistent — re-sending an unchanged
+        // manifest for each file of an 8-file batch would just be backlog.
+        let set = receivedNames
+        if set != lastPushedManifest {
+            lastPushedManifest = set
+            WCSession.default.transferUserInfo(["haveRides": have])
+        }
     }
 
     /// `Documents/WatchRides/` — created on demand.
