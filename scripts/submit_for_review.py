@@ -108,23 +108,52 @@ def make_jwt() -> str:
 
 
 class Client:
-    def __init__(self, token: str):
+    """App Store Connect client that re-mints its own bearer token.
+
+    Apple caps a JWT at 20 minutes and `make_jwt` asks for exactly that, but
+    `wait_for_build` polls for as long as Apple takes to process the upload —
+    which can exceed 20 minutes. The v1.0.45 release died precisely there: it
+    waited 22 min for build 45 to appear and then every request 401'd with
+    "make sure that it has not expired", after Archive/Export/Upload had all
+    succeeded. Re-minting on a 15-minute clock keeps a long poll alive.
+    """
+
+    TOKEN_TTL_S = 15 * 60
+
+    def __init__(self, token=None):
         self.s = requests.Session()
-        self.s.headers["Authorization"] = f"Bearer {token}"
         self.s.headers["Accept"] = "application/json"
+        self._minted_at = 0.0
+        if token:
+            self.s.headers["Authorization"] = f"Bearer {token}"
+            self._minted_at = time.time()
+        else:
+            self._refresh()
+
+    def _refresh(self):
+        self.s.headers["Authorization"] = f"Bearer {make_jwt()}"
+        self._minted_at = time.time()
+
+    def _fresh(self):
+        if time.time() - self._minted_at >= self.TOKEN_TTL_S:
+            self._refresh()
 
     def get(self, path, **kw):
+        self._fresh()
         r = self.s.get(f"{API_BASE}{path}", **kw); self._raise(r); return r.json()
 
     def post(self, path, body):
+        self._fresh()
         r = self.s.post(f"{API_BASE}{path}", json=body); self._raise(r)
         return r.json() if r.text else {}
 
     def patch(self, path, body):
+        self._fresh()
         r = self.s.patch(f"{API_BASE}{path}", json=body); self._raise(r)
         return r.json() if r.text else {}
 
     def delete(self, path):
+        self._fresh()
         r = self.s.delete(f"{API_BASE}{path}"); self._raise(r)
         return r.json() if r.text else {}
 
