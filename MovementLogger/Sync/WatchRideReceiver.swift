@@ -13,13 +13,82 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
 
     private(set) var rides: [URL] = []
 
+    /// How the Rides list is ordered.
+    ///
+    /// `rideDate` is the default and the honest one: it reads the ride's own
+    /// UTC start out of the `WatchGps_yyyyMMdd_HHmmss` filename, so it doesn't
+    /// care when the file reached the phone. `synced` is the file's
+    /// modification date — useful for spotting what a late re-sync just pulled
+    /// in, but it puts a month-old ride at the top of the list the moment it
+    /// finally transfers.
+    enum RideSort: String, CaseIterable {
+        case rideDate, synced
+        var title: String {
+            switch self {
+            case .rideDate: "Ride date"
+            case .synced:   "Last synced"
+            }
+        }
+    }
+
+    private static let sortKey = "ridesSortOrder"
+
+    /// Property observers don't fire for assignments made inside `init`, so
+    /// seeding this from UserDefaults there can't trigger a premature refresh.
+    var sortOrder: RideSort = .rideDate {
+        didSet {
+            guard sortOrder != oldValue else { return }
+            UserDefaults.standard.set(sortOrder.rawValue, forKey: Self.sortKey)
+            refresh()
+        }
+    }
+
     private override init() {
         super.init()
         if WCSession.isSupported() {
             WCSession.default.delegate = self
             WCSession.default.activate()
         }
+        sortOrder = UserDefaults.standard.string(forKey: Self.sortKey)
+            .flatMap(RideSort.init(rawValue:)) ?? .rideDate
         refresh()
+        // Rides already here predate the delivery bookkeeping — seed them so
+        // the watch doesn't offer to re-send the whole back catalogue.
+        noteReceived(rides.map { $0.lastPathComponent })
+        pushRideManifest()
+    }
+
+    // MARK: - Delivery manifest
+
+    private static let receivedKey = "watchRidesReceived"
+
+    /// Every ride filename this phone has ever held. Deliberately NOT the
+    /// current folder contents: deleting a ride from the Rides list must not
+    /// make the watch push it straight back.
+    private var receivedNames: Set<String> {
+        get { Set(UserDefaults.standard.stringArray(forKey: Self.receivedKey) ?? []) }
+        set { UserDefaults.standard.set(Array(newValue), forKey: Self.receivedKey) }
+    }
+
+    private func noteReceived(_ names: [String]) {
+        var s = receivedNames
+        let before = s.count
+        s.formUnion(names)
+        if s.count != before { receivedNames = s }
+    }
+
+    /// Tell the watch what this phone holds, so it can re-send anything that
+    /// never arrived (`WatchSync.resendPending`).
+    ///
+    /// Merged into the current context on purpose: `updateApplicationContext`
+    /// REPLACES the dictionary wholesale and `RaceUplink.pushRelayFlag` writes
+    /// the same one, so a bare write here would silently wipe the race config.
+    func pushRideManifest() {
+        guard WCSession.isSupported(),
+              WCSession.default.activationState == .activated else { return }
+        var ctx = WCSession.default.applicationContext
+        ctx["haveRides"] = Array(receivedNames)
+        try? WCSession.default.updateApplicationContext(ctx)
     }
 
     /// `Documents/WatchRides/` — created on demand.
@@ -30,13 +99,24 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
         return dir
     }
 
-    /// Rescan the folder, newest first.
+    /// Rescan the folder, newest first by the current `sortOrder`.
     func refresh() {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: ridesDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        rides = files
-            .filter { $0.pathExtension.lowercased() == "csv" }
-            .sorted { (modDate($0) ?? .distantPast) > (modDate($1) ?? .distantPast) }
+        let csvs = files.filter { $0.pathExtension.lowercased() == "csv" }
+        switch sortOrder {
+        case .rideDate:
+            rides = csvs.sorted { rideStart($0) > rideStart($1) }
+        case .synced:
+            rides = csvs.sorted { (modDate($0) ?? .distantPast) > (modDate($1) ?? .distantPast) }
+        }
+    }
+
+    /// The ride's own start, from the filename's UTC stamp. Falls back to the
+    /// file date for anything not named `WatchGps_yyyyMMdd_HHmmss`.
+    func rideStart(_ url: URL) -> Date {
+        RideStatsLoader.stampDate(url.deletingPathExtension().lastPathComponent)
+            ?? modDate(url) ?? .distantPast
     }
 
     func modDate(_ url: URL) -> Date? {
@@ -70,7 +150,12 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
             // Fall back to a read+write if a cross-volume copy is refused.
             if let data = try? Data(contentsOf: file.fileURL) { try? data.write(to: dest) }
         }
-        DispatchQueue.main.async { self.refresh() }
+        DispatchQueue.main.async {
+            self.noteReceived([name])
+            self.refresh()
+            // Confirm it to the watch so it stops offering this ride.
+            self.pushRideManifest()
+        }
     }
 
     /// Live race relay: the watch streams one fix per second while the
@@ -109,7 +194,10 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
 
     func session(_ session: WCSession,
                  activationDidCompleteWith activationState: WCSessionActivationState,
-                 error: Error?) {}
+                 error: Error?) {
+        guard activationState == .activated else { return }
+        pushRideManifest()
+    }
     func sessionDidBecomeInactive(_ session: WCSession) {}
     func sessionDidDeactivate(_ session: WCSession) { WCSession.default.activate() }
 }

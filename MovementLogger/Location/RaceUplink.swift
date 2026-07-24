@@ -103,13 +103,16 @@ final class RaceUplink: @unchecked Sendable {
     private func pushRelayFlag() {
         guard WCSession.isSupported(),
               WCSession.default.activationState == .activated else { return }
-        try? WCSession.default.updateApplicationContext([
-            "raceRelay": enabled && source == .watch,
-            "raceRider": rider,
-            "raceHost": host,
-            "racePort": port,
-            "raceToken": token,
-        ])
+        // Merge, don't replace: `updateApplicationContext` overwrites the whole
+        // dictionary, and `WatchRideReceiver.pushRideManifest` writes its
+        // `haveRides` key into the same one.
+        var ctx = WCSession.default.applicationContext
+        ctx["raceRelay"] = enabled && source == .watch
+        ctx["raceRider"] = rider
+        ctx["raceHost"] = host
+        ctx["racePort"] = port
+        ctx["raceToken"] = token
+        try? WCSession.default.updateApplicationContext(ctx)
     }
 
     private func openConnection() {

@@ -16,6 +16,7 @@ struct ContentView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 startStopButton
+                unsentRidesRow
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 8)
@@ -93,6 +94,26 @@ struct ContentView: View {
         .tint(controller.isRunning ? .red : .green)
         .disabled(controller.phase == .starting || controller.phase == .stopping)
         .padding(.top, 2)
+    }
+
+    // MARK: - Unsent rides
+
+    /// Rides still on this watch that the phone has never confirmed receiving
+    /// — a session that ended without its CSV reaching the phone (app killed
+    /// mid-ride, watch rebooted, phone out of range long enough for the queued
+    /// transfer to be dropped). The watch keeps every CSV, so one tap recovers
+    /// them. Hidden during a ride: the running session sends itself at End.
+    @ViewBuilder private var unsentRidesRow: some View {
+        let n = WatchSync.shared.pendingCount
+        if !controller.isRunning, n > 0 {
+            Button { WatchSync.shared.resendPending() } label: {
+                Label("Send \(n) ride\(n == 1 ? "" : "s") to iPhone",
+                      systemImage: "arrow.up.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .font(.footnote)
+        }
     }
 
     // MARK: - Format

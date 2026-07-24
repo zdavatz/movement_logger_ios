@@ -302,6 +302,56 @@ helpers, opacity-gated per segment).
 
 ### Rides tab — watch GPS on a map (v1.0.23+)
 
+**Rides are re-sent until the phone confirms them (v1.0.46, 24.7.2026).** A
+ride used to be handed to `transferFile` exactly once, from
+`SessionController.stop()`, with nothing watching whether it arrived — so a
+session that never reached Stop (app killed, battery died, watch rebooted)
+never queued its CSV *at all*, and a queue entry lost before completion was
+never retried. Measured cost on the real device: **8 of 28 rides had never
+reached the phone**, including two full sessions (20.07, 206 KB; 23.07
+afternoon, 248 KB) nobody had noticed were missing.
+
+The watch never deletes a ride CSV, so all of it was recoverable. `WatchSync`
+now keeps a `delivered` set (UserDefaults) fed from two sources: the
+`didFinish fileTransfer:` callback (success only — a failed transfer stays
+pending), and a `haveRides` manifest the phone publishes from
+`WatchRideReceiver.pushRideManifest`. Anything on disk and not in that set is
+re-queued by `resendPending()` on activation, on `sessionReachabilityDidChange`,
+and from a manual **"Send N rides to iPhone"** button under Start Session.
+Details that matter:
+
+- **The phone's manifest is "ever received", not "currently present"** —
+  a persistent `receivedNames` set, NOT the folder contents. Deleting a ride
+  from the Rides list must not make the watch push it straight back.
+- **The running session's CSV is excluded** (`WatchSync.activeRide`, set by
+  `WatchGpsLogger.openCsv` / cleared by `closeCsv`) — it's incomplete, and
+  `stop()` sends it when the ride ends.
+- **The automatic pass is gated on having seen a manifest at least once.**
+  Before the first one the watch can't tell which rides are genuinely missing,
+  and would blast the entire back catalogue after an app update. The manual
+  button is always live.
+- **Both application-context writers MERGE.** `updateApplicationContext`
+  replaces the dictionary wholesale and `RaceUplink.pushRelayFlag` already
+  owned it — a bare write from either side silently wipes the other's keys
+  (race config or ride manifest). Both now read
+  `WCSession.default.applicationContext` and merge into it.
+- `pendingCount` drives SwiftUI and every WCSession callback lands on a
+  background queue, so its write hops to main.
+
+There is exactly ONE `WCSessionDelegate` per side (`WatchSync` on the watch,
+`WatchRideReceiver` on the phone) — `WCSession.default.delegate` is a single
+slot, so a second one would silently steal `didFinish` and break this.
+
+**Sort order (v1.0.46).** The list defaults to **ride date** — the ride's own
+UTC start parsed out of the `WatchGps_yyyyMMdd_HHmmss` filename
+(`RideStatsLoader.stampDate`), which is independent of when the file reached
+the phone. The old behaviour (file mtime) is still available as **Last
+synced** via the toolbar's ⇅ menu, persisted in UserDefaults. They only
+diverge when a ride syncs late — and then mtime lies badly: the 8 recovered
+rides all carried the same recovery-moment mtime, putting a 3 KB stub from
+9 July above the previous day's real session. Rows gain a "Synced …" line in
+that mode, since every other line on the row is about ride time.
+
 **Row stats (11.7.2026+):** each ride row shows start–end time (local,
 derived from the filename's UTC stamp + tick span), duration, outlier-hardened
 top speed, and — on rides recorded by an Ultra with the new `WaterTemp [C]`

@@ -51,6 +51,7 @@ struct RidesScreen: View {
             }
             .navigationTitle("Rides")
             .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { sortMenu }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { receiver.refresh() } label: { Image(systemName: "arrow.clockwise") }
                 }
@@ -60,6 +61,25 @@ struct RidesScreen: View {
             RideMapView(url: sel.url)
         }
         .onAppear { receiver.refresh() }
+    }
+
+    /// Order the list by when the ride happened (default) or by when its file
+    /// last synced. They only differ when a ride reaches the phone late — a
+    /// re-sent ride carries today's file date, so under "Last synced" a
+    /// weeks-old session sits at the top.
+    private var sortMenu: some View {
+        Menu {
+            Picker("Sort by", selection: Binding(
+                get: { receiver.sortOrder },
+                set: { receiver.sortOrder = $0 })) {
+                ForEach(WatchRideReceiver.RideSort.allCases, id: \.self) { order in
+                    Text(order.title).tag(order)
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Image(systemName: "arrow.up.arrow.down")
+        }
     }
 
     /// Apple's WeatherKit terms require the " Weather" trademark plus a link
@@ -145,7 +165,8 @@ actor RideStatsLoader {
     }
 
     /// `WatchGps_yyyyMMdd_HHmmss` — the stamp is UTC (see WatchGpsLogger).
-    private static func stampDate(_ name: String) -> Date? {
+    /// Also the sort key for `WatchRideReceiver.RideSort.rideDate`.
+    static func stampDate(_ name: String) -> Date? {
         guard let m = name.range(of: #"\d{8}_\d{6}"#, options: .regularExpression) else { return nil }
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd_HHmmss"
@@ -174,6 +195,10 @@ private struct RideRowLabel: View {
                 if let line2 {
                     Text(line2)
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                if let syncedLine {
+                    Text(syncedLine)
+                        .font(.caption2).foregroundStyle(.tertiary)
                 }
             }
             Spacer()
@@ -214,6 +239,15 @@ private struct RideRowLabel: View {
         let endStr = s.end.map { tf.string(from: $0) } ?? "—"
         let mins = Int((s.durationSec / 60).rounded())
         return "\(startStr) – \(endStr) · \(mins) min"
+    }
+
+    /// Only while sorting by sync: the list order is otherwise unexplained,
+    /// since every other line on the row is about when the ride happened.
+    private var syncedLine: String? {
+        guard receiver.sortOrder == .synced, let m = receiver.modDate(url) else { return nil }
+        let df = DateFormatter()
+        df.dateStyle = .medium; df.timeStyle = .short
+        return "Synced \(df.string(from: m))"
     }
 
     private var line2: String? {

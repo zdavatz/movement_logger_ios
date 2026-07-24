@@ -230,11 +230,14 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         _ = try? csvHandle?.seekToEnd()   // append after the header row
         logName = name
         csvURL = url
+        // Mark it in-flight so a re-send pass doesn't ship a half-written ride.
+        WatchSync.shared.activeRide = url
     }
 
     private func closeCsv() {
         try? csvHandle?.close()
         csvHandle = nil
+        WatchSync.shared.activeRide = nil
     }
 
     /// Emit one row for the current second using the freshest fix. Called on a
