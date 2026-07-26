@@ -390,8 +390,23 @@ enum RideActivity {
     static func modes(for pts: [GpsRow]) -> [RideMode] {
         guard !pts.isEmpty else { return [] }
         let kmh = GpsMath.rollingMedian(pts.map { $0.speedKmhModule }, window: 5)
-        let confWet = confirmedWet(pts)                 // real submersion (stuck-temp removed)
+        var confWet = confirmedWet(pts)                 // real submersion (stuck-temp removed)
         let water = waterRegion(pts, confWet: confWet, smoothKmh: kmh)
+        // Restore a SWIM back that `confirmedWet` stripped. Its trailing run of
+        // constant temperature looks identical to the sensor holding its last
+        // value during a walk ashore — but a swimmer's wrist stays submerged
+        // stroke to stroke (CMWaterSubmersionManager just pushes fresh temps
+        // rarely), so the reading is real. Geography tells them apart: a swim
+        // back stays inside the water region and ENDS over water (at the launch);
+        // a walk leaves the region and ends ashore. So on a ride that ends over
+        // water, any stripped point still inside the region is a submerged swim —
+        // give it its wetness back so it reads "in water", never "on land". The
+        // region was already seeded from the stripped array, so this can't pull
+        // an inland walk's cells back in.
+        if water.last == true {
+            let rawWet = pts.map { $0.waterTempC.isFinite }
+            for i in pts.indices where rawWet[i] && !confWet[i] && water[i] { confWet[i] = true }
+        }
         let wet = stickyWet(pts, confWet: confWet)      // wrist submerged (or just was)
         // Terminal walk back: dry points after the last real submersion, when
         // that trailing segment actually travels to shore, are on land.

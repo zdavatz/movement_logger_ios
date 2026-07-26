@@ -22,6 +22,10 @@ final class SessionController {
 
     let ble = BoxBleClient()
     let gps = WatchGpsLogger()
+    /// Fused 25 Hz motion, logged alongside a watch-GPS ride into a separate
+    /// `WatchImu_<stamp>.csv` (see `WatchImuLogger`) — feeds the activity
+    /// classifier (belly-paddle vs foil-pump vs gliding).
+    let imu = WatchImuLogger()
     let waterTemp = WaterTempManager()
     @ObservationIgnored private let keepAlive = WorkoutKeepAlive()
 
@@ -135,7 +139,11 @@ final class SessionController {
             source = .watchGPS
             phase = .running
             message = "Recording Watch GPS"
+            // One stamp for both files so the phone pairs the ride with its IMU.
+            let stamp = WatchGpsLogger.stamp(Date())
+            gps.pairStamp = stamp
             gps.start()
+            imu.start(stamp: stamp)
         }
     }
 
@@ -147,9 +155,11 @@ final class SessionController {
             ble.stopLog()
         case .watchGPS:
             gps.stop()
+            imu.stop()
             // Sync this ride's CSV to the phone (queued; delivered even if the
-            // iOS app isn't open).
+            // iOS app isn't open), then its paired IMU stream.
             if let url = gps.csvURL { WatchSync.shared.send(csv: url) }
+            if let url = imu.csvURL { WatchSync.shared.send(csv: url) }
         case .none:
             break
         }
@@ -160,6 +170,7 @@ final class SessionController {
     /// Failure path from `start()`: undo the half-started session.
     private func abort() {
         gps.stop()
+        imu.stop()
         finish()
     }
 

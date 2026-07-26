@@ -49,7 +49,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Race mode sends your live position to the Movement Logger app on your computer, so the race map can show where you are on the water.</string>
 	<key>NSMotionUsageDescription</key>
-	<string>Reads the water temperature from the Apple Watch Ultra's submersion sensor during a session.</string>
+	<string>Records wrist motion and the Apple Watch Ultra's submersion water temperature during a session, to show whether you were paddling, riding, or in the water.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Uses a workout session to keep your MovementLogger recording running in the background.</string>
 	<key>NSHealthUpdateUsageDescription</key>

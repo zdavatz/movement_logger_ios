@@ -125,12 +125,17 @@ final class WatchSync: NSObject, WCSessionDelegate {
             ($0.file.metadata?["name"] as? String) ?? $0.file.fileURL.lastPathComponent
         })
         let active = activeRide?.lastPathComponent
+        // The running ride's IMU sibling shares its stamp (WatchGps_<s> ↔
+        // WatchImu_<s>); exclude it too so a mid-ride resend can't ship a
+        // half-written motion file.
+        let activeImu = active.map { "WatchImu_" + $0.dropFirst("WatchGps_".count) }
         let files = (try? FileManager.default.contentsOfDirectory(
             at: docsDir, includingPropertiesForKeys: nil)) ?? []
         return files
-            .filter { $0.lastPathComponent.hasPrefix("WatchGps_")
+            .filter { ($0.lastPathComponent.hasPrefix("WatchGps_")
+                       || $0.lastPathComponent.hasPrefix("WatchImu_"))
                       && $0.pathExtension.lowercased() == "csv" }
-            .filter { $0.lastPathComponent != active }
+            .filter { $0.lastPathComponent != active && $0.lastPathComponent != activeImu }
             .filter { !done.contains($0.lastPathComponent) }
             .filter { !queued.contains($0.lastPathComponent) }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }

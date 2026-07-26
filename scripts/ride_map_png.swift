@@ -234,6 +234,17 @@ if submerged {
         for dx in -2...2 { for dy in -2...2 where wetCells.contains(gkey(x + dx, y + dy)) { return true } }
         return false
     }
+    // Restore a SWIM back that the stale-temp stripping above turned dry. A
+    // swimmer's wrist stays submerged stroke to stroke (the sensor just pushes
+    // fresh temps rarely), so a constant trailing temperature INSIDE the water
+    // region on a ride that ENDS over water is a real swim, not the sensor
+    // holding its last value during a walk ashore. Give it its wetness back so
+    // the swim back reads "in water", never "on land". A walk ends outside the
+    // region and is untouched.
+    if pts.count > 0, inWater(sc[pts.count-1].lat, sc[pts.count-1].lon) {
+        for i in pts.indices where pts[i].waterTemp.isFinite && !confWet[i]
+            && inWater(sc[i].lat, sc[i].lon) { confWet[i] = true }
+    }
     // Sticky-wet: confirmed submersion or one within 45 s (bridges brief
     // wrist-up moments mid-swim so a swim doesn't flicker to board).
     let wetStickySec = 45.0

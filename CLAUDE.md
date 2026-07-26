@@ -476,7 +476,21 @@ raw speed, when the ride carries the Ultra's `WaterTemp [C]` submersion column.
 1. **Speed vetoes land** — median-smoothed (window 5) `speed ≥ boardKmh` (6)
    → **on board** (crimson). Nobody walks or swims at 16 km/h.
 2. **Terminal walk back** — dry, moving points after the last real submersion,
-   when that tail travels >60 m, are **on land** (amber).
+   when that tail travels >60 m, are **on land** (amber). **A terminal SWIM
+   back is NOT a walk (v1.0.47, 26.7.2026).** During a swim the wrist stays
+   submerged stroke to stroke but `CMWaterSubmersionManager` pushes fresh
+   temperatures only rarely, so the reading sits at a constant value — which
+   `confirmedWet`'s stale-temp stripper read as "the sensor holding its last
+   value on the walk ashore" and stripped, after which this rule painted the
+   whole swim "on land" (the 26.7 Ermioni ride: the final 195 s swim to the
+   launch, at 0.4–2.5 km/h, all inside the water region, showed amber). Fix: a
+   stripped trailing point that is still **inside the water region on a ride
+   that ENDS over water** (`water.last == true`) is a submerged swim — restore
+   its wetness so it reads **in water**, not land. Geography is the arbiter: a
+   real walk ends *outside* the region (ashore) and is untouched (verified: the
+   25.7 ride's 11-min walk up into town still reads land). The region is seeded
+   from the *stripped* array, so the restore can't pull an inland walk's cells
+   back in.
 3. **WHERE** — `waterRegion`, a ~70 m grid dilated by ±2 cells (~140 m) around
    every *proven-water* fix: the confirmed-wet fixes **plus every fix crossed at
    board speed between the first and last submersion** (you cannot foil across a
@@ -528,6 +542,45 @@ the updated watch app.
 - **Interactive view** — `RideMapView` parses the CSV with `CsvParsers.parseGpsFile` (which also accepts the watch logger's bracketed `Lat [deg]` / `Lon [deg]` / `SpeedKMh` headers — see the CSV-schema note), builds the coloured runs via `RideMapRenderer.mapRuns(clean:)` and draws **one `MapPolyline` per colour run** (adjacent runs share their boundary point so the line stays continuous across a colour change), with green **Start** / red **End** annotations and a translucent **legend card** (`.overlay(.bottomLeading)`) — mode swatches when submersion data exists, a speed-gradient bar otherwise. The speed fallback approximates the gradient with 6 smoothed speed bands. Camera frames the track via `.rect(RideMapRenderer.boundingRect(trackPoints))`.
 - **Shareable PNG** — the toolbar Share button calls `RideMapRenderer.render(rows:title:)`, which uses **`MKMapSnapshotter`** (NOT `ImageRenderer` — SwiftUI's `Map` snapshots blank because tiles render out-of-process) to grab real Apple Maps tiles, then draws over the snapshot with CoreGraphics: a white casing (one continuous sub-path per non-broken run), then the track **edge-by-edge** in the activity-mode colour (or the speed gradient `speedColor`, `robustMaxSpeed` = 95th-pct), start/end dots, and a branded footer. The footer is a **horizontal legend strip along the top** (activity swatches left→right, or a speed-gradient scale — deliberately its own band so the long source-URL line can never collide with it), a divider, then the **app logo** (`RideLogo` imageset — a copy of the app icon, since `UIImage(named:)` can't reliably load an `AppIcon` set), ride **stats** (top speed via `RideMapRenderer.robustTopSpeed` — hard 60 km/h clip + blackout adjacency + ±1 s chord consistency; distance via `trackDistanceKm` over the continuous track skipping breaks + `trackMaxHopM` glitch hops; duration; and **median water temp** via `medianWaterTempC`, omitted on a ride with no submersion column — the four-item line auto-shrinks via `fitted(_:maxWidth:…)` rather than running under the right edge), and the **GitHub source link** (`RideMapRenderer.sourceURL`). The PNG lands in `Documents/RideMaps/<name>_map.png` and is handed to a `UIActivityViewController` share sheet. `snapshot.point(for:)` returns points in the snapshot image's own space, so the track aligns to the tiles with no manual flip on iOS.
 - **`scripts/ride_map_png.swift`** is the standalone macOS twin of `RideMapRenderer` (AppKit/`NSImage` instead of UIKit): `swift scripts/ride_map_png.swift <in.csv> <out.png> [logo.png]`, `MLDEBUG=1` to print the classified runs. It ports the same continuous-track cleaning + `RideActivity` classifier + legend, and is how the v1.0.24 rendering was verified on the Mac (incl. a synthesised `WaterTemp` column to exercise the 3-mode path). **It does NOT flip `point(for:)`** — that was a bug (fixed 13.7.2026): on AppKit `snapshot.point(for:)` already comes back in the same y-up space the snapshot image is drawn in, so the old `y = footerH + (mapH - p.y)` mirrored the whole track against the tiles. It silently invalidates any visual check made with this script — a due-north synthetic track drew its start at the top, and the 12.7 walk into town appeared out at sea. iOS is y-down and likewise needs no flip.
+
+### Watch IMU logging — a separate motion CSV (v1.0.47+, Phase 1)
+
+To tell a **belly-paddle** from a **foil-pump** from **gliding/waiting** —
+which GPS speed + water-submersion alone cannot (all three are "slow, on the
+board, over water"; the propulsion is invisible to those sensors) — the watch
+logs its **fused inertial motion** during a watch-GPS ride. `WatchImuLogger`
+(`MovementLoggerWatch/WatchImuLogger.swift`) runs `CMMotionManager.deviceMotion`
+at **25 Hz** into a **separate** `WatchImu_<stamp>.csv` — same stamp as the ride
+so the phone pairs them (`WatchGps_<s>` ↔ `WatchImu_<s>`).
+
+- **Why separate + raw, not features on the GPS row.** The ride CSV is a clean
+  1 Hz GPS grid the parsers already read; a 25 Hz stream would bloat it and
+  break the schema. And the classifier is still being *developed*, so we log the
+  raw fused samples (columns: `epoch_ms, ux/uy/uz` userAcceleration g,
+  `gx/gy/gz` gravity, `rx/ry/rz` rotationRate rad/s) rather than pre-computed
+  per-second features — so the phone-side classifier can be tuned against the
+  real waveform. **Phase 2 (the classifier) can't be written until real rides
+  carry this data** — ship the logging, record a paddle+foil session, then tune.
+  `userAcceleration` (gravity already split off) is the cadence channel; a
+  paddle is a big fore-aft arm swing, a pump a ~1 Hz vertical heave. 25 Hz is
+  ≥16 samples/cycle for a ≤1.5 Hz stroke — the 800 Hz `CMBatchedSensorManager`
+  firehose is for a golf swing. Updates keep flowing in the background off the
+  same `WorkoutKeepAlive` session that keeps the GPS logger alive.
+- **Wiring.** `SessionController` mints one stamp, sets `gps.pairStamp`, and
+  starts both loggers in the watch-GPS branch (box sessions log on the box, not
+  the watch — no IMU); `stop()`/`abort()` stop both and hand each file to
+  `WatchSync`. Sync reuses the ride path: `WatchSync.pendingRides()` now matches
+  `WatchImu_*` too (so the retry/manifest bookkeeping covers it), and the
+  running ride's IMU sibling is excluded from a mid-ride resend (shares the
+  active ride's stamp). Phone-side, `WatchRideReceiver` **stores and
+  manifest-tracks** IMU files (so the watch stops re-sending them) but
+  **excludes `WatchImu_*` from the Rides list** — they're not rides.
+- **Cost / follow-up.** ~9 MB for an 87-min ride over WCSession (background,
+  fine for the tuning phase). Once the classifier is validated, slim this to
+  compact per-second features on the GPS row, or classify on-watch. Needs the
+  watch on the v1.0.47+ build; rides recorded by an older watch have no
+  `WatchImu_*` companion and just fall back to the existing GPS+submersion
+  classifier.
 
 ### GPS Debug tab — u-blox UBX survey over BLE
 

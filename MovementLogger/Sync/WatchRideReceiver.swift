@@ -123,7 +123,11 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
     func refresh() {
         let files = (try? FileManager.default.contentsOfDirectory(
             at: ridesDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        let csvs = files.filter { $0.pathExtension.lowercased() == "csv" }
+        // WatchImu_* are the paired raw-motion streams, not rides — they're
+        // stored and manifest-tracked (so the watch stops re-sending them) but
+        // never listed here.
+        let csvs = files.filter { $0.pathExtension.lowercased() == "csv"
+            && !$0.lastPathComponent.hasPrefix("WatchImu_") }
         switch sortOrder {
         case .rideDate:
             rides = csvs.sorted { rideStart($0) > rideStart($1) }

@@ -67,6 +67,9 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
     /// Set by `start()`, cleared by `stop()`. Lets us begin updates from the
     /// authorization callback if permission was still pending at Start.
     @ObservationIgnored private var wantLog = false
+    /// Filename stamp to use for this ride, set by `SessionController` so the
+    /// paired `WatchImu_<stamp>.csv` shares it. Falls back to now() if unset.
+    @ObservationIgnored var pairStamp: String?
 
     override init() {
         super.init()
@@ -222,7 +225,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         guard csvHandle == nil else { return }
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let name = "WatchGps_" + Self.stamp(Date()) + ".csv"
+        let name = "WatchGps_" + (pairStamp ?? Self.stamp(Date())) + ".csv"
         let url = docs.appendingPathComponent(name)
         let header = "Time [10ms],UTC,Lat [deg],Lon [deg],Alt [m],SpeedKMh,Course [deg],Fix,NumSat,HDOP,WaterTemp [C]\n"
         FileManager.default.createFile(atPath: url.path, contents: header.data(using: .utf8))
@@ -293,7 +296,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         return f.string(from: t)
     }
 
-    private static func stamp(_ t: Date) -> String {
+    static func stamp(_ t: Date) -> String {
         let f = DateFormatter()
         f.dateFormat = "yyyyMMdd_HHmmss"
         f.locale = Locale(identifier: "en_US_POSIX")
