@@ -581,11 +581,23 @@ regardless of any box connection) mirrors the board-mounted watch's live data �
 the watch over WatchConnectivity. Built on the same `sendMessage` relay as the
 race fixes.
 
-- **Transport = `WCSession.sendMessage`: Bluetooth up close, WiFi at range on the
-  same network, NEVER cellular.** So it's live for setup (BT, no WiFi) or on
-  venue WiFi; a watch out on the water on cellular-only can't feed it without an
-  internet relay (the same "future relay" the race design notes). File sync is
-  unaffected — rides always sync over BT when back near the phone.
+- **Two transports, auto-selected.** (1) `WCSession.sendMessage` — Bluetooth up
+  close, WiFi at range on the same network, low latency, NEVER cellular. (2) The
+  **public race relay** (`ml.ywesee.com:47777`, the desktop's `race-relay` UDP
+  service) — works over **any internet incl. cellular/GSM**. The watch sends via
+  WCSession when the phone is directly reachable and falls back to the relay
+  (`WatchLiveRelay.sendSnapshot`, a `typ:"board"` rider datagram, ~3 Hz, only
+  during a session to bound cellular use) when it isn't; the phone's card is
+  always a relay **viewer** (`WatchLive.startViewer` — subscribe every 8 s +
+  receive), so it shows whichever path delivers. Rider/token reuse the race
+  config (`race.rider`/`race.token`); a token only matters to isolate your stream
+  on the shared relay. **Caveat:** the relay is one-way rider→viewer, so the
+  phone can't send `wantLive`/`zeroAngles` to a far watch — the relay send isn't
+  gated on `wantLive` (streams whenever a session runs + phone unreachable), and
+  the remote tare only works over WCSession (up close). Cellular also needs an
+  active plan on the watch, and the watch only uses cellular when the phone
+  isn't nearby (else it routes through the phone). File sync is unaffected —
+  rides always sync over BT when back near the phone.
 - **Pull model, phone-driven.** The card `requestStream(true)` while on screen
   (re-sent every 2 s so it catches the watch coming into range), `false` on
   disappear. The watch (`WatchSync.didReceiveMessage`) sets `liveStreaming` and

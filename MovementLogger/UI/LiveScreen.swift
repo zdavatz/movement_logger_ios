@@ -745,9 +745,7 @@ struct WatchLiveCard: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
-                Text(live.reachable
-                     ? "Waiting for the watch… open the MovementLogger app on the watch (or start a session)."
-                     : "Watch not reachable — open the watch app and keep it near the phone (Bluetooth) or on the same WiFi.")
+                Text("Waiting for the watch… open the MovementLogger app on the watch (or start a session). Live works over Bluetooth up close, WiFi at range, or the cellular relay during a session.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -758,8 +756,9 @@ struct WatchLiveCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 10))
         .onReceive(tick) { now = $0 }
         .onAppear {
+            WatchLive.shared.startViewer()          // relay path (cellular / far)
             pump?.cancel()
-            pump = Task {
+            pump = Task {                            // WCSession path (BT / WiFi, close)
                 while !Task.isCancelled {
                     WatchLive.shared.requestStream(true)
                     try? await Task.sleep(for: .seconds(2))
@@ -769,6 +768,7 @@ struct WatchLiveCard: View {
         .onDisappear {
             pump?.cancel(); pump = nil
             WatchLive.shared.requestStream(false)
+            WatchLive.shared.stopViewer()
         }
     }
 

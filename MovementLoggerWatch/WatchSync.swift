@@ -71,19 +71,31 @@ final class WatchSync: NSObject, WCSessionDelegate {
     func sendLiveSnapshot(pitch: Double, roll: Double, yaw: Double,
                           kmh: Double, water: Double?, alt: Double,
                           pressure: Double, running: Bool, zeroed: Bool) {
-        guard liveStreaming, WCSession.default.isReachable else { return }
-        let now = Date()
-        guard now.timeIntervalSince(lastLiveAt) >= Self.liveMinInterval else { return }
-        lastLiveAt = now
-        var d: [String: Double] = ["p": pitch, "r": roll, "y": yaw,
-                                   "run": running ? 1 : 0, "z": zeroed ? 1 : 0]
-        if kmh.isFinite { d["kmh"] = kmh }
-        if let water, water.isFinite { d["wt"] = water }
-        if alt.isFinite { d["alt"] = alt }
-        if pressure.isFinite { d["hpa"] = pressure }
-        let batt = WKInterfaceDevice.current().batteryLevel
-        if batt >= 0 { d["batt"] = Double(Int((batt * 100).rounded())) }
-        WCSession.default.sendMessage(["live": d], replyHandler: nil, errorHandler: nil)
+        let bl = WKInterfaceDevice.current().batteryLevel
+        let battPct = bl >= 0 ? Int((bl * 100).rounded()) : -1
+        if WCSession.default.isReachable {
+            // Close range — WCSession (low latency), only when the phone asked.
+            guard liveStreaming else { return }
+            let now = Date()
+            guard now.timeIntervalSince(lastLiveAt) >= Self.liveMinInterval else { return }
+            lastLiveAt = now
+            var d: [String: Double] = ["p": pitch, "r": roll, "y": yaw,
+                                       "run": running ? 1 : 0, "z": zeroed ? 1 : 0]
+            if kmh.isFinite { d["kmh"] = kmh }
+            if let water, water.isFinite { d["wt"] = water }
+            if alt.isFinite { d["alt"] = alt }
+            if pressure.isFinite { d["hpa"] = pressure }
+            if battPct >= 0 { d["batt"] = Double(battPct) }
+            WCSession.default.sendMessage(["live": d], replyHandler: nil, errorHandler: nil)
+        } else if running {
+            // Far / cellular — stream to the public relay so the phone (a relay
+            // viewer) still sees it. Only during a session, to bound cellular use;
+            // the phone can't send `wantLive` at range, so this isn't gated on it.
+            WatchLiveRelay.shared.sendSnapshot(
+                pitch: pitch, roll: roll, yaw: yaw, kmh: kmh, water: water,
+                alt: alt, pressure: pressure, batt: battPct,
+                running: running, zeroed: zeroed)
+        }
     }
 
     /// One live fix (1 Hz, from `WatchGpsLogger.writeRow`). With the

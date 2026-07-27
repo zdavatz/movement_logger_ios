@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import WatchConnectivity
+import Network
 
 /// Live board data streamed from the watch (strapped to the board) to the phone
 /// over WatchConnectivity — the phone-side peer of `WatchSync.sendLiveSnapshot`.
@@ -71,5 +72,64 @@ final class WatchLive {
     private func send(_ message: [String: Any]) {
         guard reachable else { return }
         WCSession.default.sendMessage(message, replyHandler: nil, errorHandler: nil)
+    }
+
+    // MARK: - Relay viewer (cellular / far-range path)
+
+    /// The public race relay — the watch streams its board snapshot here when the
+    /// phone isn't directly reachable (see `WatchLiveRelay`), and this phone
+    /// subscribes as a viewer to receive it. Works over any internet, cellular
+    /// included; WCSession stays the low-latency path up close.
+    static let relayHost = "ml.ywesee.com"
+    static let relayPort: UInt16 = 47777
+
+    @ObservationIgnored private var viewer: NWConnection?
+    @ObservationIgnored private let viewerQueue = DispatchQueue(label: "watch-live-viewer")
+    @ObservationIgnored private var keepalive: Timer?
+
+    /// Open the relay viewer while the live card is on screen: subscribe (re-sent
+    /// every 8 s to stay registered and hold the NAT pinhole open) and feed every
+    /// board snapshot into `apply`.
+    func startViewer() {
+        stopViewer()
+        guard let port = NWEndpoint.Port(rawValue: Self.relayPort) else { return }
+        let c = NWConnection(host: NWEndpoint.Host(Self.relayHost), port: port, using: .udp)
+        c.stateUpdateHandler = { [weak self] st in
+            if case .ready = st { self?.subscribe() }
+        }
+        c.start(queue: viewerQueue)
+        viewer = c
+        receiveLoop()
+        keepalive?.invalidate()
+        keepalive = Timer.scheduledTimer(withTimeInterval: 8, repeats: true) { [weak self] _ in
+            self?.subscribe()
+        }
+    }
+
+    func stopViewer() {
+        keepalive?.invalidate(); keepalive = nil
+        viewer?.cancel(); viewer = nil
+    }
+
+    private func subscribe() {
+        let sub: [String: Any] = ["v": 1, "sub": true, "race": RaceUplink.shared.token]
+        guard let d = try? JSONSerialization.data(withJSONObject: sub) else { return }
+        viewer?.send(content: d, completion: .idempotent)
+    }
+
+    private func receiveLoop() {
+        viewer?.receiveMessage { [weak self] data, _, _, err in
+            guard let self else { return }
+            if let data,
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               (obj["typ"] as? String) == "board" {
+                var nums: [String: Double] = [:]
+                for k in ["p", "r", "y", "kmh", "wt", "alt", "hpa", "batt", "run", "z"] {
+                    if let n = obj[k] as? NSNumber { nums[k] = n.doubleValue }
+                }
+                DispatchQueue.main.async { self.apply(nums) }
+            }
+            if err == nil { self.receiveLoop() }   // keep receiving
+        }
     }
 }
