@@ -1,6 +1,7 @@
 import Foundation
 import Observation
 import WatchConnectivity
+import WatchKit
 
 /// Sends finished ride CSVs from the watch to the paired iPhone over
 /// WatchConnectivity. `transferFile` is queued and delivered in the
@@ -46,13 +47,43 @@ final class WatchSync: NSObject, WCSessionDelegate {
     private static let maxRetries = 3
     @ObservationIgnored private var retries: [String: Int] = [:]
 
+    /// The phone's live view is open — stream the board snapshot to it. Set by
+    /// the phone's `wantLive` message.
+    @ObservationIgnored private(set) var liveStreaming = false
+    /// ~10 Hz cap on the live snapshot messages.
+    private static let liveMinInterval: TimeInterval = 0.09
+    @ObservationIgnored private var lastLiveAt: Date = .distantPast
+
     private override init() {
         super.init()
+        WKInterfaceDevice.current().isBatteryMonitoringEnabled = true   // for the live batt %
         if WCSession.isSupported() {
             WCSession.default.delegate = self
             WCSession.default.activate()
         }
         refreshPendingCount()
+    }
+
+    /// Stream one live board snapshot to the phone's live view. Throttled and
+    /// gated on the phone having asked (`liveStreaming`) and being reachable —
+    /// same BT-close / WiFi-at-range transport as the race relay. Called at the
+    /// angle publish rate from `SessionController` (`imu.onAngles`).
+    func sendLiveSnapshot(pitch: Double, roll: Double, yaw: Double,
+                          kmh: Double, water: Double?, alt: Double,
+                          pressure: Double, running: Bool, zeroed: Bool) {
+        guard liveStreaming, WCSession.default.isReachable else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastLiveAt) >= Self.liveMinInterval else { return }
+        lastLiveAt = now
+        var d: [String: Double] = ["p": pitch, "r": roll, "y": yaw,
+                                   "run": running ? 1 : 0, "z": zeroed ? 1 : 0]
+        if kmh.isFinite { d["kmh"] = kmh }
+        if let water, water.isFinite { d["wt"] = water }
+        if alt.isFinite { d["alt"] = alt }
+        if pressure.isFinite { d["hpa"] = pressure }
+        let batt = WKInterfaceDevice.current().batteryLevel
+        if batt >= 0 { d["batt"] = Double(Int((batt * 100).rounded())) }
+        WCSession.default.sendMessage(["live": d], replyHandler: nil, errorHandler: nil)
     }
 
     /// One live fix (1 Hz, from `WatchGpsLogger.writeRow`). With the
@@ -219,6 +250,21 @@ final class WatchSync: NSObject, WCSessionDelegate {
     func sessionReachabilityDidChange(_ session: WCSession) {
         guard session.isReachable, hasManifest else { return }
         resendPending()
+    }
+
+    /// Phone → watch commands for the live view: `wantLive` toggles streaming
+    /// (and keeps the motion running so a board-mounted, screen-off watch still
+    /// feeds it); `zeroAngles`/`clearZero` tare the board reference remotely.
+    func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
+        DispatchQueue.main.async {
+            if let want = message["wantLive"] as? Bool {
+                self.liveStreaming = want
+                if want { SessionController.shared.imu.startStream() }
+                else { SessionController.shared.imu.stopStream() }
+            }
+            if message["zeroAngles"] != nil { SessionController.shared.imu.zero() }
+            if message["clearZero"] != nil { SessionController.shared.imu.clearZero() }
+        }
     }
 
     /// Confirmation that a ride actually landed on the phone. Only a

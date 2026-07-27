@@ -65,6 +65,11 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
     @ObservationIgnored private let altimeter = CMAltimeter()
     @ObservationIgnored private var pressureHPa: Double = .nan
     @ObservationIgnored private var baroAltM: Double = .nan
+
+    /// Latest barometric readings for the live phone stream (NaN until a sample
+    /// lands or between sessions).
+    var latestPressureHPa: Double { pressureHPa }
+    var latestBaroAltM: Double { baroAltM }
     /// Injected by SessionController: the Ultra's submersion water
     /// temperature (°C) while the wrist is in the water, else nil. Logged
     /// as the `WaterTemp [C]` column so rides carry it to the phone.

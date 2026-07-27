@@ -18,6 +18,8 @@ struct LiveScreen: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    WatchLiveCard()
+                    Divider()
                     Text("SensorStream — 0.5 Hz packed all-sensor snapshot (IMU + mag + baro + GPS).")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -685,5 +687,99 @@ private struct BatterySection: View {
             .clipShape(RoundedRectangle(cornerRadius: 10))
             .onReceive(tick) { now = $0 }
         }
+    }
+}
+
+// MARK: - Watch live card (watch strapped to the board → phone)
+
+/// Live board data streamed from the watch over WatchConnectivity — pitch /
+/// roll / yaw plus speed / water / height / battery. Shown at the top of the
+/// Live tab regardless of the box connection. Requests the stream while
+/// on-screen (re-sent every 2 s so it catches the watch coming into range) and
+/// tells the watch to stop when it leaves.
+struct WatchLiveCard: View {
+    @State private var live = WatchLive.shared
+    /// A 1 Hz tick so `isFresh` (a time comparison, not an observable) re-renders
+    /// to "stale" when the stream stops.
+    @State private var now = Date()
+    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    @State private var pump: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "applewatch.side.right")
+                Text("Watch — board (live)").fontWeight(.semibold)
+                Spacer()
+                Circle()
+                    .fill(live.isFresh ? Color.green : (live.reachable ? .yellow : .gray))
+                    .frame(width: 8, height: 8)
+            }
+            .font(.subheadline)
+
+            if live.isFresh {
+                HStack(spacing: 6) {
+                    metric("PITCH", live.pitchDeg, "°", 0)
+                    metric("ROLL", live.rollDeg, "°", 0)
+                    metric("YAW", live.yawDeg, "°", 0)
+                }
+                HStack(spacing: 6) {
+                    metric("SPEED", live.kmh, "km/h", 1)
+                    metric("WATER", live.waterTempC ?? .nan, "°C", 1)
+                    metric("ALT", live.baroAltM, "m", 1)
+                    metric("BATT", live.battPct.map(Double.init) ?? .nan, "%", 0)
+                }
+                Button {
+                    if live.zeroed { WatchLive.shared.clearZero() }
+                    else { WatchLive.shared.zero() }
+                } label: {
+                    Label(live.zeroed ? "Clear zero" : "Zero here",
+                          systemImage: live.zeroed ? "xmark.circle" : "scope")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .font(.caption)
+                if !live.running {
+                    Text("No session running on the watch — speed / water / height are live only during a recording.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text(live.reachable
+                     ? "Waiting for the watch… open the MovementLogger app on the watch (or start a session)."
+                     : "Watch not reachable — open the watch app and keep it near the phone (Bluetooth) or on the same WiFi.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(uiColor: .secondarySystemBackground))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .onReceive(tick) { now = $0 }
+        .onAppear {
+            pump?.cancel()
+            pump = Task {
+                while !Task.isCancelled {
+                    WatchLive.shared.requestStream(true)
+                    try? await Task.sleep(for: .seconds(2))
+                }
+            }
+        }
+        .onDisappear {
+            pump?.cancel(); pump = nil
+            WatchLive.shared.requestStream(false)
+        }
+    }
+
+    private func metric(_ label: String, _ value: Double, _ unit: String, _ dp: Int) -> some View {
+        VStack(spacing: 0) {
+            Text(label).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            Text(value.isFinite ? String(format: "%.\(dp)f", value) : "—")
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .monospacedDigit().minimumScaleFactor(0.5).lineLimit(1)
+            Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 }

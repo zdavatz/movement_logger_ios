@@ -573,6 +573,38 @@ yaw are unambiguous (no gimbal lock), so this stays simple.
   box AND a board-mounted watch on the same ride gives a free box-vs-watch angle
   cross-check.
 
+### Watch → phone live view (v1.0.50+)
+
+A card at the top of the phone's **Live tab** (`LiveScreen.WatchLiveCard`, shown
+regardless of any box connection) mirrors the board-mounted watch's live data —
+**pitch / roll / yaw + speed + water temp + height + battery** — streamed from
+the watch over WatchConnectivity. Built on the same `sendMessage` relay as the
+race fixes.
+
+- **Transport = `WCSession.sendMessage`: Bluetooth up close, WiFi at range on the
+  same network, NEVER cellular.** So it's live for setup (BT, no WiFi) or on
+  venue WiFi; a watch out on the water on cellular-only can't feed it without an
+  internet relay (the same "future relay" the race design notes). File sync is
+  unaffected — rides always sync over BT when back near the phone.
+- **Pull model, phone-driven.** The card `requestStream(true)` while on screen
+  (re-sent every 2 s so it catches the watch coming into range), `false` on
+  disappear. The watch (`WatchSync.didReceiveMessage`) sets `liveStreaming` and
+  calls `imu.startStream()` — a THIRD `WatchImuLogger` client (alongside the
+  watch-UI card and the ride logger) so a board-mounted, screen-off watch keeps
+  feeding the stream during a ride. `SessionController` wires `imu.onAngles` to
+  assemble the full snapshot (angles from the IMU + speed/water/baro from the
+  GPS logger + battery) and `WatchSync.sendLiveSnapshot` sends it, throttled
+  ~10 Hz, gated on `liveStreaming && isReachable`.
+- **Remote tare.** The card's "Zero here"/"Clear zero" sends `zeroAngles`/
+  `clearZero` back to the watch (`imu.zero()`), so you tare the board-mounted
+  watch from the phone in your hand. The button label tracks the watch's `hasZero`
+  (streamed as `z`).
+- **Phone state** is `WatchLive.shared` (`@Observable`), fed by
+  `WatchRideReceiver.didReceiveMessage` (the single phone-side `WCSessionDelegate`
+  — the `live` message is handled alongside `raceFix`, no early-return). `isFresh`
+  (≤2.5 s since last snapshot) drives the "waiting / stale" state; speed/water/
+  height are only live while a session runs on the watch (`running`).
+
 ### Watch IMU logging — a separate motion CSV (v1.0.47+, Phase 1)
 
 To tell a **belly-paddle** from a **foil-pump** from **gliding/waiting** —

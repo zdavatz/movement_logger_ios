@@ -51,6 +51,19 @@ final class SessionController {
     init() {
         ble.startScanning()
         keepAlive.onSessionRunning = { [weak self] in self?.engageWaterLockIfNeeded() }
+        // Feed the phone's live view: each angle update assembles the full board
+        // snapshot (angles + speed + water temp + baro) and streams it. No-op
+        // unless the phone asked for the stream and is reachable.
+        imu.onAngles = { [weak self] p, r, y in
+            guard let self else { return }
+            WatchSync.shared.sendLiveSnapshot(
+                pitch: p, roll: r, yaw: y,
+                kmh: self.gps.speedKmh,
+                water: self.waterTemp.temperatureC,
+                alt: self.gps.latestBaroAltM,
+                pressure: self.gps.latestPressureHPa,
+                running: self.isRunning, zeroed: self.imu.hasZero)
+        }
     }
 
     /// Engage Water Lock if a session wants it. Safe to call repeatedly and from

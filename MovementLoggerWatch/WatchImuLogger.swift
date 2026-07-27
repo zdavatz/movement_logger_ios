@@ -61,10 +61,16 @@ final class WatchImuLogger {
     @ObservationIgnored private var clearPending = false
     @ObservationIgnored private var sampleCount = 0
 
-    // Two independent clients keep the one manager running; it stops only when
-    // both are done.
-    @ObservationIgnored private var liveActive = false
+    // Independent clients keep the one manager running; it stops only when all
+    // are done: the watch's own angle card (`liveUI`), the phone live-view
+    // stream (`liveStream`), and a ride recording (`loggingActive`).
+    @ObservationIgnored private var liveUI = false
+    @ObservationIgnored private var liveStream = false
     @ObservationIgnored private var loggingActive = false
+
+    /// Called on the main queue at the UI publish rate (~8 Hz) with the current
+    /// pitch/roll/yaw (degrees). Used to stream the live snapshot to the phone.
+    @ObservationIgnored var onAngles: ((Double, Double, Double) -> Void)?
 
     // MARK: - Logging file state
     @ObservationIgnored private var handle: FileHandle?
@@ -75,11 +81,16 @@ final class WatchImuLogger {
 
     // MARK: - Live UI control
 
-    /// Start delivering live angles for the UI (no logging). Idempotent.
-    func startLive() { liveActive = true; ensureRunning() }
-    /// Stop the live-angle client. The manager keeps running if a ride is still
-    /// logging.
-    func stopLive() { liveActive = false; ensureRunning() }
+    /// Start delivering live angles for the watch's own UI. Idempotent.
+    func startLive() { liveUI = true; ensureRunning() }
+    /// Stop the watch-UI angle client. The manager keeps running if a ride is
+    /// still logging or the phone is streaming.
+    func stopLive() { liveUI = false; ensureRunning() }
+
+    /// The phone opened its live view — keep angles flowing to feed the stream
+    /// even when the watch screen is off (e.g. board-mounted during a ride).
+    func startStream() { liveStream = true; ensureRunning() }
+    func stopStream() { liveStream = false; ensureRunning() }
 
     /// Capture the current pose as the zero reference (tare).
     func zero() { zeroPending = true; hasZero = true }
@@ -121,7 +132,7 @@ final class WatchImuLogger {
     // MARK: - Manager run control
 
     private func ensureRunning() {
-        let want = liveActive || loggingActive
+        let want = liveUI || liveStream || loggingActive
         if want, !motion.isDeviceMotionActive, motion.isDeviceMotionAvailable {
             motion.deviceMotionUpdateInterval = 1.0 / Self.hz
             motion.startDeviceMotionUpdates(to: queue) { [weak self] m, _ in
@@ -154,6 +165,7 @@ final class WatchImuLogger {
             DispatchQueue.main.async {
                 self.pitchDeg = p; self.rollDeg = r; self.yawDeg = y
                 if !self.anglesLive { self.anglesLive = true }
+                self.onAngles?(p, r, y)
             }
         }
 

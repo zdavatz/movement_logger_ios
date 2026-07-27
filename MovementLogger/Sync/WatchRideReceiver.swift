@@ -186,11 +186,16 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
     /// phone has raised the `raceRelay` application-context flag (see
     /// `RaceUplink`). Forwarded to the UDP uplink, sourced "watch".
     func session(_ session: WCSession, didReceiveMessage message: [String: Any]) {
-        guard let f = message["raceFix"] as? [String: Double],
-              let lat = f["lat"], let lon = f["lon"] else { return }
-        DispatchQueue.main.async {
-            RaceUplink.shared.sendFix(lat: lat, lon: lon, kmh: f["kmh"], deg: f["deg"],
-                                      acc: f["acc"], from: .watch)
+        if let f = message["raceFix"] as? [String: Double],
+           let lat = f["lat"], let lon = f["lon"] {
+            DispatchQueue.main.async {
+                RaceUplink.shared.sendFix(lat: lat, lon: lon, kmh: f["kmh"], deg: f["deg"],
+                                          acc: f["acc"], from: .watch)
+            }
+        }
+        // Live board snapshot for the phone's watch-live card.
+        if let live = message["live"] as? [String: Double] {
+            DispatchQueue.main.async { WatchLive.shared.apply(live) }
         }
     }
 
