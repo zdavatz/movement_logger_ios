@@ -62,7 +62,9 @@ final class SessionController {
                 water: self.waterTemp.temperatureC,
                 alt: self.gps.latestBaroAltM,
                 pressure: self.gps.latestPressureHPa,
-                running: self.isRunning, zeroed: self.imu.hasZero)
+                running: self.isRunning, zeroed: self.imu.hasZero,
+                lat: self.gps.latestLat, lon: self.gps.latestLon,
+                deg: self.gps.latestCourse, acc: self.gps.latestAccM)
         }
     }
 

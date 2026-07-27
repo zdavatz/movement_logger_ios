@@ -9,6 +9,8 @@
 /* Begin PBXBuildFile section */
 		0A3E16FD73A9FA46C6E70D01 /* WatchRideReceiver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BEEF19B16BDFCEC951C63CA /* WatchRideReceiver.swift */; };
 		A10000000000000000000430 /* WatchLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000431 /* WatchLive.swift */; };
+		A10000000000000000000432 /* RaceViewer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000433 /* RaceViewer.swift */; };
+		A10000000000000000000434 /* RaceMapScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000435 /* RaceMapScreen.swift */; };
 		1815BCF90E89A510DF9CC1AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EDDD795623AC92CE44CEB489 /* Assets.xcassets */; };
 		21BC9E20260DBC676AC90A2F /* RidesScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 536A7998F0FA05CA9E0715BA /* RidesScreen.swift */; };
 		A1000000000000000000030C /* RideMap.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000040C /* RideMap.swift */; };
@@ -98,6 +100,8 @@
 		A1000000000000000000040C /* RideMap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RideMap.swift; sourceTree = "<group>"; };
 		5BEEF19B16BDFCEC951C63CA /* WatchRideReceiver.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchRideReceiver.swift; sourceTree = "<group>"; };
 		A10000000000000000000431 /* WatchLive.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchLive.swift; sourceTree = "<group>"; };
+		A10000000000000000000433 /* RaceViewer.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RaceViewer.swift; sourceTree = "<group>"; };
+		A10000000000000000000435 /* RaceMapScreen.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RaceMapScreen.swift; sourceTree = "<group>"; };
 		617213F133B64E4AA0A7CE6F /* WorkoutKeepAlive.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorkoutKeepAlive.swift; sourceTree = "<group>"; };
 		701C8A80B76519D70C9EAB65 /* WatchGpsLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchGpsLogger.swift; sourceTree = "<group>"; };
 		A10000000000000000000421 /* WatchImuLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WatchImuLogger.swift; sourceTree = "<group>"; };
@@ -254,6 +258,7 @@
 			children = (
 				A1000000000000000000020A /* MainNav.swift */,
 				A1000000000000000000020F /* LiveScreen.swift */,
+				A10000000000000000000435 /* RaceMapScreen.swift */,
 				A10000000000000000000412 /* GpsScreen.swift */,
 				A100000000000000000000F3 /* FileSyncViewModel.swift */,
 				A100000000000000000000F4 /* FileSyncScreen.swift */,
@@ -312,6 +317,7 @@
 				A10000000000000000000314 /* FirmwareUpdate.swift */,
 				5BEEF19B16BDFCEC951C63CA /* WatchRideReceiver.swift */,
 				A10000000000000000000431 /* WatchLive.swift */,
+				A10000000000000000000433 /* RaceViewer.swift */,
 			);
 			path = Sync;
 			sourceTree = "<group>";
@@ -458,6 +464,8 @@
 				A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */,
 				0A3E16FD73A9FA46C6E70D01 /* WatchRideReceiver.swift in Sources */,
 				A10000000000000000000430 /* WatchLive.swift in Sources */,
+				A10000000000000000000432 /* RaceViewer.swift in Sources */,
+				A10000000000000000000434 /* RaceMapScreen.swift in Sources */,
 				21BC9E20260DBC676AC90A2F /* RidesScreen.swift in Sources */,
 				A1000000000000000000030C /* RideMap.swift in Sources */,
 				84B95C3736B677491FECB6AE /* Calibration.swift in Sources */,

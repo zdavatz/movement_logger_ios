@@ -35,6 +35,9 @@ struct MainNav: View {
             RidesScreen()
                 .tabItem { Label("Rides", systemImage: "applewatch") }
                 .tag(4)
+            RaceMapScreen()
+                .tabItem { Label("Race", systemImage: "map.fill") }
+                .tag(7)
             GpsDebugScreen(vm: vm)
                 .tabItem { Label("GPS Debug", systemImage: "antenna.radiowaves.left.and.right") }
                 .tag(5)

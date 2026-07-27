@@ -61,7 +61,8 @@ final class WatchLiveRelay {
 
     func sendSnapshot(pitch: Double, roll: Double, yaw: Double, kmh: Double,
                       water: Double?, alt: Double, pressure: Double, batt: Int,
-                      running: Bool, zeroed: Bool) {
+                      running: Bool, zeroed: Bool,
+                      lat: Double, lon: Double, deg: Double, acc: Double) {
         let now = Date()
         guard now.timeIntervalSince(lastAt) >= Self.minInterval else { return }
         lastAt = now
@@ -71,6 +72,10 @@ final class WatchLiveRelay {
             "run": running ? 1 : 0, "z": zeroed ? 1 : 0,
             "ts": Int64(now.timeIntervalSince1970 * 1000),
         ]
+        // Position turns the board snapshot into a complete race-map datagram.
+        if lat.isFinite, lon.isFinite { o["lat"] = lat; o["lon"] = lon }
+        if deg.isFinite { o["deg"] = deg }
+        if acc.isFinite, acc > 0 { o["acc"] = acc }
         if kmh.isFinite { o["kmh"] = kmh }
         if let water, water.isFinite { o["wt"] = water }
         if alt.isFinite { o["alt"] = alt }

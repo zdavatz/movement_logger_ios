@@ -622,6 +622,31 @@ race fixes.
   (≤2.5 s since last snapshot) drives the "waiting / stale" state; speed/water/
   height are only live while a session runs on the watch (`running`).
 
+### Race map (iPhone) — live multi-rider (v1.0.52+)
+
+A **Race** tab (`UI/RaceMapScreen.swift`, `MainNav` tag 7) — the iOS port of the
+desktop Race tab (`race.rs`): a live `Map` (`.hybrid` satellite + labels) with a
+heading-rotated marker per rider, a per-rider trail, and a bottom **data panel**
+showing everything the selected rider streams — speed + board **pitch/roll/yaw** +
+water temp + height + accuracy + battery. Fed by **`Sync/RaceViewer.swift`**, a
+relay *viewer* (`@Observable`, one `RaceRider` per `rider` name) that subscribes
+to the **same user-configurable relay** as the live view (`WatchLive.relayHost/
+relayPort` + `RaceUplink.token`) and merges two datagram kinds by rider name:
+position-only race fixes AND `typ:"board"` snapshots (position + angles). Trail
+shaping mirrors `race.rs` — 1500 points (~5 min @ 5 Hz), 3 m dead-band, fixes
+worse than 20 m accuracy show the dot but don't enter the trail; a rider idle
+>12 s greys out but stays put (a capsized rider's last position).
+
+- **The board snapshot now carries position (v1.0.52).** `WatchLiveRelay
+  .sendSnapshot` gained `lat/lon/deg/acc` (from `WatchGpsLogger.latestLat/…`),
+  so a single board datagram is a complete map datagram — the rider plots WITH
+  angles. A rider running only race mode (position, no angles) still plots from
+  race fixes; `RaceRider.hasBoard` picks whether the panel shows pitch/roll/yaw
+  or just heading.
+- **Same relay-viewer plumbing as the live card**, so the configurable relay
+  endpoint (own `race-relay`) drives both. Only shows riders while the tab is
+  open (`start()`/`stop()` on appear/disappear).
+
 ### Watch IMU logging — a separate motion CSV (v1.0.47+, Phase 1)
 
 To tell a **belly-paddle** from a **foil-pump** from **gliding/waiting** —

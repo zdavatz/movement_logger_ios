@@ -70,6 +70,12 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
     /// lands or between sessions).
     var latestPressureHPa: Double { pressureHPa }
     var latestBaroAltM: Double { baroAltM }
+
+    /// Latest position for the live snapshot / race map (NaN until a fix lands).
+    var latestLat: Double { latest.map { $0.coordinate.latitude } ?? .nan }
+    var latestLon: Double { latest.map { $0.coordinate.longitude } ?? .nan }
+    var latestCourse: Double { (latest?.course ?? -1) >= 0 ? latest!.course : .nan }
+    var latestAccM: Double { (latest?.horizontalAccuracy ?? -1) >= 0 ? latest!.horizontalAccuracy : .nan }
     /// Injected by SessionController: the Ultra's submersion water
     /// temperature (°C) while the wrist is in the water, else nil. Logged
     /// as the `WaterTemp [C]` column so rides carry it to the phone.

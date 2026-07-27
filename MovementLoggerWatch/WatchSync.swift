@@ -70,7 +70,8 @@ final class WatchSync: NSObject, WCSessionDelegate {
     /// angle publish rate from `SessionController` (`imu.onAngles`).
     func sendLiveSnapshot(pitch: Double, roll: Double, yaw: Double,
                           kmh: Double, water: Double?, alt: Double,
-                          pressure: Double, running: Bool, zeroed: Bool) {
+                          pressure: Double, running: Bool, zeroed: Bool,
+                          lat: Double, lon: Double, deg: Double, acc: Double) {
         let bl = WKInterfaceDevice.current().batteryLevel
         let battPct = bl >= 0 ? Int((bl * 100).rounded()) : -1
         if WCSession.default.isReachable {
@@ -94,7 +95,8 @@ final class WatchSync: NSObject, WCSessionDelegate {
             WatchLiveRelay.shared.sendSnapshot(
                 pitch: pitch, roll: roll, yaw: yaw, kmh: kmh, water: water,
                 alt: alt, pressure: pressure, batt: battPct,
-                running: running, zeroed: zeroed)
+                running: running, zeroed: zeroed,
+                lat: lat, lon: lon, deg: deg, acc: acc)
         }
     }
 
