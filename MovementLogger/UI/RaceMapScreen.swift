@@ -168,6 +168,7 @@ private struct RiderPanel: View {
 private struct RaceSettingsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var rider = PhoneRider.shared
+    @State private var motion = PhoneMotion.shared
     @State private var name = PhoneRider.shared.name
     @State private var host = WatchLive.shared.relayHost
     @State private var port = String(WatchLive.shared.relayPort)
@@ -183,6 +184,27 @@ private struct RaceSettingsSheet: View {
                     TextField("Rider name", text: $name)
                         .autocorrectionDisabled()
                     Text("Carry the phone instead of a watch — it streams its GPS to the relay as a rider. The name defaults to this device's name.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Board-mounted") {
+                    Toggle("Stream board angles + height", isOn: Binding(
+                        get: { rider.boardMounted },
+                        set: { PhoneRider.shared.boardMounted = $0 }))
+                    if rider.boardMounted {
+                        HStack {
+                            angleReadout("PITCH", motion.anglesLive ? motion.pitchDeg : nil)
+                            angleReadout("ROLL", motion.anglesLive ? motion.rollDeg : nil)
+                            angleReadout("YAW", motion.anglesLive ? motion.yawDeg : nil)
+                        }
+                        Button {
+                            if motion.hasZero { PhoneMotion.shared.clearZero() }
+                            else { PhoneMotion.shared.zero() }
+                        } label: {
+                            Label(motion.hasZero ? "Clear zero" : "Zero here",
+                                  systemImage: motion.hasZero ? "xmark.circle" : "scope")
+                        }
+                    }
+                    Text("Only for a phone strapped to the board — reads its motion sensors for pitch/roll/yaw + height. A carried phone should leave this off.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("Relay server") {
@@ -203,6 +225,15 @@ private struct RaceSettingsSheet: View {
                 }
             }
         }
+    }
+
+    private func angleReadout(_ label: String, _ deg: Double?) -> some View {
+        VStack(spacing: 0) {
+            Text(label).font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+            Text(deg.map { String(format: "%.0f°", $0) } ?? "—")
+                .font(.system(size: 18, weight: .semibold, design: .rounded)).monospacedDigit()
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func applyAndDismiss() {

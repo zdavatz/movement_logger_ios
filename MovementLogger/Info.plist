@@ -52,6 +52,8 @@
 	<string>Movement Logger saves the composite replay video to your Photos library so you can share it.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Movement Logger uses the iPhone's GPS to record an independent cross-check track alongside the box's GPS over BLE.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>When you mount the iPhone on your board as a race tracker, Movement Logger reads its motion sensors to show your board's pitch, roll and yaw.</string>
 	<!-- Race mode streams one position fix per second over UDP to the Movement
 	     Logger desktop app's Race screen, addressed by its LAN ip:port. iOS gates
 	     ANY traffic to a local-network address behind this permission — including

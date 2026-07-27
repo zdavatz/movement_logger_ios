@@ -30,6 +30,15 @@ final class PhoneRider {
             apply()
         }
     }
+    /// Phone strapped to the board — also stream board pitch/roll/yaw + height
+    /// (from `PhoneMotion`). Off = carried phone, position only.
+    var boardMounted = false {
+        didSet {
+            guard boardMounted != oldValue else { return }
+            UserDefaults.standard.set(boardMounted, forKey: "phoneRider.board")
+            apply()
+        }
+    }
 
     @ObservationIgnored private var conn: NWConnection?
     @ObservationIgnored private let q = DispatchQueue(label: "phone-rider")
@@ -39,6 +48,7 @@ final class PhoneRider {
     private init() {
         name = UserDefaults.standard.string(forKey: "phoneRider.name") ?? UIDevice.current.name
         UIDevice.current.isBatteryMonitoringEnabled = true
+        boardMounted = UserDefaults.standard.bool(forKey: "phoneRider.board")
         tracking = UserDefaults.standard.bool(forKey: "phoneRider.on")
         if tracking { apply() }
     }
@@ -46,7 +56,9 @@ final class PhoneRider {
     private func apply() {
         if tracking {
             GpsCore.shared.start()   // ensure phone GPS is running
+            if boardMounted { PhoneMotion.shared.start() } else { PhoneMotion.shared.stop() }
         } else {
+            PhoneMotion.shared.stop()
             q.async { self.conn?.cancel(); self.conn = nil }
         }
     }
@@ -66,6 +78,17 @@ final class PhoneRider {
         if let kmh, kmh.isFinite { o["kmh"] = kmh }
         if let deg, deg.isFinite { o["deg"] = deg }
         if let acc, acc.isFinite, acc > 0 { o["acc"] = acc }
+        // Board-mounted phone: fold in the live attitude + height so it plots
+        // with angles on the map (a complete typ:"board" datagram).
+        if boardMounted {
+            let pm = PhoneMotion.shared
+            o["typ"] = "board"
+            o["run"] = 1
+            o["z"] = pm.hasZero ? 1 : 0
+            if pm.anglesLive { o["p"] = pm.pitchDeg; o["r"] = pm.rollDeg; o["y"] = pm.yawDeg }
+            if pm.baroAltM.isFinite { o["alt"] = pm.baroAltM }
+            if pm.pressureHPa.isFinite { o["hpa"] = pm.pressureHPa }
+        }
         let token = RaceUplink.shared.token
         if !token.isEmpty { o["race"] = token }
         let batt = UIDevice.current.batteryLevel

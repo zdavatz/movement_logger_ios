@@ -651,14 +651,20 @@ worse than 20 m accuracy show the dot but don't enter the trail; a rider idle
   sheet) streams the phone's own GPS to the **same relay** the map reads
   (`WatchLive.relayHost` + `RaceUplink.token`) as a rider, hooked into
   `GpsCore.didUpdateLocations` (~5 Hz), so this phone appears on its own map and
-  every viewer's. **Position only** — a carried phone can't sense board attitude
-  (the iPhone HAS the IMU/mag/baro to do angles+height if board-mounted, and
-  lacks only the Ultra's water-temp sensor; not wired since a phone on a foil
-  board is impractical). **Rider name defaults to the device's own name**
+  every viewer's. **Rider name defaults to the device's own name**
   (`UIDevice.current.name`, editable — iOS 16+ may return a generic "iPhone"
   without the user-assigned-device-name entitlement); the watch rider defaults
   to `WKInterfaceDevice.current().name`. The settings sheet also edits the relay
   host/port + race token, shared across the map, live view and watch.
+- **Phone board-mounted mode (v1.0.54) — full board tracker.** The iPhone has
+  the IMU + barometer (lacking only the Ultra's water-temp sensor), so a
+  "Board-mounted" toggle streams **pitch/roll/yaw + height** too via
+  `Location/PhoneMotion.swift` (the phone twin of `WatchImuLogger`'s live-angle
+  side: `CMMotionManager.deviceMotion` tared attitude + `CMAltimeter`), folded
+  into `PhoneRider`'s `typ:"board"` datagram — so a board-mounted phone plots
+  WITH angles like a watch rider. "Zero here" tares the mount. Off by default
+  (a carried phone can't sense the board; and IP68 ≠ made for continuous
+  surf/salt). Needs `NSMotionUsageDescription` (added to the phone Info.plist).
 
 ### Watch IMU logging — a separate motion CSV (v1.0.47+, Phase 1)
 
