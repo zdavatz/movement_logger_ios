@@ -7,9 +7,11 @@ import CoreLocation
 /// battery). The iOS peer of the desktop Race tab; fed by `RaceViewer`.
 struct RaceMapScreen: View {
     @State private var viewer = RaceViewer.shared
+    @State private var rider = PhoneRider.shared
     @State private var camera: MapCameraPosition = .automatic
     @State private var selected: String?
     @State private var now = Date()
+    @State private var showSettings = false
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var riders: [RaceRider] { viewer.sorted }
@@ -29,12 +31,19 @@ struct RaceMapScreen: View {
             }
             .navigationTitle("Race")
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button { showSettings = true } label: {
+                        Image(systemName: rider.tracking ? "figure.wave.circle.fill" : "figure.wave.circle")
+                            .foregroundStyle(rider.tracking ? .green : .accentColor)
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { camera = .automatic } label: { Image(systemName: "scope") }
                         .disabled(riders.isEmpty)
                 }
             }
         }
+        .sheet(isPresented: $showSettings) { RaceSettingsSheet() }
         .onAppear { viewer.start() }
         .onDisappear { viewer.stop() }
         .onReceive(tick) { now = $0 }
@@ -151,5 +160,60 @@ private struct RiderPanel: View {
             Text(unit).font(.system(size: 8)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// Race settings — turn this phone into a rider (carry it instead of a watch)
+/// and point everything at your relay server.
+private struct RaceSettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var rider = PhoneRider.shared
+    @State private var name = PhoneRider.shared.name
+    @State private var host = WatchLive.shared.relayHost
+    @State private var port = String(WatchLive.shared.relayPort)
+    @State private var token = RaceUplink.shared.token
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Track this phone") {
+                    Toggle("Show this phone on the race map", isOn: Binding(
+                        get: { rider.tracking },
+                        set: { PhoneRider.shared.tracking = $0 }))
+                    TextField("Rider name", text: $name)
+                        .autocorrectionDisabled()
+                    Text("Carry the phone instead of a watch — it streams its GPS to the relay as a rider. The name defaults to this device's name.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Relay server") {
+                    TextField("host", text: $host)
+                        .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("port", text: $port).keyboardType(.numberPad)
+                    TextField("race token (optional)", text: $token)
+                        .autocorrectionDisabled()
+                    Text("Run your own race-relay and point everything at it. Shared with the watch and the map. Blank host resets to the default.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("Race settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { applyAndDismiss() }
+                }
+            }
+        }
+    }
+
+    private func applyAndDismiss() {
+        PhoneRider.shared.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let h = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        WatchLive.shared.relayHost = h.isEmpty ? WatchLive.defaultRelayHost : h
+        if let p = Int(port.trimmingCharacters(in: .whitespaces)), p > 0 {
+            WatchLive.shared.relayPort = p
+        }
+        RaceUplink.shared.token = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        RaceViewer.shared.restartIfActive()   // pick up the new relay / token
+        dismiss()
     }
 }

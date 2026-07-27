@@ -33,7 +33,7 @@ final class WatchLiveRelay {
 
     private var rider: String {
         let r = UserDefaults.standard.string(forKey: "race.rider") ?? ""
-        return r.isEmpty ? "watch" : r
+        return r.isEmpty ? WKInterfaceDevice.current().name : r
     }
     private var token: String { UserDefaults.standard.string(forKey: "race.token") ?? "" }
     private var host: String {

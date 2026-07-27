@@ -646,6 +646,19 @@ worse than 20 m accuracy show the dot but don't enter the trail; a rider idle
 - **Same relay-viewer plumbing as the live card**, so the configurable relay
   endpoint (own `race-relay`) drives both. Only shows riders while the tab is
   open (`start()`/`stop()` on appear/disappear).
+- **Phone as a rider (v1.0.53) — carry the phone instead of a watch.**
+  `Location/PhoneRider.swift`: a "Track this phone" toggle (Race-tab settings
+  sheet) streams the phone's own GPS to the **same relay** the map reads
+  (`WatchLive.relayHost` + `RaceUplink.token`) as a rider, hooked into
+  `GpsCore.didUpdateLocations` (~5 Hz), so this phone appears on its own map and
+  every viewer's. **Position only** — a carried phone can't sense board attitude
+  (the iPhone HAS the IMU/mag/baro to do angles+height if board-mounted, and
+  lacks only the Ultra's water-temp sensor; not wired since a phone on a foil
+  board is impractical). **Rider name defaults to the device's own name**
+  (`UIDevice.current.name`, editable — iOS 16+ may return a generic "iPhone"
+  without the user-assigned-device-name entitlement); the watch rider defaults
+  to `WKInterfaceDevice.current().name`. The settings sheet also edits the relay
+  host/port + race token, shared across the map, live view and watch.
 
 ### Watch IMU logging — a separate motion CSV (v1.0.47+, Phase 1)
 

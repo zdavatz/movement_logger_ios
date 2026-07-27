@@ -191,6 +191,13 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
                 deg: newest.course >= 0 ? newest.course : nil,
                 acc: newest.horizontalAccuracy,
                 from: .phone)
+            // Phone-as-rider on the race map: no-op unless "Track this phone" is on.
+            PhoneRider.shared.sendFix(
+                lat: newest.coordinate.latitude,
+                lon: newest.coordinate.longitude,
+                kmh: newest.speed >= 0 ? newest.speed * 3.6 : nil,
+                deg: newest.course >= 0 ? newest.course : nil,
+                acc: newest.horizontalAccuracy)
         } else if !fixAvailable {
             status = "Waiting for first fix…"
         }
