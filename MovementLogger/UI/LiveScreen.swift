@@ -704,6 +704,9 @@ struct WatchLiveCard: View {
     @State private var now = Date()
     private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
     @State private var pump: Task<Void, Never>?
+    @State private var showRelayConfig = false
+    @State private var hostField = ""
+    @State private var portField = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -749,6 +752,7 @@ struct WatchLiveCard: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            relayConfig
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -781,5 +785,53 @@ struct WatchLiveCard: View {
             Text(unit).font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// Editable relay endpoint — point the live view at your own `race-relay`
+    /// server. Applied to `WatchLive` (which persists it and pushes it to the
+    /// watch, so both ends target the same server).
+    private var relayConfig: some View {
+        DisclosureGroup(isExpanded: $showRelayConfig) {
+            VStack(alignment: .leading, spacing: 6) {
+                TextField("relay host", text: $hostField)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                HStack {
+                    TextField("port", text: $portField)
+                        .textFieldStyle(.roundedBorder)
+                        .keyboardType(.numberPad)
+                        .frame(maxWidth: 90)
+                    Button("Apply") { applyRelayConfig() }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Button("Default") {
+                        hostField = WatchLive.defaultRelayHost
+                        portField = String(WatchLive.defaultRelayPort)
+                        applyRelayConfig()
+                    }
+                    .buttonStyle(.borderless).font(.caption2)
+                }
+                Text("Run your own race-relay and point the live view at it. Pushed to the watch too.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 4)
+        } label: {
+            Text("Relay: \(live.relayHost):\(String(live.relayPort))")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .onAppear {
+            if hostField.isEmpty { hostField = live.relayHost }
+            if portField.isEmpty { portField = String(live.relayPort) }
+        }
+    }
+
+    private func applyRelayConfig() {
+        let h = hostField.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !h.isEmpty { WatchLive.shared.relayHost = h }
+        if let p = Int(portField.trimmingCharacters(in: .whitespaces)), p > 0 {
+            WatchLive.shared.relayPort = p
+        }
     }
 }

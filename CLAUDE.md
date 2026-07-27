@@ -591,7 +591,12 @@ race fixes.
   always a relay **viewer** (`WatchLive.startViewer` — subscribe every 8 s +
   receive), so it shows whichever path delivers. Rider/token reuse the race
   config (`race.rider`/`race.token`); a token only matters to isolate your stream
-  on the shared relay. **Caveat:** the relay is one-way rider→viewer, so the
+  on the shared relay. **The relay endpoint is user-configurable (v1.0.51):** an
+  editable "Relay: host:port" row on the live card (`WatchLive.relayHost/
+  relayPort`, persisted `live.relayHost`/`live.relayPort`, default
+  `ml.ywesee.com:47777`) — run your own `race-relay` and point both ends at it.
+  The phone pushes `liveRelayHost`/`liveRelayPort` via the (merged) application
+  context; the watch's `WatchLiveRelay.configure` applies it. **Caveat:** the relay is one-way rider→viewer, so the
   phone can't send `wantLive`/`zeroAngles` to a far watch — the relay send isn't
   gated on `wantLive` (streams whenever a session runs + phone unreachable), and
   the remote tare only works over WCSession (up close). Cellular also needs an

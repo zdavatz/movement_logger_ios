@@ -18,8 +18,10 @@ import WatchKit
 final class WatchLiveRelay {
     static let shared = WatchLiveRelay()
 
-    static let host = "ml.ywesee.com"
-    static let port: UInt16 = 47777
+    /// Default relay — overridable so anyone can run their own `race-relay`
+    /// (the phone pushes `liveRelayHost`/`liveRelayPort`; see `configure`).
+    static let defaultHost = "ml.ywesee.com"
+    static let defaultPort = 47777
     /// ~3 Hz cap — smooth enough for a readout, easy on cellular data/battery.
     private static let minInterval: TimeInterval = 0.33
 
@@ -34,6 +36,28 @@ final class WatchLiveRelay {
         return r.isEmpty ? "watch" : r
     }
     private var token: String { UserDefaults.standard.string(forKey: "race.token") ?? "" }
+    private var host: String {
+        let h = UserDefaults.standard.string(forKey: "live.relayHost") ?? ""
+        return h.isEmpty ? Self.defaultHost : h
+    }
+    private var port: UInt16 {
+        let p = UserDefaults.standard.integer(forKey: "live.relayPort")
+        return p > 0 ? UInt16(clamping: p) : UInt16(Self.defaultPort)
+    }
+
+    /// Point the relay at a different server (pushed from the phone). Drops the
+    /// cached connection so the next send reconnects to the new endpoint.
+    func configure(host: String?, port: Int?) {
+        let d = UserDefaults.standard
+        var changed = false
+        if let host, host != (d.string(forKey: "live.relayHost") ?? "") {
+            d.set(host, forKey: "live.relayHost"); changed = true
+        }
+        if let port, port > 0, port != d.integer(forKey: "live.relayPort") {
+            d.set(port, forKey: "live.relayPort"); changed = true
+        }
+        if changed { queue.async { self.connection?.cancel(); self.connection = nil } }
+    }
 
     func sendSnapshot(pitch: Double, roll: Double, yaw: Double, kmh: Double,
                       water: Double?, alt: Double, pressure: Double, batt: Int,
@@ -55,8 +79,8 @@ final class WatchLiveRelay {
         if !token.isEmpty { o["race"] = token }
         guard let data = try? JSONSerialization.data(withJSONObject: o) else { return }
 
-        if connection == nil, let p = NWEndpoint.Port(rawValue: Self.port) {
-            let c = NWConnection(host: NWEndpoint.Host(Self.host), port: p, using: .udp)
+        if connection == nil, let p = NWEndpoint.Port(rawValue: port) {
+            let c = NWConnection(host: NWEndpoint.Host(host), port: p, using: .udp)
             c.start(queue: queue)
             connection = c
         }

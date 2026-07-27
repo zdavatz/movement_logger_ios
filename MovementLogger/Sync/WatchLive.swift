@@ -43,7 +43,23 @@ final class WatchLive {
             && WCSession.default.isReachable
     }
 
-    private init() {}
+    private init() {
+        relayHost = UserDefaults.standard.string(forKey: "live.relayHost") ?? Self.defaultRelayHost
+        let p = UserDefaults.standard.integer(forKey: "live.relayPort")
+        relayPort = p > 0 ? p : Self.defaultRelayPort
+        pushRelayConfig()   // make sure the watch has the current endpoint
+    }
+
+    /// Push the relay endpoint to the watch (merged — `RaceUplink` and
+    /// `WatchRideReceiver` write the same application context).
+    func pushRelayConfig() {
+        guard WCSession.isSupported(),
+              WCSession.default.activationState == .activated else { return }
+        var ctx = WCSession.default.applicationContext
+        ctx["liveRelayHost"] = relayHost
+        ctx["liveRelayPort"] = relayPort
+        try? WCSession.default.updateApplicationContext(ctx)
+    }
 
     /// Called from `WatchRideReceiver`'s message delegate (on main).
     func apply(_ d: [String: Double]) {
@@ -80,20 +96,40 @@ final class WatchLive {
     /// phone isn't directly reachable (see `WatchLiveRelay`), and this phone
     /// subscribes as a viewer to receive it. Works over any internet, cellular
     /// included; WCSession stays the low-latency path up close.
-    static let relayHost = "ml.ywesee.com"
-    static let relayPort: UInt16 = 47777
+    static let defaultRelayHost = "ml.ywesee.com"
+    static let defaultRelayPort = 47777
+
+    /// User-overridable relay endpoint (run your own `race-relay`). Persisted and
+    /// pushed to the watch so both ends target the same server.
+    var relayHost: String {
+        didSet {
+            guard relayHost != oldValue else { return }
+            UserDefaults.standard.set(relayHost, forKey: "live.relayHost")
+            pushRelayConfig(); restartViewerIfActive()
+        }
+    }
+    var relayPort: Int {
+        didSet {
+            guard relayPort != oldValue else { return }
+            UserDefaults.standard.set(relayPort, forKey: "live.relayPort")
+            pushRelayConfig(); restartViewerIfActive()
+        }
+    }
 
     @ObservationIgnored private var viewer: NWConnection?
     @ObservationIgnored private let viewerQueue = DispatchQueue(label: "watch-live-viewer")
     @ObservationIgnored private var keepalive: Timer?
+    @ObservationIgnored private var viewerActive = false
 
     /// Open the relay viewer while the live card is on screen: subscribe (re-sent
     /// every 8 s to stay registered and hold the NAT pinhole open) and feed every
     /// board snapshot into `apply`.
     func startViewer() {
         stopViewer()
-        guard let port = NWEndpoint.Port(rawValue: Self.relayPort) else { return }
-        let c = NWConnection(host: NWEndpoint.Host(Self.relayHost), port: port, using: .udp)
+        viewerActive = true
+        guard relayPort > 0, let port = NWEndpoint.Port(rawValue: UInt16(clamping: relayPort)),
+              !relayHost.isEmpty else { return }
+        let c = NWConnection(host: NWEndpoint.Host(relayHost), port: port, using: .udp)
         c.stateUpdateHandler = { [weak self] st in
             if case .ready = st { self?.subscribe() }
         }
@@ -107,8 +143,14 @@ final class WatchLive {
     }
 
     func stopViewer() {
+        viewerActive = false
         keepalive?.invalidate(); keepalive = nil
         viewer?.cancel(); viewer = nil
+    }
+
+    private func restartViewerIfActive() {
+        guard viewerActive else { return }
+        startViewer()
     }
 
     private func subscribe() {

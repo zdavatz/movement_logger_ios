@@ -127,6 +127,10 @@ final class WatchSync: NSObject, WCSessionDelegate {
             host: ctx["raceHost"] as? String,
             port: ctx["racePort"] as? Int,
             token: ctx["raceToken"] as? String)
+        // The live-view relay server (user-overridable, own `race-relay`).
+        WatchLiveRelay.shared.configure(
+            host: ctx["liveRelayHost"] as? String,
+            port: ctx["liveRelayPort"] as? Int)
         if let have = ctx["haveRides"] as? [String] {
             applyRideManifest(have)
         }
