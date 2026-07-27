@@ -17,11 +17,56 @@ struct ContentView: View {
                 }
                 startStopButton
                 unsentRidesRow
+                boardAnglesCard
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 8)
         }
         .navigationTitle("MovementLogger")
+        // Live board angles need `deviceMotion` running; only while this screen
+        // is up (the manager auto-stops when both this and any ride logger are
+        // done). A ride keeps logging regardless.
+        .onAppear { controller.imu.startLive() }
+        .onDisappear { controller.imu.stopLive() }
+    }
+
+    // MARK: - Board angles (watch strapped to the board)
+
+    /// Live pitch / roll / yaw from the watch's fused motion — the watch analogue
+    /// of the box's `BoardAnglesCard`. Meaningful when the watch is strapped to
+    /// the board; "Zero here" tares the mounted pose so the angles read as
+    /// deviation from level/forward (the strap orientation is arbitrary).
+    private var boardAnglesCard: some View {
+        let imu = controller.imu
+        return VStack(spacing: 4) {
+            Text(imu.hasZero ? "BOARD ANGLES · zeroed" : "BOARD ANGLES")
+                .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                angle("PITCH", imu.anglesLive ? imu.pitchDeg : nil)
+                angle("ROLL", imu.anglesLive ? imu.rollDeg : nil)
+                angle("YAW", imu.anglesLive ? imu.yawDeg : nil)
+            }
+            Button {
+                if imu.hasZero { imu.clearZero() } else { imu.zero() }
+            } label: {
+                Label(imu.hasZero ? "Clear zero" : "Zero here",
+                      systemImage: imu.hasZero ? "xmark.circle" : "scope")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .font(.caption2)
+        }
+        .padding(.top, 4)
+    }
+
+    private func angle(_ label: String, _ deg: Double?) -> some View {
+        VStack(spacing: 0) {
+            Text(label).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            Text(deg.map { String(format: "%.0f°", $0) } ?? "—")
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                .monospacedDigit().minimumScaleFactor(0.5).lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: - Duration

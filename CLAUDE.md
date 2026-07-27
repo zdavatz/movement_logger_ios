@@ -543,6 +543,36 @@ the updated watch app.
 - **Shareable PNG** — the toolbar Share button calls `RideMapRenderer.render(rows:title:)`, which uses **`MKMapSnapshotter`** (NOT `ImageRenderer` — SwiftUI's `Map` snapshots blank because tiles render out-of-process) to grab real Apple Maps tiles, then draws over the snapshot with CoreGraphics: a white casing (one continuous sub-path per non-broken run), then the track **edge-by-edge** in the activity-mode colour (or the speed gradient `speedColor`, `robustMaxSpeed` = 95th-pct), start/end dots, and a branded footer. The footer is a **horizontal legend strip along the top** (activity swatches left→right, or a speed-gradient scale — deliberately its own band so the long source-URL line can never collide with it), a divider, then the **app logo** (`RideLogo` imageset — a copy of the app icon, since `UIImage(named:)` can't reliably load an `AppIcon` set), ride **stats** (top speed via `RideMapRenderer.robustTopSpeed` — hard 60 km/h clip + blackout adjacency + ±1 s chord consistency; distance via `trackDistanceKm` over the continuous track skipping breaks + `trackMaxHopM` glitch hops; duration; and **median water temp** via `medianWaterTempC`, omitted on a ride with no submersion column — the four-item line auto-shrinks via `fitted(_:maxWidth:…)` rather than running under the right edge), and the **GitHub source link** (`RideMapRenderer.sourceURL`). The PNG lands in `Documents/RideMaps/<name>_map.png` and is handed to a `UIActivityViewController` share sheet. `snapshot.point(for:)` returns points in the snapshot image's own space, so the track aligns to the tiles with no manual flip on iOS.
 - **`scripts/ride_map_png.swift`** is the standalone macOS twin of `RideMapRenderer` (AppKit/`NSImage` instead of UIKit): `swift scripts/ride_map_png.swift <in.csv> <out.png> [logo.png]`, `MLDEBUG=1` to print the classified runs. It ports the same continuous-track cleaning + `RideActivity` classifier + legend, and is how the v1.0.24 rendering was verified on the Mac (incl. a synthesised `WaterTemp` column to exercise the 3-mode path). **It does NOT flip `point(for:)`** — that was a bug (fixed 13.7.2026): on AppKit `snapshot.point(for:)` already comes back in the same y-up space the snapshot image is drawn in, so the old `y = footerH + (mapH - p.y)` mirrored the whole track against the tiles. It silently invalidates any visual check made with this script — a due-north synthetic track drew its start at the top, and the 12.7 walk into town appeared out at sea. iOS is y-down and likewise needs no flip.
 
+### Watch live board angles (v1.0.48+) — watch strapped to the board
+
+The wrist can't measure board attitude, but the watch **strapped to the board**
+can: `deviceMotion` then gives fused, gravity-referenced **pitch / roll / yaw**,
+so `WatchImuLogger` doubles as the live source for a **board-angles card on the
+watch main screen** (`ContentView.boardAnglesCard`) — the watch analogue of the
+box's Live-tab `BoardAnglesCard`. **"Zero here"** tares the mounted pose
+(`WatchImuLogger.zero()`/`clearZero()`); since the strap orientation is
+arbitrary, the tare defines level/forward, exactly like the box's `nosePlusY`.
+The angle is `CMAttitude` relative to the saved reference
+(`multiply(byInverseOf:)`); at the modest angles a foil sees, Euler pitch/roll/
+yaw are unambiguous (no gimbal lock), so this stays simple.
+
+- **One `CMMotionManager`, two clients.** `WatchImuLogger` is `@Observable` and
+  owns the single motion manager (Apple's rule — a second one starves the
+  first). `startLive()`/`stopLive()` (driven by `ContentView.onAppear`/
+  `onDisappear`) and `start(stamp:)`/`stop()` (the ride logger) are independent
+  clients; `ensureRunning()` runs `deviceMotion` while EITHER is active and
+  stops it when both are done. The handler publishes throttled pitch/roll/yaw to
+  the UI (~8 Hz) AND writes the raw CSV row when a ride is logging. Tare capture
+  is done inside the handler (`zeroPending`/`clearPending` flags) so the
+  reference `CMAttitude` is only touched on the delivery queue and is a distinct
+  object from the frame being displayed (`multiply` mutates its receiver).
+- **The recorded gravity already carries the angles.** The CSV schema is
+  unchanged — `gx/gy/gz` is the gravity vector, which yields board pitch/roll
+  post-hoc — so a board-mounted ride on **1.0.47** already captures the angle
+  data; the live card (1.0.48) is the real-time convenience on top. Running the
+  box AND a board-mounted watch on the same ride gives a free box-vs-watch angle
+  cross-check.
+
 ### Watch IMU logging — a separate motion CSV (v1.0.47+, Phase 1)
 
 To tell a **belly-paddle** from a **foil-pump** from **gliding/waiting** —
