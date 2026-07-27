@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import CoreMotion
 import Observation
 
 /// Fallback recorder used when no box is connected: samples the watch's own
@@ -54,6 +55,16 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
 
     @ObservationIgnored private let manager = CLLocationManager()
     @ObservationIgnored private var latest: CLLocation?
+
+    /// The watch's barometric altimeter (`CMAltimeter`, separate from the IMU's
+    /// `CMMotionManager`). Delivers ~1 Hz, matching this logger's 1 Hz row grid.
+    /// Logged as the `Pressure [hPa]` + `BaroAlt [m]` columns so a board-mounted
+    /// ride carries height-above-water data (fused with the IMU accel later,
+    /// same pipeline as the box's `Baro.heightAboveWaterM`). Held-latest values,
+    /// written on each row; blank until the first sample lands.
+    @ObservationIgnored private let altimeter = CMAltimeter()
+    @ObservationIgnored private var pressureHPa: Double = .nan
+    @ObservationIgnored private var baroAltM: Double = .nan
     /// Injected by SessionController: the Ultra's submersion water
     /// temperature (°C) while the wrist is in the water, else nil. Logged
     /// as the `WaterTemp [C]` column so rides carry it to the phone.
@@ -112,12 +123,27 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
     func stop() {
         wantLog = false
         manager.stopUpdatingLocation()
+        altimeter.stopRelativeAltitudeUpdates()
+        pressureHPa = .nan
+        baroAltM = .nan
         tickTimer?.invalidate()
         tickTimer = nil
         closeCsv()
         isLogging = false
         fixAvailable = false
         status = "Stopped"
+    }
+
+    /// Start the barometric altimeter for this session. `CMAltimeter` pushes a
+    /// new sample when the pressure changes (~1 Hz); we hold the latest and
+    /// stamp it onto each 1 Hz GPS row.
+    private func startBaro() {
+        guard CMAltimeter.isRelativeAltitudeAvailable() else { return }
+        altimeter.startRelativeAltitudeUpdates(to: .main) { [weak self] data, _ in
+            guard let self, let data else { return }
+            self.pressureHPa = data.pressure.doubleValue * 10.0   // kPa → hPa (mbar)
+            self.baroAltM = data.relativeAltitude.doubleValue
+        }
     }
 
     private func beginUpdates() {
@@ -129,6 +155,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
         // foreground during an active workout session, so background location
         // isn't needed; setting it was the crash on Start.
         manager.startUpdatingLocation()
+        startBaro()
         openCsv()
         startUptimeMs = Self.uptimeMs()
         isLogging = true
@@ -227,7 +254,7 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let name = "WatchGps_" + (pairStamp ?? Self.stamp(Date())) + ".csv"
         let url = docs.appendingPathComponent(name)
-        let header = "Time [10ms],UTC,Lat [deg],Lon [deg],Alt [m],SpeedKMh,Course [deg],Fix,NumSat,HDOP,WaterTemp [C]\n"
+        let header = "Time [10ms],UTC,Lat [deg],Lon [deg],Alt [m],SpeedKMh,Course [deg],Fix,NumSat,HDOP,WaterTemp [C],Pressure [hPa],BaroAlt [m]\n"
         FileManager.default.createFile(atPath: url.path, contents: header.data(using: .utf8))
         csvHandle = try? FileHandle(forWritingTo: url)
         _ = try? csvHandle?.seekToEnd()   // append after the header row
@@ -267,6 +294,8 @@ final class WatchGpsLogger: NSObject, CLLocationManagerDelegate {
             "0",
             fmt(hdop),
             fmt(waterTempProvider?() ?? nil),
+            fmt(pressureHPa),
+            fmt(baroAltM),
         ].joined(separator: ",") + "\n"
         if let data = row.data(using: .utf8) {
             try? h.write(contentsOf: data)
