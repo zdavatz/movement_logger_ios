@@ -35,6 +35,8 @@ struct GpsScreen: View {
                         logCard
                     }
 
+                    PhoneLoggerCard()
+
                     RaceCard()
                 }
                 .padding(16)
@@ -252,6 +254,69 @@ struct GpsScreen: View {
             .font(.system(.subheadline, design: .monospaced))
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Phone logger — record the iPhone's GPS + accel/gyro/mag/baro into a
+/// box-schema `SensPhone_*` + `GpsPhone_*` CSV pair (no box needed), ready
+/// for the Replay tab. Mirrors the Android `PhoneLoggerCard`.
+private struct PhoneLoggerCard: View {
+    @Bindable var logger = PhoneLogger.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Phone logger").font(.headline)
+                Spacer()
+                if !logger.isRecording {
+                    Button("Start recording") { logger.start() }
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Stop recording") { logger.stop() }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            if logger.isRecording {
+                Text("● Recording — sens \(logger.sensRows) rows · gps \(logger.gpsRows) rows")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                Text("\(logger.sensName ?? "") + \(logger.gpsName ?? "")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if !logger.hasBaro {
+                    Text("No barometer on this device — height panels will stay flat.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } else {
+                Text("Records this iPhone's GPS + motion sensors (accel/gyro/mag/baro) "
+                     + "as a box-style Sens + Gps CSV pair, ready for the Replay tab. "
+                     + "Mount the phone flat on the board, top edge toward the nose.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let s = logger.lastSensURL, let g = logger.lastGpsURL {
+                    HStack(spacing: 8) {
+                        ShareLink(item: s) {
+                            Label("Share Sens", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                        ShareLink(item: g) {
+                            Label("Share Gps", systemImage: "square.and.arrow.up")
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    Text("Last: \(s.lastPathComponent) (\(logger.sensRows) rows) + "
+                         + "\(g.lastPathComponent) (\(logger.gpsRows) rows)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let e = logger.errorText {
+                Text(e).font(.caption).foregroundStyle(.red)
+            }
+        }
+        .padding(12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

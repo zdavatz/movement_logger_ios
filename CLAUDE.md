@@ -705,6 +705,42 @@ so the phone pairs them (`WatchGps_<s>` ↔ `WatchImu_<s>`).
   `WatchImu_*` companion and just fall back to the existing GPS+submersion
   classifier.
 
+### Phone logger — box-replacement CSV recording (`Location/PhoneLogger.swift`)
+
+"Phone logger" card in the GPS tab (v1.0.55, port of Android's
+`PhoneLoggerCore`): records the iPhone's GPS **plus raw accel/gyro/mag/baro**
+into a box-schema CSV pair — `SensPhone_<stamp>.csv` + `GpsPhone_<stamp>.csv`
+in `Documents/`. Names start with `Sens`/`Gps` so the Replay pickers list
+them; **byte-compatible with the Android `SensPhone_*`/`GpsPhone_*` files**,
+so recordings are interchangeable across the apps.
+
+- **Timebase**: both files share one `Time [10ms]` tick clock from
+  `ProcessInfo.systemUptime` (CoreMotion `CMLogItem.timestamp` is the same
+  since-boot domain; GPS rows stamp uptime at arrival, like
+  `GpsCore.monotonicMs`). A `# SYNC epoch_ms=… tick_ms=0` anchor after each
+  header (Time-column unit, tickDiv=1) gives Replay drift-free "Phone-clock
+  sync" alignment.
+- **Apple raw-accel sign trap**: `CMAccelerometerData` is −(specific
+  force)/g — flat on a table Apple reads z = −1 g where Android/the ST box
+  read +1000 mg — so acc converts as **mg = −g × 1000**. Gyro (rad/s →
+  mdps) and magnetometer (µT → mgauss, ×10) match conventions, no flip.
+  Pressure kPa×10 = mB; `T ['C]` constant 20 °C.
+- **No blank fields ever** — Android's `parseSensorStream` is strict (one
+  blank field fails the whole file there) and these CSVs travel
+  cross-platform, so sens rows are held until gyro + mag (+ baro when
+  present) have each reported; no barometer → constant 1013.25 mB.
+- IMU at ~100 Hz on one serial `OperationQueue` (all sensor callbacks +
+  file IO — no locks); sens rows batched 25 per FileHandle write; row
+  counters published to SwiftUI every 50 rows.
+- **GPS + backgrounding**: fixes ride `GpsCore`'s CoreLocation stream via a
+  `PhoneLogger.shared.onFix(loc)` hook in `didUpdateLocations` (same
+  pattern as the RaceUplink/PhoneRider hooks). `start()` starts `GpsCore`
+  if idle — its background-location delivery is what keeps the sensor
+  stream alive with the screen locked; `stop()` only tears the reader down
+  if the logger started it and no `iPhoneGps_*` recording is running.
+- Mount guidance (shown in the card): phone flat on the board, top edge
+  toward the nose — device axes then match the box's Y-nose convention.
+
 ### GPS Debug tab — u-blox UBX survey over BLE
 
 Live u-blox diagnostics for antenna selection/mounting, bridged over the box's

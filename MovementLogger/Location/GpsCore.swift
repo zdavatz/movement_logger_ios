@@ -205,6 +205,8 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
         sampleCount &+= UInt64(locations.count)
         for loc in locations {
             appendCsvRow(loc)
+            // Phone logger (SensPhone/GpsPhone pair): no-op unless recording.
+            PhoneLogger.shared.onFix(loc)
         }
     }
 

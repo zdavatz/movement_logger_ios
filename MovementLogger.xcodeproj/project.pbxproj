@@ -60,6 +60,7 @@
 		A10000000000000000000404 /* RaceUplink.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000414 /* RaceUplink.swift */; };
 		A10000000000000000000436 /* PhoneRider.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000437 /* PhoneRider.swift */; };
 		A10000000000000000000438 /* PhoneMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000439 /* PhoneMotion.swift */; };
+		A10000000000000000000E01 /* PhoneLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000E02 /* PhoneLogger.swift */; };
 		A10000000000000000000402 /* GpsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000412 /* GpsScreen.swift */; };
 		A10000000000000000000D01 /* GpsDebugModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000D11 /* GpsDebugModel.swift */; };
 		A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000D12 /* GpsDebugScreen.swift */; };
@@ -147,6 +148,7 @@
 		A10000000000000000000414 /* RaceUplink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RaceUplink.swift; sourceTree = "<group>"; };
 		A10000000000000000000437 /* PhoneRider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneRider.swift; sourceTree = "<group>"; };
 		A10000000000000000000439 /* PhoneMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneMotion.swift; sourceTree = "<group>"; };
+		A10000000000000000000E02 /* PhoneLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneLogger.swift; sourceTree = "<group>"; };
 		A10000000000000000000412 /* GpsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsScreen.swift; sourceTree = "<group>"; };
 		A10000000000000000000D11 /* GpsDebugModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsDebugModel.swift; sourceTree = "<group>"; };
 		A10000000000000000000D12 /* GpsDebugScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GpsDebugScreen.swift; sourceTree = "<group>"; };
@@ -333,6 +335,7 @@
 				A10000000000000000000414 /* RaceUplink.swift */,
 				A10000000000000000000437 /* PhoneRider.swift */,
 				A10000000000000000000439 /* PhoneMotion.swift */,
+				A10000000000000000000E02 /* PhoneLogger.swift */,
 			);
 			path = Location;
 			sourceTree = "<group>";
@@ -467,6 +470,7 @@
 				A10000000000000000000404 /* RaceUplink.swift in Sources */,
 				A10000000000000000000436 /* PhoneRider.swift in Sources */,
 				A10000000000000000000438 /* PhoneMotion.swift in Sources */,
+				A10000000000000000000E01 /* PhoneLogger.swift in Sources */,
 				A10000000000000000000402 /* GpsScreen.swift in Sources */,
 				A10000000000000000000D01 /* GpsDebugModel.swift in Sources */,
 				A10000000000000000000D02 /* GpsDebugScreen.swift in Sources */,
