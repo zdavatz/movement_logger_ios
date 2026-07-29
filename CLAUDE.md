@@ -541,6 +541,31 @@ the updated watch app.
 
 - **Interactive view** — `RideMapView` parses the CSV with `CsvParsers.parseGpsFile` (which also accepts the watch logger's bracketed `Lat [deg]` / `Lon [deg]` / `SpeedKMh` headers — see the CSV-schema note), builds the coloured runs via `RideMapRenderer.mapRuns(clean:)` and draws **one `MapPolyline` per colour run** (adjacent runs share their boundary point so the line stays continuous across a colour change), with green **Start** / red **End** annotations and a translucent **legend card** (`.overlay(.bottomLeading)`) — mode swatches when submersion data exists, a speed-gradient bar otherwise. The speed fallback approximates the gradient with 6 smoothed speed bands. Camera frames the track via `.rect(RideMapRenderer.boundingRect(trackPoints))`.
 - **Shareable PNG** — the toolbar Share button calls `RideMapRenderer.render(rows:title:)`, which uses **`MKMapSnapshotter`** (NOT `ImageRenderer` — SwiftUI's `Map` snapshots blank because tiles render out-of-process) to grab real Apple Maps tiles, then draws over the snapshot with CoreGraphics: a white casing (one continuous sub-path per non-broken run), then the track **edge-by-edge** in the activity-mode colour (or the speed gradient `speedColor`, `robustMaxSpeed` = 95th-pct), start/end dots, and a branded footer. The footer is a **horizontal legend strip along the top** (activity swatches left→right, or a speed-gradient scale — deliberately its own band so the long source-URL line can never collide with it), a divider, then the **app logo** (`RideLogo` imageset — a copy of the app icon, since `UIImage(named:)` can't reliably load an `AppIcon` set), ride **stats** (top speed via `RideMapRenderer.robustTopSpeed` — hard 60 km/h clip + blackout adjacency + ±1 s chord consistency; distance via `trackDistanceKm` over the continuous track skipping breaks + `trackMaxHopM` glitch hops; duration; and **median water temp** via `medianWaterTempC`, omitted on a ride with no submersion column — the four-item line auto-shrinks via `fitted(_:maxWidth:…)` rather than running under the right edge), and the **GitHub source link** (`RideMapRenderer.sourceURL`). The PNG lands in `Documents/RideMaps/<name>_map.png` and is handed to a `UIActivityViewController` share sheet. `snapshot.point(for:)` returns points in the snapshot image's own space, so the track aligns to the tiles with no manual flip on iOS.
+- **Top-speed hardening (30.7.2026, Android-parity port).** The 29.7.2026
+  SUP paddle (phone in a pocket, avg 3.3 km/h) fabricated 30.35 km/h via a
+  2-row GPS multipath kick WITH a matching ~5 m position kick — the old
+  three gates (clip / blackout / chord) all passed it. `robustTop` gained
+  two gates: (a) **row quality** — a speed row with `hdop >
+  maxSpeedRowHdop` (15) never sets the headline (the phone/watch loggers
+  stamp an honest accuracy proxy; `validPoints`' `maxPlausibleHdop` stays
+  50 — tightening it punched visible holes through honest degraded
+  mid-paddle rows on Android); (b) **acceleration envelope** — a candidate
+  must be reachable from EVERY finite speed row within ±5 s under
+  8 km/h/s, or under the per-second allowance measured by the paired
+  `Sens*` file's accelerometer (`CsvParsers.accBins(fromSensorFile:)` —
+  memory-mapped byte-walk, 86 MB in ~0.7 s, never a full `[SensorRow]`
+  parse; `RideMapRenderer.accelProfile(bins:)` — |mean − rolling-median
+  gravity ref| per 1 s bin, orientation-free so pocket carry works,
+  veto-only so IMU noise can't reject a real sprint). Threaded through
+  `RideStatsLoader` (`accelProfile(forGps:)`, (path, size)-cached; sens
+  sibling = first "Gps" → "Sens" in the name, so `iPhoneGps_*`/watch rides
+  get nil and keep the flat cap) and `RideMapRenderer.render(accel:)`.
+  Strict-minimum envelope on purpose: at 1 Hz each side has exactly one
+  meaningful neighbour — a median or percentile discards the only real
+  constraint (both failed on the real session). Android
+  `RideMapRenderer.robustTopSpeed` is the reference implementation
+  (v0.0.68); results on the session: 30.35 → 12.28 km/h. Desktop not yet
+  ported.
 - **`scripts/ride_map_png.swift`** is the standalone macOS twin of `RideMapRenderer` (AppKit/`NSImage` instead of UIKit): `swift scripts/ride_map_png.swift <in.csv> <out.png> [logo.png]`, `MLDEBUG=1` to print the classified runs. It ports the same continuous-track cleaning + `RideActivity` classifier + legend, and is how the v1.0.24 rendering was verified on the Mac (incl. a synthesised `WaterTemp` column to exercise the 3-mode path). **It does NOT flip `point(for:)`** — that was a bug (fixed 13.7.2026): on AppKit `snapshot.point(for:)` already comes back in the same y-up space the snapshot image is drawn in, so the old `y = footerH + (mapH - p.y)` mirrored the whole track against the tiles. It silently invalidates any visual check made with this script — a due-north synthetic track drew its start at the top, and the 12.7 walk into town appeared out at sea. iOS is y-down and likewise needs no flip.
 
 ### Watch live board angles (v1.0.48+) — watch strapped to the board

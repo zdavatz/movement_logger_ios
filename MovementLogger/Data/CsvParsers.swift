@@ -75,11 +75,89 @@ struct CsvParseError: Error, LocalizedError {
     var errorDescription: String? { message }
 }
 
+/// One-second mean-acceleration bin from `CsvParsers.accBins(fromSensorFile:)`
+/// — `bin` = 10ms-tick / 100, means in mg. Feeds `RideMapRenderer`'s
+/// IMU-informed acceleration gate.
+struct AccBin {
+    let bin: Int
+    let n: Int
+    let meanXMg: Double
+    let meanYMg: Double
+    let meanZMg: Double
+}
+
 enum CsvParsers {
 
     static func parseSensorFile(_ url: URL) throws -> [SensorRow] {
         let text = try String(contentsOf: url, encoding: .utf8)
         return try parseSensorText(text)
+    }
+
+    /// Per-second mean-acceleration bins of a `Sens*` CSV, feeding
+    /// `RideMapRenderer`'s IMU-informed acceleration gate. Deliberately NOT
+    /// built on `parseSensorFile`: the 29.7.2026 SUP session's SensPhone
+    /// file is 86 MB / 1.1 M rows, and a full `[SensorRow]` (plus the 1.1 M
+    /// `String` line copies `parseSensorText` makes) is hundreds of MB of
+    /// transient heap. This walks the memory-mapped bytes and only ever
+    /// materialises the four needed fields per row; malformed rows are
+    /// skipped, not fatal. Tick units mirror `parseSensorText` (`ms` → ÷10,
+    /// spaced headers → 10 ms ticks as-is) so bins line up with
+    /// `GpsRow.ticks`.
+    static func accBins(fromSensorFile url: URL) throws -> [AccBin] {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard let headerEnd = data.firstIndex(of: 0x0A) else {
+            throw CsvParseError(message: "sensor csv: empty file")
+        }
+        let header = String(decoding: data[data.startIndex..<headerEnd], as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cols = try HeaderMap(headerLine: header)
+        let iT: Int
+        let tickDiv: Double
+        if let i = cols.idxOrNil("ms") { iT = i; tickDiv = 10.0 }
+        else { iT = try cols.idxAny("Time [10ms]", "Time [mS]"); tickDiv = 1.0 }
+        let iAx = try cols.idxAny("AccX [mg]", "ax_mg")
+        let iAy = try cols.idxAny("AccY [mg]", "ay_mg")
+        let iAz = try cols.idxAny("AccZ [mg]", "az_mg")
+        let maxIdx = max(iT, iAx, iAy, iAz)
+
+        var acc: [Int: (n: Double, x: Double, y: Double, z: Double)] = [:]
+        var fields = [Double](repeating: .nan, count: maxIdx + 1)
+        var lineStart = data.index(after: headerEnd)
+        while lineStart < data.endIndex {
+            let nl = data[lineStart...].firstIndex(of: 0x0A) ?? data.endIndex
+            let line = data[lineStart..<nl]
+            lineStart = nl < data.endIndex ? data.index(after: nl) : data.endIndex
+            if line.isEmpty || line.first == UInt8(ascii: "#") { continue }
+            var start = line.startIndex
+            var idx = 0
+            var ok = true
+            while idx <= maxIdx {
+                let comma = line[start...].firstIndex(of: UInt8(ascii: ","))
+                let fieldEnd = comma ?? line.endIndex
+                if idx == iT || idx == iAx || idx == iAy || idx == iAz {
+                    let s = String(decoding: line[start..<fieldEnd], as: UTF8.self)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard let v = Double(s) else { ok = false; break }
+                    fields[idx] = v
+                }
+                guard let c = comma else {
+                    if idx < maxIdx { ok = false }
+                    break
+                }
+                start = line.index(after: c)
+                idx += 1
+            }
+            guard ok else { continue }
+            let bin = Int((fields[iT] / tickDiv) / 100.0)
+            var a = acc[bin] ?? (0, 0, 0, 0)
+            a.n += 1; a.x += fields[iAx]; a.y += fields[iAy]; a.z += fields[iAz]
+            acc[bin] = a
+        }
+        return acc.keys.sorted().map { bin in
+            let a = acc[bin]!
+            return AccBin(bin: bin, n: Int(a.n),
+                          meanXMg: a.x / a.n, meanYMg: a.y / a.n, meanZMg: a.z / a.n)
+        }
     }
 
     static func parseGpsFile(_ url: URL) throws -> [GpsRow] {

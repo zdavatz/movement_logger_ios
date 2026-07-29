@@ -189,9 +189,10 @@ struct RideMapView: View {
             s = await RideStatsLoader.shared.addWind(to: s, url: url)
             wind = s.wind
         }
+        let accel = await RideStatsLoader.shared.accelProfile(forGps: url)
         let png = await RideMapRenderer.render(
             rows: rows, title: url.deletingPathExtension().lastPathComponent,
-            dark: colorScheme == .dark, wind: wind)
+            dark: colorScheme == .dark, wind: wind, accel: accel)
         guard let png else { return }
         let dir = FileManager.default
             .urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -722,6 +723,7 @@ enum RideMapRenderer {
     /// offline).
     static func render(rows: [GpsRow], title: String, dark: Bool = false,
                        wind: RideWeather.Wind? = nil,
+                       accel: AccelProfile? = nil,
                        width: CGFloat = 1080, mapHeight: CGFloat = 1440,
                        footerHeight: CGFloat = 300) async -> Data? {
         let clean = cleanTrack(rows: rows)
@@ -759,7 +761,7 @@ enum RideMapRenderer {
             : .speed(vMax: vMax)
 
         // Footer stats.
-        let topSpeed = robustTopSpeed(rows: rows)
+        let topSpeed = robustTopSpeed(rows: rows, accel: accel)
         let distanceKm = trackDistanceKm(clean)
         let durMin = (pts.last!.ticks - pts.first!.ticks) * 0.01 / 60.0
         let waterTempC = medianWaterTempC(rows: rows)
@@ -839,6 +841,114 @@ enum RideMapRenderer {
     /// nor the position cross-check can catch it — blackout adjacency is the
     /// one reliable signature.
     private static let blackoutPadTicks = 1_000.0
+    /// A speed row worse than this never sets the TOP-SPEED headline (the
+    /// drawn track keeps tolerating up to `maxPlausibleHdop`): the 29.7.2026
+    /// SUP session ended with the phone at the harbour under a blocked sky,
+    /// logging half an hour of 12–32 km/h wander at 80–285 m claimed
+    /// accuracy (proxy 16–57) on 3–4 sats. The phone/watch loggers stamp an
+    /// honest accuracy column, so their junk disqualifies itself; the u-blox
+    /// lies while fabricating, which is what the blackout gate is for. NaN
+    /// (RMC half-rows) passes.
+    private static let maxSpeedRowHdop = 15.0
+    /// Acceleration common sense: nothing paddled, pumped or winged
+    /// accelerates faster than this (8 km/h per second ≈ 2.2 m/s², already
+    /// generous for a wingfoil catching a gust). A top-speed candidate must
+    /// be REACHABLE from its surrounding seconds under this cap — the
+    /// 29.7.2026 SUP spike (steady 3 km/h paddling → 30.35 km/h for exactly
+    /// 2 s → back to 3 km/h, WITH a matching ~5 m position kick so the
+    /// chord cross-check passed) is a +27 km/h/s step and dies here.
+    private static let maxAccelKmhPerS = 8.0
+    /// The reachability envelope looks this far (5 s) to each side of a
+    /// candidate. Per side, every finite speed row allows the candidate at
+    /// most `v' + cap × Δt`, and the candidate must be reachable from EVERY
+    /// surrounding sample — anything softer fails at the 1 Hz phone/watch
+    /// rate, where each side has exactly ONE row at Δt = 1 s and that row is
+    /// the whole constraint. Genuine bursts survive because real physics
+    /// ramps DOWN too — a wake surf decays 16 → 12 → 8, it doesn't teleport
+    /// back to 5.
+    private static let accelWindowTicks = 500.0
+    /// mg → km/h per second (9.80665 m/s² per g × 3.6).
+    private static let mgToKmhPerS = 9.80665 * 3.6 / 1000.0
+    /// The IMU-informed envelope allows the measured net acceleration times
+    /// this slack — the gravity reference is a rolling median, so a genuinely
+    /// sustained push leaks into its own reference and reads ~half strength.
+    private static let accelImuSlack = 2.0
+    /// …but never less than this (2 km/h/s): bin quantisation and mount
+    /// rotation noise put a floor under what "calm" proves.
+    private static let accelImuFloorKmhPerS = 2.0
+    /// Gravity reference = component-wise median of the per-second mean acc
+    /// vectors over ±this many bins — long enough to bridge a real 10 s
+    /// push, short enough to track slow mount-orientation drift (phone in a
+    /// pocket, board being flipped).
+    private static let gravityRefBins = 10
+
+    /// Per-second speed-step allowance derived from the paired `Sens*`
+    /// file's accelerometer — the IMU records the truth about acceleration
+    /// at 100 Hz while GPS speed is a derived guess. Per 1 s bin: net
+    /// dynamic acceleration = |mean acc vector − rolling-median gravity
+    /// reference| (orientation-free, so pocket carry works), scaled by
+    /// `accelImuSlack` and clamped to [floor, cap]. The 29.7.2026 SUP spike
+    /// claimed 3 → 30 km/h in 1 s (≈ 0.77 g sustained) while the pocketed
+    /// phone's mean |acc| sat at 1.00 g the whole minute — no push
+    /// happened. Veto-only by construction: a rocking board only ever
+    /// RAISES the allowance toward the cap, never below the floor, so IMU
+    /// noise cannot reject a genuine sprint.
+    struct AccelProfile {
+        let firstBin: Int
+        /// km/h-per-second allowance per bin; NaN = no sens data.
+        let allowed: [Double]
+
+        /// Integral of the allowance over the tick span, in km/h — the most
+        /// speed the IMU says can have been gained or lost. Bins without
+        /// data fall back to the flat cap.
+        func allowanceKmh(_ tickA: Double, _ tickB: Double) -> Double {
+            var s = min(tickA, tickB) / 100.0
+            let hi = max(tickA, tickB) / 100.0
+            var sum = 0.0
+            while s < hi {
+                let e = min(hi, s.rounded(.down) + 1)
+                sum += rate(Int(s.rounded(.down))) * (e - s)
+                s = e
+            }
+            return sum
+        }
+
+        private func rate(_ bin: Int) -> Double {
+            let i = bin - firstBin
+            guard i >= 0, i < allowed.count, allowed[i].isFinite else {
+                return RideMapRenderer.maxAccelKmhPerS
+            }
+            return allowed[i]
+        }
+    }
+
+    /// Build the `AccelProfile` from `CsvParsers.accBins(fromSensorFile:)`
+    /// output; nil when there's nothing usable.
+    static func accelProfile(bins: [AccBin]) -> AccelProfile? {
+        guard let first = bins.first?.bin, let last = bins.last?.bin else { return nil }
+        let span = last - first + 1
+        // 55 h of 1 s bins — a corrupt tick column shouldn't allocate GBs.
+        guard span > 0, span <= 200_000 else { return nil }
+        var mean = [AccBin?](repeating: nil, count: span)
+        for b in bins { mean[b.bin - first] = b }
+        var allowed = [Double](repeating: .nan, count: span)
+        for i in 0..<span {
+            guard let m = mean[i] else { continue }
+            var bx: [Double] = [], by: [Double] = [], bz: [Double] = []
+            for j in max(0, i - gravityRefBins)...min(span - 1, i + gravityRefBins) {
+                guard let n = mean[j] else { continue }
+                bx.append(n.meanXMg); by.append(n.meanYMg); bz.append(n.meanZMg)
+            }
+            bx.sort(); by.sort(); bz.sort()
+            let dx = m.meanXMg - bx[bx.count / 2]
+            let dy = m.meanYMg - by[by.count / 2]
+            let dz = m.meanZMg - bz[bz.count / 2]
+            let dynMg = (dx * dx + dy * dy + dz * dz).squareRoot()
+            allowed[i] = min(max(dynMg * mgToKmhPerS * accelImuSlack,
+                                 accelImuFloorKmhPerS), maxAccelKmhPerS)
+        }
+        return AccelProfile(firstBin: first, allowed: allowed)
+    }
 
     /// Blackout exclusion zones as (start, end) tick pairs, for the top-speed
     /// stat: before the first fix settles, around every ≥2 s hole, after the last.
@@ -851,23 +961,31 @@ enum RideMapRenderer {
         return zones
     }
 
-    /// Top speed for the footer stat, outlier-hardened: hard clip, blackout
-    /// adjacency, and position consistency (the earliest/latest valid fix
-    /// within ±1 s must span ≥0.5 s and move commensurately). Verified against
-    /// the 11.7.2026 Ermioni ride, whose raw column peaked at a fantasy
-    /// 27.1 km/h on a ~7 km/h session.
-    static func robustTopSpeed(rows: [GpsRow]) -> Double {
-        robustTop(rows: rows).kmh
+    /// Top speed for the footer stat, outlier-hardened: hard clip, honest-HDOP
+    /// row quality (`maxSpeedRowHdop`), blackout adjacency, acceleration
+    /// envelope (`maxAccelKmhPerS`, IMU-tightened when the paired `Sens*`
+    /// file's `AccelProfile` is available), and position consistency (the
+    /// earliest/latest valid fix within ±1 s must span ≥0.5 s and move
+    /// commensurately). Verified against the 11.7.2026 Ermioni ride (fantasy
+    /// 27.1 km/h on a ~7 km/h session) and the 29.7.2026 SUP paddle
+    /// (30.35 km/h multipath kick on a 3.3 km/h session → 12.28 real).
+    static func robustTopSpeed(rows: [GpsRow], accel: AccelProfile? = nil) -> Double {
+        robustTop(rows: rows, accel: accel).kmh
     }
 
     /// `robustTopSpeed` plus WHEN it happened — the tick of the winning sample,
     /// nil when nothing qualified. The moment feeds the wind lookup: the ride
     /// stats show the wind at the time of the top speed, not the ride median.
-    static func robustTop(rows: [GpsRow]) -> (kmh: Double, atTicks: Double?) {
+    static func robustTop(rows: [GpsRow], accel: AccelProfile? = nil) -> (kmh: Double, atTicks: Double?) {
         let fixes = dedupFixes(validPoints(rows))
         guard fixes.count >= 2 else { return (0, nil) }
         let fixTicks = fixes.map { $0.ticks }
         let zones = blackoutZones(fixTicks)
+        // All finite speed rows in tick order, for the acceleration envelope.
+        let speedRows = rows.filter {
+            $0.ticks.isFinite && $0.speedKmhModule.isFinite && $0.speedKmhModule >= 0
+        }
+        let speedTicks = speedRows.map { $0.ticks }
 
         var top = 0.0
         var topTicks: Double? = nil
@@ -875,7 +993,10 @@ enum RideMapRenderer {
             let v = r.speedKmhModule
             guard v.isFinite, v >= 0, v <= maxPlausibleSpeedKmh, v > top,
                   r.ticks.isFinite else { continue }
+            if r.hdop > maxSpeedRowHdop { continue }
             if zones.contains(where: { r.ticks >= $0.0 && r.ticks <= $0.1 }) { continue }
+            if !accelReachable(r, speedRows: speedRows, speedTicks: speedTicks,
+                               accel: accel) { continue }
             let a = lowerBound(fixTicks, r.ticks - fixWindowTicks)
             let b = lowerBound(fixTicks, r.ticks + fixWindowTicks + 1e-9) - 1
             guard b > a else { continue }
@@ -890,6 +1011,28 @@ enum RideMapRenderer {
             }
         }
         return (top, topTicks)
+    }
+
+    /// Acceleration-envelope gate: can `r`'s speed be reached from EVERY
+    /// surrounding sample within ±`accelWindowTicks` under the cap? Each
+    /// finite speed row allows at most `v' + cap × Δt` — the cap being the
+    /// IMU-measured `AccelProfile.allowanceKmh` when a Sens pair exists,
+    /// else the flat `maxAccelKmhPerS`.
+    private static func accelReachable(_ r: GpsRow, speedRows: [GpsRow],
+                                       speedTicks: [Double],
+                                       accel: AccelProfile?) -> Bool {
+        let v = r.speedKmhModule
+        let lo = lowerBound(speedTicks, r.ticks - accelWindowTicks)
+        let hi = lowerBound(speedTicks, r.ticks + accelWindowTicks + 1e-9)
+        for i in lo..<hi {
+            let o = speedRows[i]
+            let dt = o.ticks - r.ticks
+            if dt == 0 { continue }
+            let step = accel?.allowanceKmh(o.ticks, r.ticks)
+                ?? maxAccelKmhPerS * abs(dt) / 100.0
+            if v > o.speedKmhModule + step { return false }
+        }
+        return true
     }
 
     /// Mean position of the plottable fixes — the point WeatherKit is asked for.

@@ -122,6 +122,30 @@ struct RideStats {
 actor RideStatsLoader {
     static let shared = RideStatsLoader()
     private var cache: [String: RideStats] = [:]
+    private var accelCache: [String: RideMapRenderer.AccelProfile?] = [:]
+
+    /// IMU cross-check for `RideMapRenderer.robustTop`: the paired `Sens*`
+    /// file recorded on the same tick clock (`GpsPhone_X` ↔ `SensPhone_X`,
+    /// box `Gps001` ↔ `Sens001`; `iPhoneGps_*` and watch rides have no
+    /// pair, so they get nil and the flat acceleration cap applies).
+    /// Cached per (path, size) — streaming the 86 MB SensPhone file costs
+    /// ~a second, it must never run more than once. Best-effort: any
+    /// parse failure just means nil.
+    func accelProfile(forGps url: URL) -> RideMapRenderer.AccelProfile? {
+        let name = url.lastPathComponent
+        guard let r = name.range(of: "Gps") else { return nil }
+        let sens = url.deletingLastPathComponent()
+            .appendingPathComponent(name.replacingCharacters(in: r, with: "Sens"))
+        guard let size = (try? sens.resourceValues(forKeys: [.fileSizeKey]))?.fileSize else {
+            return nil
+        }
+        let key = sens.path + ":\(size)"
+        if let hit = accelCache[key] { return hit }
+        let profile = (try? CsvParsers.accBins(fromSensorFile: sens))
+            .flatMap { RideMapRenderer.accelProfile(bins: $0) }
+        accelCache[key] = profile
+        return profile
+    }
 
     func stats(for url: URL) -> RideStats? {
         let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
@@ -130,7 +154,7 @@ actor RideStatsLoader {
         guard let rows = try? CsvParsers.parseGpsFile(url), !rows.isEmpty else { return nil }
         let start = Self.stampDate(url.deletingPathExtension().lastPathComponent)
         let durationSec = max(0, (rows.last!.ticks - rows.first!.ticks) * 0.01)
-        let top = RideMapRenderer.robustTop(rows: rows)
+        let top = RideMapRenderer.robustTop(rows: rows, accel: accelProfile(forGps: url))
         let stats = RideStats(
             start: start,
             end: start.map { $0.addingTimeInterval(durationSec) },
