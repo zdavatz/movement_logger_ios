@@ -41,6 +41,9 @@ struct MainNav: View {
             GpsDebugScreen(vm: vm)
                 .tabItem { Label("GPS Debug", systemImage: "antenna.radiowaves.left.and.right") }
                 .tag(5)
+            ImuAnalysisScreen()
+                .tabItem { Label("Analyze", systemImage: "waveform.path.ecg") }
+                .tag(8)
         }
     }
 
