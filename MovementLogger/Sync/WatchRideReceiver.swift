@@ -7,6 +7,12 @@ import CoreLocation
 /// and stores them under `Documents/WatchRides/`, so they show in the Rides
 /// tab (and the Files app) and can be shared. Each watch session (Start→End)
 /// is one CSV with the 1 Hz GPS track inside.
+///
+/// It also surfaces **iPhone-recorded** GPS tracks in the Rides tab, so a ride
+/// logged with no Apple Watch connected still maps: the GPS-tab logger's
+/// `iPhoneGps_*` and the phone-logger card's `GpsPhone_*` (see `refresh()`).
+/// Those are the phone's own files in `Documents/`; only the watch rides feed
+/// the WatchConnectivity delivery manifest.
 @Observable
 final class WatchRideReceiver: NSObject, WCSessionDelegate {
     static let shared = WatchRideReceiver()
@@ -53,8 +59,10 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
             .flatMap(RideSort.init(rawValue:)) ?? .rideDate
         refresh()
         // Rides already here predate the delivery bookkeeping — seed them so
-        // the watch doesn't offer to re-send the whole back catalogue.
-        noteReceived(rides.map { $0.lastPathComponent })
+        // the watch doesn't offer to re-send the whole back catalogue. Only
+        // WATCH rides feed the manifest; iPhone-recorded rides (never sent by
+        // the watch) must not pollute it.
+        noteReceived(watchRideFiles().map { $0.lastPathComponent })
         pushRideManifest()
     }
 
@@ -119,20 +127,46 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
         return dir
     }
 
-    /// Rescan the folder, newest first by the current `sortOrder`.
+    /// Rescan both sources — watch rides in `WatchRides/` and iPhone-recorded
+    /// tracks in `Documents/` — merged and ordered newest-first by the current
+    /// `sortOrder`. All downstream code (row stats, map, delete) keys off the
+    /// URL, so a mixed list needs no other change.
     func refresh() {
-        let files = (try? FileManager.default.contentsOfDirectory(
-            at: ridesDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-        // WatchImu_* are the paired raw-motion streams, not rides — they're
-        // stored and manifest-tracked (so the watch stops re-sending them) but
-        // never listed here.
-        let csvs = files.filter { $0.pathExtension.lowercased() == "csv"
-            && !$0.lastPathComponent.hasPrefix("WatchImu_") }
+        let csvs = watchRideFiles() + phoneRideFiles()
         switch sortOrder {
         case .rideDate:
             rides = csvs.sorted { rideStart($0) > rideStart($1) }
         case .synced:
             rides = csvs.sorted { (modDate($0) ?? .distantPast) > (modDate($1) ?? .distantPast) }
+        }
+    }
+
+    /// Watch rides mirrored under `Documents/WatchRides/`. `WatchImu_*` are the
+    /// paired raw-motion streams, not rides — stored and manifest-tracked (so
+    /// the watch stops re-sending them) but never listed.
+    private func watchRideFiles() -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: ridesDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter { $0.pathExtension.lowercased() == "csv"
+            && !$0.lastPathComponent.hasPrefix("WatchImu_") }
+    }
+
+    /// iPhone-recorded GPS tracks in `Documents/`: the GPS-tab logger's
+    /// `iPhoneGps_*` and the phone-logger card's `GpsPhone_*`. Both carry the
+    /// same GPS schema (`Lat [deg]`/`Lon [deg]`/`SpeedKMh`, HDOP = honest
+    /// accuracy proxy) the map already reads, so a ride recorded with no watch
+    /// connected maps here — falling back to the speed gradient since there's
+    /// no submersion column. Box downloads (`Gps001.csv`) and the IMU
+    /// `SensPhone_*` sibling are deliberately excluded — they belong to
+    /// Sync/Replay/Analyze, not the ride list.
+    private func phoneRideFiles() -> [URL] {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: docs, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return files.filter {
+            $0.pathExtension.lowercased() == "csv"
+            && ($0.lastPathComponent.hasPrefix("iPhoneGps_")
+                || $0.lastPathComponent.hasPrefix("GpsPhone_"))
         }
     }
 
@@ -147,10 +181,12 @@ final class WatchRideReceiver: NSObject, WCSessionDelegate {
         (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
     }
 
-    /// Delete one ride CSV from `Documents/WatchRides/` (swipe-to-delete in the
-    /// Rides list). Removes the file and refreshes the list. The ride still
-    /// exists on the watch until the watch app rotates it, so this only clears
-    /// the phone's copy. Also removes any exported map PNG for that ride.
+    /// Delete one ride CSV (swipe-to-delete in the Rides list). The URL carries
+    /// its own directory, so this removes a watch ride from `WatchRides/` or an
+    /// iPhone-recorded track from `Documents/` alike, then refreshes the list.
+    /// A watch ride still exists on the watch until the watch app rotates it, so
+    /// for those this only clears the phone's copy; an iPhone recording has no
+    /// other copy. Also removes any exported map PNG for that ride.
     func delete(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
         // Best-effort cleanup of the matching exported map, if one was shared.

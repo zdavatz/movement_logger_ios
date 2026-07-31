@@ -19,8 +19,8 @@ struct RidesScreen: View {
                 if receiver.rides.isEmpty {
                     ContentUnavailableView(
                         "No rides yet",
-                        systemImage: "applewatch",
-                        description: Text("End a session on the MovementLogger watch app to sync its GPS ride here."))
+                        systemImage: "map",
+                        description: Text("Record a ride with the iPhone GPS logger, or end a session on the MovementLogger watch app, to see it mapped here."))
                 } else {
                     List(receiver.rides, id: \.self) { url in
                         // A plain Button (not a NavigationLink): the map is shown
