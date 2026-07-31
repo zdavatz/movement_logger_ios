@@ -217,9 +217,10 @@ final class PhoneLogger: @unchecked Sendable {
                 self.gpsRows = self.gpsCount
             }
         }
-        // Only tear down the GPS reader if we started it and it isn't busy
-        // with its own iPhoneGps_* recording.
-        if startedGps && !GpsCore.shared.isLogging {
+        // Only tear down the GPS reader if we started it. (The old built-in
+        // iPhoneGps_* CSV recorder that also drove GpsCore was removed, so
+        // there's no other in-app recording to keep it alive for.)
+        if startedGps {
             GpsCore.shared.stop()
         }
         startedGps = false

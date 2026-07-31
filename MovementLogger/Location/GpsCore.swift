@@ -16,12 +16,13 @@ import Observation
 ///    rather than raw Doppler. Smoother for car nav, slightly damped
 ///    vs raw for foiling cadence work.
 ///
-/// Same UI shape (status / rate card / fix readout / CSV record) so the
-/// tab feels identical across platforms. CSV columns match the box's
-/// `Gps*.csv` schema so Replay picks the file up without parser changes;
-/// `NumSat` is left at 0 (Apple doesn't expose it) and `HDOP` is
-/// substituted with `horizontalAccuracy` in metres — both are "how good
-/// is this fix" indicators, so the column stays meaningful.
+/// Same UI shape (status / rate card / fix readout) so the tab feels
+/// identical across platforms. This tab is now a **live readout only** —
+/// the old built-in CSV recorder (`iPhoneGps_*`) was removed in favour of
+/// the **Phone logger** card, which records GPS **and** motion
+/// (`SensPhone_*`/`GpsPhone_*`) and is a strict superset. GpsCore itself
+/// stays — Race mode, the phone-as-rider map, and the Phone logger all run
+/// on it. Existing `iPhoneGps_*` files still parse + show in Rides/Replay.
 @Observable
 final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
 
@@ -46,18 +47,10 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
     var hz: Double = 0.0
     var sampleCount: UInt64 = 0
 
-    // --- CSV logger ---
-    var isLogging: Bool = false
-    var logPath: String? = nil
-    var loggedRows: UInt64 = 0
-
     // --- Private ---
     private let manager: CLLocationManager
     private let windowSize = 10
     private var arrivalTimes: [Date] = []
-    private var csvHandle: FileHandle? = nil
-    private var csvFileURL: URL? = nil
-    private var csvStartMonoMs: Int64 = 0
 
     override init() {
         manager = CLLocationManager()
@@ -113,45 +106,6 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
         status = "Stopped"
         arrivalTimes.removeAll(keepingCapacity: true)
         hz = 0
-        stopLogging()
-    }
-
-    // MARK: - CSV logger
-
-    func startLogging() {
-        guard csvHandle == nil else { return }
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        let df = DateFormatter()
-        df.dateFormat = "yyyyMMdd_HHmmss"
-        df.locale = Locale(identifier: "en_US_POSIX")
-        df.timeZone = TimeZone(secondsFromGMT: 0)
-        let name = "iPhoneGps_" + df.string(from: Date()) + ".csv"
-        let url = docs.appendingPathComponent(name)
-        // Header: identical column names to box `Gps*.csv` so the existing
-        // `CsvParsers.parseGpsStream` reads it. The `Time [10ms]` ticks are
-        // synthesised from the log-start monotonic offset.
-        let header = "Time [10ms],UTC,Lat [deg],Lon [deg],Alt [m],SpeedKMh,Course [deg],Fix,NumSat,HDOP\n"
-        do {
-            FileManager.default.createFile(atPath: url.path, contents: header.data(using: .utf8))
-            let h = try FileHandle(forWritingTo: url)
-            try h.seekToEnd()
-            csvHandle = h
-            csvFileURL = url
-            csvStartMonoMs = Self.monotonicMs()
-            isLogging = true
-            logPath = url.path
-            loggedRows = 0
-        } catch {
-            status = "CSV log open failed: \(error.localizedDescription)"
-        }
-    }
-
-    func stopLogging() {
-        guard let h = csvHandle else { return }
-        try? h.close()
-        csvHandle = nil
-        isLogging = false
     }
 
     // MARK: - CLLocationManagerDelegate
@@ -204,7 +158,6 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
         recordArrival(newest.timestamp)
         sampleCount &+= UInt64(locations.count)
         for loc in locations {
-            appendCsvRow(loc)
             // Phone logger (SensPhone/GpsPhone pair): no-op unless recording.
             PhoneLogger.shared.onFix(loc)
         }
@@ -229,52 +182,5 @@ final class GpsCore: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
               let last = arrivalTimes.last else { hz = 0; return }
         let span = last.timeIntervalSince(first)
         hz = span > 0 ? Double(arrivalTimes.count - 1) / span : 0
-    }
-
-    private func appendCsvRow(_ loc: CLLocation) {
-        guard let h = csvHandle else { return }
-        let ticks = max(0, (Self.monotonicMs() - csvStartMonoMs) / 10)
-        let utc: String = {
-            let f = DateFormatter()
-            f.dateFormat = "HHmmss.SS"
-            f.locale = Locale(identifier: "en_US_POSIX")
-            f.timeZone = TimeZone(secondsFromGMT: 0)
-            return f.string(from: loc.timestamp)
-        }()
-        // Doppler-derived speed is in m/s on iOS; convert to km/h to match
-        // the box. CoreLocation reports `-1` for invalid speed/course.
-        let speedKmh = loc.speed >= 0 ? loc.speed * 3.6 : Double.nan
-        let courseDeg = loc.course >= 0 ? loc.course : Double.nan
-        let fix = loc.horizontalAccuracy >= 0 ? 1 : 0
-        let hdopProxy = loc.horizontalAccuracy >= 0 ? loc.horizontalAccuracy : Double.nan
-        let row = [
-            String(ticks),
-            utc,
-            fmt(loc.coordinate.latitude),
-            fmt(loc.coordinate.longitude),
-            fmt(loc.altitude),
-            fmt(speedKmh),
-            fmt(courseDeg),
-            String(fix),
-            "0",
-            fmt(hdopProxy),
-        ].joined(separator: ",") + "\n"
-        if let data = row.data(using: .utf8) {
-            try? h.write(contentsOf: data)
-            loggedRows &+= 1
-        }
-    }
-
-    private func fmt(_ v: Double) -> String {
-        guard !v.isNaN else { return "" }
-        return String(format: "%.6f", v)
-    }
-
-    private static func monotonicMs() -> Int64 {
-        // `systemUptime` returns seconds since boot — monotonic for our
-        // use case (ticks since log start) and survives mid-session
-        // suspensions. Don't substitute `Date()`: NTP/manual clock jumps
-        // would back-step the ticks column.
-        return Int64(ProcessInfo.processInfo.systemUptime * 1000)
     }
 }
