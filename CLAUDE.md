@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 iOS port of `~/Documents/software/movement_logger_android` (Jetpack Compose + Kotlin), which is itself an Android port of the Movement Logger desktop app at `~/Documents/software/fp-sns-stbox1/Utilities/rust`. Talks to the PumpTsueri SensorTile.box over BLE, downloads CSV recordings, and replays them time-synced against a phone-recorded video. SwiftUI + CoreBluetooth + AVKit, no external dependencies.
 
-Tabs (the first three match the desktop and Android tab order; **GPS**, **Rides**, and **GPS Debug** are iOS/watch additions):
+Tabs (the first three match the desktop and Android tab order; **GPS**, **Rides**, **Analyze**, and **GPS Debug** are iOS/watch additions):
 
 - **Live** — when connected to a PumpLogger-firmware box (advertises as `STBoxFs`), renders the 0.5 Hz SensorStream snapshot: accel / gyro / mag / baro / GPS readouts + two `Canvas` sparklines (acc magnitude, pressure), topped by a **`BoardAnglesCard`** that reads the box attitude (pitch / roll / yaw in degrees, absolute + a zeroable calibration — see the *Live tab — board angles* section below). Subscription is automatic on Connect. Legacy PumpTsueri firmware doesn't expose the SensorStream characteristic — the tab stays empty with a status-line log entry.
 - **Sync** — scan / connect / LIST / READ / DELETE / SET_MODE / GET_MODE / START_LOG / SET_TIME. Auto/Manual box log-mode (firmware v0.0.7+): `GET_MODE 0x07` on connect reflects the box's persisted mode, `SET_MODE 0x06` changes it, `START_LOG 0x05 [<dur:u32-LE>]` opens a fixed-duration manual session (no reboot/disconnect — only shown in manual mode). Single-byte SET/GET replies route through a `.modeReq` op. **GPS on/off (`GpsPowerSelector`, firmware v0.0.35+):** an On/Off control next to the log-mode selector turns the box's u-blox receiver off to save battery when GPS is faulty/unused — `GPS_POWER 0x11 [<u8 on>]` (off drops the receiver into UBX-RXM-PMREQ backup, ~tens of µA vs ~25 mA; persisted on the box + re-applied at boot) and `GPS_GET_POWER 0x12` (reflects the box's persisted state on connect). Both mirror SET_MODE/GET_MODE exactly — single-byte writes whose one-byte reply routes through a `.gpsPwrReq` op (the `.modeReq` twin, same 4 s `modeReqTimeoutMs`); `handleGpsPwrNotify` decodes it, `BleEvent.gpsPower(on:)` publishes it, and `FileSyncViewModel.queryGpsPower(attempt:)` is the idle-deferred connect-time query (the same self-deferring pattern as the firmware-version query). VM state is `gpsPowerOn: Bool?` (`nil` = unknown), toggled via `setGpsPower(_:)`. The box owns the persisted state; the app only reflects + sends. With GPS off, logging (IMU + baro) keeps running and Replay still time-aligns via the `# SYNC` anchor — you lose the speed + GPS-track panels but keep pitch/roll/height. Legacy firmware (< v0.0.35) ignores 0x11/0x12 → the op times out and the toggle stays "unknown" (neither button highlights). **`SET_TIME 0x08 [<epoch_ms:u64-LE>]` (firmware v0.0.10+)** is sent on **every connect**: the box has no RTC, so the phone hands it the current wall-clock millis and the firmware stamps a `# SYNC epoch_ms=… tick_ms=…` anchor line into the open `Sens*/Gps*.csv`, pairing the phone epoch with the box's free-running `ms` counter. This is what lets Replay time-align without a GPS fix (see CSV-schema + Replay notes below). Sent *fire-and-forget* (no tracked reply — legacy firmware without 0x08 just ignores the write); the epoch is sampled right before the send so it matches the box tick the firmware stamps. **Settle window (`BleClient.setTimeSettleMs = 2000`):** after `0x08` the firmware is busy appending the `# SYNC` line to SD and **silently drops the next FileCmd that arrives too soon** — confirmed on Android's wire trace, where a LIST ~0.5 s after SET_TIME timed out (20 s watchdog) but the same LIST ≥1.8 s later always succeeded (this bit hard in **Auto mode** where the user connects then immediately taps List). `sendSetTime` sets `setTimeSettleUntil = now() + setTimeSettleMs`; `handleCommand` `await`s `awaitCmdSettle()` before dispatching `.list/.read/.delete/.setLogMode/.getLogMode` — connection-control + SET_TIME itself never wait. So the first file command after a connect is held up to ~2 s instead of being swallowed. STOP_LOG/Disconnect buttons removed (always-on firmware). Downloaded files land in the app's `Documents/` (exposed in the Files app via `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`).
@@ -767,6 +767,45 @@ so recordings are interchangeable across the apps.
   logger is its superset).
 - Mount guidance (shown in the card): phone flat on the board, top edge
   toward the nose — device axes then match the box's Y-nose convention.
+
+### Analyze tab — on-device ride analysis (v1.0.56+)
+
+The realization of the Phase-2 classifier deferred in the *Watch IMU logging*
+section — but computed **on the phone**, fully offline. `Data/ImuAnalysis.swift`
+(engine) + `UI/ImuAnalysisScreen.swift` (UI); built for **both** iOS and
+Android (the Android peer is `data/ImuAnalysis.kt` + `ui/ImuAnalysisScreen.kt`,
+numerically identical — validated byte-for-byte against the same file).
+
+- **Inputs.** `ImuAnalysis.fromPhoneLogger(sensURL:gpsURL:)` reads a phone-logger
+  `SensPhone_*`/`GpsPhone_*` pair; `fromWatch(imuURL:gpsURL:)` reads an
+  Apple-Watch `WatchImu_*` motion stream + its ride GPS. `ImuRecording.scan()`
+  lists both from `Documents/` + `Documents/WatchRides/`.
+- **Pipeline (`core`).** Signed per-axis `userAcceleration` (NOT magnitude —
+  rectifying doubles a single-axis stroke's fundamental) → decimate to ~25 Hz →
+  **STFT** (radix-2 Cooley-Tukey FFT, Hann, 10 s window / 1 s hop) → per-second
+  rhythmicity (band concentration 0.35–1.3 Hz vs 0.1–4 Hz), prominence, cadence;
+  a time-domain **band-pass RMS** (difference-of-moving-averages) gives stroke
+  energy that decays to ~0 on a dead tail. **Otsu** thresholds split the axes;
+  classify per second into **GLIDE** (speed ≥ 12 km/h), **PADDLE/PUMP**
+  (energetic AND rhythmic), or **WAIT**, then median-filter + absorb sub-20 s
+  runs into neighbours. Board **pitch/roll** come from a pseudo-tared gravity
+  vector (Rodrigues rotation).
+- **UI.** A per-second **mode strip** + cadence + board-angle + GPS-speed line
+  charts (SwiftUI `Canvas`), on one shared timeline. **Pinch-to-zoom**
+  (`MagnificationGesture`, iOS; `transformable`, Android) widens the panels
+  inside a horizontal `ScrollView` so a long session is inspectable. Detail is
+  presented via `.fullScreenCover(item:)`, NOT a `NavigationLink` — the tab
+  lives in the system tab bar's **"More"** overflow (>5 tabs), and `@State`
+  works there (proven by the Race tab's sheets) while a nested `NavigationStack`
+  produced a double back button.
+- **Android "More" nav parity.** iOS gets the system More overflow for free;
+  Android's `MainNav.kt` was rewritten to match — 4 primary tabs + a **More**
+  `NavigationBarItem` opening a `ModalBottomSheet` of the overflow tabs
+  (Merge/Race/Analyze/GpsDebug).
+- **Big-file cost (Android).** A 127 MB / 1.6 M-row `SensPhone` parsed as
+  `List<SensorRow>` OOMs Android's ~268 MB heap — the Kotlin port streams a
+  two-pass `DoubleArray` parse + in-place userAccel + sliding-sum moving average
+  instead. iOS has no such limit but uses the same streaming shape.
 
 ### GPS Debug tab — u-blox UBX survey over BLE
 
