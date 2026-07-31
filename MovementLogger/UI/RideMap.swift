@@ -648,12 +648,20 @@ enum RideMapRenderer {
             let present = RideMode.allCases.filter { m in modes.contains(m) }
             legend = .modes(present)
         } else {
-            let speeds = pts.map { $0.speedKmhModule }
+            // A blank speed field parses to NaN (CoreLocation reports -1 →
+            // Double.nan when it has no Doppler fix; an iPhoneGps ride can have
+            // hundreds of these while stationary). Sanitise to 0 km/h BEFORE the
+            // band maths: `Int(nonFiniteDouble)` is a hard Swift trap, and NaN
+            // also poisons the rolling median and robustMaxSpeed. (crash fix
+            // v1.0.58 — the macOS ride_map_png script never hit this because it
+            // filters `.isFinite` speeds up front; the app didn't.)
+            let speeds = pts.map { $0.speedKmhModule.isFinite ? $0.speedKmhModule : 0 }
             let vMax = max(robustMaxSpeed(speeds), 5)
             let sp = GpsMath.rollingMedian(speeds, window: 5)
             let bands = 6
             let raw = pts.indices.map { i -> Int in
-                min(bands - 1, max(0, Int((sp[i] / vMax) * Double(bands))))
+                let s = sp[i].isFinite ? sp[i] : 0
+                return min(bands - 1, max(0, Int((s / vMax) * Double(bands))))
             }
             let smooth = RideActivity.smoothKeys(raw, ticks: pts.map { $0.ticks }, minRunSec: 8)
             keyForEdge = { smooth[$0] }
@@ -749,7 +757,9 @@ enum RideMapRenderer {
 
         // Per-edge colour: activity mode when we know it, else a speed gradient.
         let submerged = RideActivity.hasSubmersion(pts)
-        let speeds = pts.map { $0.speedKmhModule }
+        // Blank speeds parse to NaN (see mapRuns) — sanitise to 0 so the
+        // gradient colour is right and no NaN reaches the rolling median.
+        let speeds = pts.map { $0.speedKmhModule.isFinite ? $0.speedKmhModule : 0 }
         let vMax = max(robustMaxSpeed(speeds), 5)
         let smoothSp = GpsMath.rollingMedian(speeds, window: 5)
         let modes: [RideMode] = submerged ? RideActivity.modes(for: pts) : []
