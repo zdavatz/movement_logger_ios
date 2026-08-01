@@ -185,9 +185,14 @@ struct RideMapView: View {
         // the network. Goes through RideStatsLoader so the row and the PNG share
         // one cached answer rather than each spending a call.
         var wind: RideWeather.Wind?
-        if var s = await RideStatsLoader.shared.stats(for: url) {
-            s = await RideStatsLoader.shared.addWind(to: s, url: url)
-            wind = s.wind
+        if let s = await RideStatsLoader.shared.stats(for: url) {
+            // Wind is optional in the footer — don't let a slow WeatherKit fetch
+            // stall the whole export. (Usually a cache hit, since the ride row
+            // already fetched it; the timeout only bites when that fetch failed.)
+            let filled = await RideMapRenderer.withTimeout(6) {
+                await RideStatsLoader.shared.addWind(to: s, url: url)
+            }
+            wind = (filled ?? s).wind
         }
         let accel = await RideStatsLoader.shared.accelProfile(forGps: url)
         let png = await RideMapRenderer.render(
@@ -753,7 +758,25 @@ enum RideMapRenderer {
         // out light-mapped for a user whose whole phone is in dark mode.
         opts.traitCollection = UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
 
-        guard let snap = try? await start(MKMapSnapshotter(options: opts)) else { return nil }
+        // Map tiles over the network — but never let a slow/failed snapshot block
+        // the export forever. Offline (or poor signal at the beach) is the common
+        // case; on timeout/failure we still render the track + stats on a plain
+        // sea-tone background so the share ALWAYS produces a PNG. The old code
+        // returned nil here, so a failed snapshot looked to the user exactly like
+        // "export doesn't work — nothing happens".
+        let snap = await snapshot(opts, timeout: snapshotTimeoutSec)
+
+        // Project a coordinate into the map area. With a real snapshot, use its
+        // own mapping; without one, project the aspect-fitted map rect into the
+        // map size directly (MKMapPoint y is south-down, same as image y — no
+        // flip, matching iOS's `snapshot.point(for:)`).
+        let fitRect = aspectFitRect(rect, size: mapSize)
+        func mapPoint(_ c: CLLocationCoordinate2D) -> CGPoint {
+            if let snap { return snap.point(for: c) }
+            let mp = MKMapPoint(c)
+            return CGPoint(x: (mp.x - fitRect.minX) / fitRect.width * mapSize.width,
+                           y: (mp.y - fitRect.minY) / fitRect.height * mapSize.height)
+        }
 
         // Per-edge colour: activity mode when we know it, else a speed gradient.
         let submerged = RideActivity.hasSubmersion(pts)
@@ -778,16 +801,23 @@ enum RideMapRenderer {
 
         let full = CGSize(width: width, height: mapHeight + footerHeight)
         let fmt = UIGraphicsImageRendererFormat()
-        fmt.scale = snap.image.scale
+        fmt.scale = snap?.image.scale ?? 2
         fmt.opaque = true
         let renderer = UIGraphicsImageRenderer(size: full, format: fmt)
 
         let img = renderer.image { rctx in
             let cg = rctx.cgContext
-            // 1. Map tiles.
-            snap.image.draw(at: .zero)
+            // 1. Map tiles (or a plain sea-tone background when the snapshot
+            //    timed out / failed — offline export still yields a track card).
+            if let snap {
+                snap.image.draw(at: .zero)
+            } else {
+                cg.setFillColor((dark ? UIColor(red: 0.06, green: 0.12, blue: 0.20, alpha: 1)
+                                      : UIColor(red: 0.80, green: 0.89, blue: 0.96, alpha: 1)).cgColor)
+                cg.fill(CGRect(x: 0, y: 0, width: width, height: mapHeight))
+            }
 
-            let px = coords.map { snap.point(for: $0) }
+            let px = coords.map(mapPoint)
             cg.setLineCap(.round); cg.setLineJoin(.round)
 
             // 2. White casing — one continuous sub-path per non-broken run.
@@ -819,12 +849,59 @@ enum RideMapRenderer {
 
     // MARK: robust stats
 
-    private static func start(_ s: MKMapSnapshotter) async throws -> MKMapSnapshotter.Snapshot {
-        try await withCheckedThrowingContinuation { cont in
-            s.start(with: DispatchQueue.global(qos: .userInitiated)) { snap, err in
-                if let snap { cont.resume(returning: snap) }
-                else { cont.resume(throwing: err ?? CocoaError(.featureUnsupported)) }
+    /// How long to wait for the map-tile snapshot before falling back to a
+    /// tile-less render. Generous enough for a slow-but-working connection, short
+    /// enough that an offline share doesn't feel broken.
+    private static let snapshotTimeoutSec = 12.0
+
+    /// Run the tile snapshot, but give up after `timeout` and return nil (the
+    /// caller renders a plain background) instead of hanging on a dead network.
+    private static func snapshot(_ opts: MKMapSnapshotter.Options,
+                                 timeout: Double) async -> MKMapSnapshotter.Snapshot? {
+        let snapper = MKMapSnapshotter(options: opts)
+        return await withTaskGroup(of: MKMapSnapshotter.Snapshot?.self) { group in
+            group.addTask {
+                await withCheckedContinuation { cont in
+                    snapper.start(with: DispatchQueue.global(qos: .userInitiated)) { snap, _ in
+                        cont.resume(returning: snap)
+                    }
+                }
             }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                snapper.cancel()               // makes the start callback resume with nil
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// The map rect the snapshotter actually shows: `rect` expanded symmetrically
+    /// about its centre to match `size`'s aspect ratio (a snapshot always covers
+    /// AT LEAST the requested region). Used to project the track when there's no
+    /// snapshot to ask.
+    private static func aspectFitRect(_ rect: MKMapRect, size: CGSize) -> MKMapRect {
+        let rectAspect = rect.size.width / rect.size.height
+        let sizeAspect = Double(size.width / size.height)
+        var w = rect.size.width, h = rect.size.height
+        if rectAspect < sizeAspect { w = h * sizeAspect } else { h = w / sizeAspect }
+        return MKMapRect(x: rect.midX - w / 2, y: rect.midY - h / 2, width: w, height: h)
+    }
+
+    /// Race an async operation against a timeout; nil if the timeout wins.
+    static func withTimeout<T: Sendable>(_ seconds: Double,
+                                         _ op: @escaping @Sendable () async -> T) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await op() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
         }
     }
 
