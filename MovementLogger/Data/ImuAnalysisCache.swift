@@ -7,7 +7,7 @@ import Foundation
 /// app restarts; any decode problem (schema bump, truncation) is a plain cache
 /// miss. Android `ImuAnalysisCache.kt` is the peer.
 enum ImuAnalysisCache {
-    private static let version = 1
+    private static let version = 2
     private static let maxFiles = 32
 
     private struct Entry: Codable {

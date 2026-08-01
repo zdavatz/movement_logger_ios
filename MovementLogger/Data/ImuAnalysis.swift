@@ -39,6 +39,9 @@ struct ImuAnalysisResult: Sendable, Codable {
     let fs: Double
     let durationMin: Double
     let sourceName: String
+    /// Wall-clock epoch ms of the grid's t=0 (from the CSV's `# SYNC` anchor /
+    /// the watch rows' epoch column); nil for legacy files.
+    let startEpochMs: Int64?
 }
 
 enum ImuAnalysisError: Error, LocalizedError {
@@ -85,10 +88,18 @@ enum ImuAnalysis {
         let gpsSec = gps.map { $0.ticks * 0.01 }
         let gpsSpd = gps.map { clampSpeed($0.speedKmhModule) }
 
+        // Wall-clock anchor: the `# SYNC epoch_ms=… tick_ms=…` marker maps the
+        // tick clock to phone epoch; project it onto the first sample so the
+        // graphs can label the x axis with real time-of-day.
+        let startEpochMs: Int64? = CsvParsers.parseSyncAnchorsFile(sensURL).first.map { a in
+            Int64(Double(a.epochMs) + (sec[0] - a.ticks * 0.01) * 1000.0)
+        }
+
         return try core(ux: ux, uy: uy, uz: uz, sampleSec: sec, fs: fs,
                         gx: gx, gy: gy, gz: gz,
                         gpsSec: gpsSec, gpsSpeed: gpsSpd,
-                        sourceName: sensURL.lastPathComponent)
+                        sourceName: sensURL.lastPathComponent,
+                        startEpochMs: startEpochMs)
     }
 
     /// Apple-Watch pair: `WatchImu_*` (epoch_ms + pre-split userAccel/gravity) +
@@ -112,7 +123,8 @@ enum ImuAnalysis {
         return try core(ux: w.ux, uy: w.uy, uz: w.uz, sampleSec: sec, fs: fs,
                         gx: w.gx, gy: w.gy, gz: w.gz,
                         gpsSec: gpsSec, gpsSpeed: gpsSpd,
-                        sourceName: imuURL.lastPathComponent)
+                        sourceName: imuURL.lastPathComponent,
+                        startEpochMs: Int64(w.epochMs[0]))
     }
 
     // MARK: - Core
@@ -121,7 +133,8 @@ enum ImuAnalysis {
                              sampleSec: [Double], fs: Double,
                              gx: [Double], gy: [Double], gz: [Double],
                              gpsSec: [Double], gpsSpeed: [Double],
-                             sourceName: String) throws -> ImuAnalysisResult {
+                             sourceName: String,
+                             startEpochMs: Int64? = nil) throws -> ImuAnalysisResult {
         let n = ux.count
         let dur = sampleSec[n - 1] - sampleSec[0]
         guard dur > 20 else { throw ImuAnalysisError.tooShort }
@@ -244,7 +257,8 @@ enum ImuAnalysis {
             seThreshold: seThr, concThreshold: concThr,
             glideSec: glide, paddleSec: paddle, waitSec: wait,
             foilRuns: foilRuns, medianStrokeRate: medSr,
-            fs: fs, durationMin: dur / 60.0, sourceName: sourceName)
+            fs: fs, durationMin: dur / 60.0, sourceName: sourceName,
+            startEpochMs: startEpochMs)
     }
 
     /// Per-second stroke-band energy: a difference-of-moving-averages bandpass

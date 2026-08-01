@@ -184,18 +184,30 @@ private struct ImuAnalysisDetail: View {
                         ScrollView(.horizontal, showsIndicators: true) {
                             VStack(spacing: 12) {
                                 if r.gpsHasSpeed {
-                                    Panel(title: "GPS speed", unit: "km/h") { g in
+                                    let sc = chartScale(r.speedKmh, hLine: ImuAnalysis.foilKmh, fill: true)
+                                    Panel(title: "GPS speed", unit: "km/h",
+                                          xs: r.minutes, startEpochMs: r.startEpochMs,
+                                          yTop: sc.map { "\(fmtVal($0.max)) km/h" }) { g in
                                         LineChart(xs: r.minutes, ys: r.speedKmh, color: .green, geo: g,
-                                                  hLine: ImuAnalysis.foilKmh, hColor: .cyan, bands: r.bands)
+                                                  hLine: ImuAnalysis.foilKmh, hColor: .cyan, bands: r.bands, fill: true)
                                     }
                                 }
-                                Panel(title: "Board angle (mount-relative)", unit: "deg") { g in
+                                let asc = chartScale(r.pitchDeg, r.rollDeg, symmetric: true)
+                                Panel(title: "Board angle (mount-relative)", unit: "deg",
+                                      xs: r.minutes, startEpochMs: r.startEpochMs,
+                                      yTop: asc.map { "\(fmtVal($0.max)) deg" },
+                                      yBottom: asc.map { "\(fmtVal($0.min)) deg" }) { g in
                                     ZStack {
-                                        LineChart(xs: r.minutes, ys: r.pitchDeg, color: .blue, geo: g, bands: r.bands, symmetric: true)
-                                        LineChart(xs: r.minutes, ys: r.rollDeg, color: .orange, geo: g, symmetric: true)
+                                        LineChart(xs: r.minutes, ys: r.pitchDeg, color: .blue, geo: g, bands: r.bands,
+                                                  symmetric: true, scaleWith: r.rollDeg)
+                                        LineChart(xs: r.minutes, ys: r.rollDeg, color: .orange, geo: g,
+                                                  symmetric: true, scaleWith: r.pitchDeg)
                                     }
                                 }
-                                Panel(title: "Stroke energy (0.35–1.3 Hz)", unit: "RMS") { g in
+                                let esc = chartScale(r.strokeEnergy, hLine: r.seThreshold, fill: true)
+                                Panel(title: "Stroke energy (0.35–1.3 Hz)", unit: "RMS",
+                                      xs: r.minutes, startEpochMs: r.startEpochMs,
+                                      yTop: esc.map { "\(fmtVal($0.max)) RMS" }) { g in
                                     LineChart(xs: r.minutes, ys: r.strokeEnergy, color: .teal, geo: g,
                                               hLine: r.seThreshold, hColor: .brown, bands: r.bands, fill: true)
                                 }
@@ -311,6 +323,10 @@ private struct ResultHeader: View {
 private struct Panel<Content: View>: View {
     let title: String
     let unit: String
+    var xs: [Double] = []
+    var startEpochMs: Int64? = nil
+    var yTop: String? = nil
+    var yBottom: String? = nil
     @ViewBuilder let content: (GeometryProxy) -> Content
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -319,12 +335,32 @@ private struct Panel<Content: View>: View {
                 Spacer()
                 Text(unit).font(.caption2).foregroundStyle(.secondary)
             }
-            GeometryReader { g in
-                ZStack { content(g) }
+            // 114 pt plot band + 16 pt hh:mm:ss ruler below it
+            VStack(spacing: 0) {
+                GeometryReader { g in
+                    ZStack { content(g) }
+                }
+                .frame(height: 114)
+                .overlay { TimeGrid(xs: xs, startEpochMs: startEpochMs, labels: false) }
+                .overlay(alignment: .topLeading) { scaleTag(yTop) }
+                .overlay(alignment: .bottomLeading) { scaleTag(yBottom) }
+                TimeGrid(xs: xs, startEpochMs: startEpochMs, labels: true)
+                    .frame(height: 16)
             }
-            .frame(height: 130)
             .background(Color(.secondarySystemBackground))
             .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    /// y-scale readout, pinned to the viewport's left edge while the zoomed
+    /// content pans under it (the panel itself is the full zoomed width).
+    @ViewBuilder private func scaleTag(_ s: String?) -> some View {
+        if let s {
+            Text(s).font(.system(size: 9)).foregroundStyle(.secondary)
+                .padding(.horizontal, 4).padding(.vertical, 2)
+                .visualEffect { c, p in
+                    c.offset(x: max(0, 12 - p.frame(in: .scrollView).minX))
+                }
         }
     }
 }
@@ -342,18 +378,18 @@ private struct LineChart: View {
     var bands: [(Double, Double, ImuMode)] = []
     var fill: Bool = false
     var symmetric: Bool = false
+    /// Extra series folded into the y-range only (shares the axis with `ys`),
+    /// so stacked charts in one panel scale identically — like Android's
+    /// `second` series.
+    var scaleWith: [Double]? = nil
 
     var body: some View {
         Canvas { ctx, size in
             guard xs.count > 1 else { return }
             let xmin = xs.first!, xmax = xs.last!
             let xr = max(xmax - xmin, 1e-6)
-            let finite = ys.filter { $0.isFinite }
-            guard !finite.isEmpty else { return }
-            var ymin = finite.min()!, ymax = finite.max()!
-            if symmetric { let m = max(abs(ymin), abs(ymax), 1); ymin = -m; ymax = m }
-            if let h = hLine { ymin = min(ymin, h); ymax = max(ymax, h) }
-            if fill { ymin = min(ymin, 0) }
+            guard let (ymin, ymax) = chartScale(ys, scaleWith, hLine: hLine,
+                                               symmetric: symmetric, fill: fill) else { return }
             let yr = max(ymax - ymin, 1e-6)
             func px(_ x: Double) -> CGFloat { CGFloat((x - xmin) / xr) * size.width }
             func py(_ y: Double) -> CGFloat { size.height - CGFloat((y - ymin) / yr) * size.height }
@@ -412,6 +448,9 @@ private struct ModeStripView: View {
             }
             .frame(height: 34)
             .clipShape(RoundedRectangle(cornerRadius: 6))
+            // time ruler under the strip
+            TimeGrid(xs: r.minutes, startEpochMs: r.startEpochMs, labels: true)
+                .frame(height: 16)
         }
     }
 }
@@ -427,6 +466,85 @@ private struct LegendRow: View {
                 }
             }
             Spacer()
+        }
+    }
+}
+
+// MARK: - Axes
+
+/// x-axis base in LOCAL-time seconds so tick marks land on round wall-clock
+/// values (12:15:00, not 12:14:37); 0 when the recording has no epoch anchor,
+/// which degrades the labels to elapsed hh:mm:ss.
+private func axisBaseSec(_ startEpochMs: Int64?) -> Double {
+    guard let e = startEpochMs else { return 0 }
+    let date = Date(timeIntervalSince1970: Double(e) / 1000.0)
+    return (Double(e) + Double(TimeZone.current.secondsFromGMT(for: date)) * 1000.0) / 1000.0
+}
+
+private func hms(_ absSec: Double) -> String {
+    let t = Int(absSec.rounded()) % 86400
+    let s = t < 0 ? t + 86400 : t
+    return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+}
+
+private func fmtVal(_ v: Double) -> String {
+    let a = abs(v)
+    if a >= 100 { return String(format: "%.0f", v) }
+    if a >= 10 { return String(format: "%.1f", v) }
+    return String(format: "%.2f", v)
+}
+
+/// The y range a `LineChart` will draw with — single source of truth shared by
+/// the chart itself and the panel's y-scale readout so they can never disagree.
+private func chartScale(_ ys: [Double], _ ys2: [Double]? = nil,
+                        hLine: Double? = nil, symmetric: Bool = false,
+                        fill: Bool = false) -> (min: Double, max: Double)? {
+    var finite = ys.filter { $0.isFinite }
+    if let ys2 { finite += ys2.filter { $0.isFinite } }
+    guard !finite.isEmpty else { return nil }
+    var ymin = finite.min()!, ymax = finite.max()!
+    if symmetric { let m = max(abs(ymin), abs(ymax), 1); ymin = -m; ymax = m }
+    if let h = hLine { ymin = min(ymin, h); ymax = max(ymax, h) }
+    if fill { ymin = min(ymin, 0) }
+    return (ymin, ymax)
+}
+
+/// Vertical time gridlines (labels == false) or the hh:mm:ss ruler strip
+/// (labels == true). Drawn at the panels' full zoomed width, so ticks pan and
+/// densify with the pinch zoom automatically.
+private struct TimeGrid: View {
+    let xs: [Double]
+    let startEpochMs: Int64?
+    let labels: Bool
+
+    var body: some View {
+        Canvas { ctx, size in
+            guard xs.count > 1 else { return }
+            let xmin = xs.first!, xmax = xs.last!
+            let spanSec = max((xmax - xmin) * 60, 1e-6)
+            var step = 7200.0
+            for s in [1.0, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600]
+            where size.width * CGFloat(s / spanSec) >= 72 { step = s; break }
+            let base = axisBaseSec(startEpochMs) + xmin * 60
+            var tick = (base / step).rounded(.up) * step
+            var lastEnd = -CGFloat.greatestFiniteMagnitude
+            while tick <= base + spanSec + 1e-9 {
+                let x = CGFloat((tick - base) / spanSec) * size.width
+                if labels {
+                    let t = ctx.resolve(Text(hms(tick)).font(.system(size: 9)).foregroundStyle(.secondary))
+                    let w = t.measure(in: size).width
+                    let lx = min(max(x - w / 2, 0), max(0, size.width - w))
+                    if lx > lastEnd + 4 {
+                        ctx.draw(t, at: CGPoint(x: lx + w / 2, y: size.height / 2))
+                        lastEnd = lx + w
+                    }
+                } else {
+                    var p = Path()
+                    p.move(to: CGPoint(x: x, y: 0)); p.addLine(to: CGPoint(x: x, y: size.height))
+                    ctx.stroke(p, with: .color(.secondary.opacity(0.18)), lineWidth: 1)
+                }
+                tick += step
+            }
         }
     }
 }
