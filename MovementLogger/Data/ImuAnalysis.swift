@@ -17,9 +17,9 @@ import Foundation
 ///  3. Otsu thresholds → classify: GLIDE if speed ≥ 12 km/h; else PADDLE if
 ///     energetic AND rhythmic; else WAIT. Median-filter + short-run absorb.
 ///  4. Board pitch/roll from the (pseudo-tared) gravity vector.
-enum ImuMode: Int, Sendable { case glide = 0, paddle = 1, wait = 2 }
+enum ImuMode: Int, Sendable, Codable { case glide = 0, paddle = 1, wait = 2 }
 
-struct ImuAnalysisResult: Sendable {
+struct ImuAnalysisResult: Sendable, Codable {
     let minutes: [Double]        // per-second time grid, in minutes
     let speedKmh: [Double]
     let strokeEnergy: [Double]   // stroke-band RMS-like energy

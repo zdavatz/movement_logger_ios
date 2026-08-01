@@ -231,10 +231,15 @@ private struct ImuAnalysisDetail: View {
         let rec = recording
         do {
             let r = try await Task.detached(priority: .userInitiated) { () throws -> ImuAnalysisResult in
+                // Cached result (keyed by source size+mtime) loads instantly and
+                // survives app restarts; a miss runs the full pipeline once.
+                if let cached = ImuAnalysisCache.load(imuURL: rec.imuURL, gpsURL: rec.gpsURL) { return cached }
                 guard let gps = rec.gpsURL else { throw ImuAnalysisError.badFile("No paired GPS file found for \(rec.title).") }
-                return rec.isWatch
+                let fresh = rec.isWatch
                     ? try ImuAnalysis.fromWatch(imuURL: rec.imuURL, gpsURL: gps)
                     : try ImuAnalysis.fromPhoneLogger(sensURL: rec.imuURL, gpsURL: gps)
+                ImuAnalysisCache.store(fresh, imuURL: rec.imuURL, gpsURL: rec.gpsURL)
+                return fresh
             }.value
             result = r
         } catch {
