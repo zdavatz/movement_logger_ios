@@ -814,6 +814,31 @@ numerically identical — validated byte-for-byte against the same file).
   `List<SensorRow>` OOMs Android's ~268 MB heap — the Kotlin port streams a
   two-pass `DoubleArray` parse + in-place userAccel + sliding-sum moving average
   instead. iOS has no such limit but uses the same streaming shape.
+- **Result cache (`Data/ImuAnalysisCache.swift`, format v2).** One binary
+  plist per recording under `Application Support/analysis-cache/`, keyed by
+  the source files' (size, mtime) so a regrown file re-analyzes; any decode
+  problem = cache miss; pruned to the 32 newest. Makes re-opening instant and
+  survives app restarts. Android peer: `ImuAnalysisCache.kt` (hand-rolled
+  `DataStream` binary, same key scheme, same version — bump BOTH when
+  `ImuAnalysisResult` changes).
+- **Wall-clock x axis.** `fromPhoneLogger` projects the CSV's `# SYNC
+  epoch_ms` anchor onto the first sample (`fromWatch` uses the rows' epoch
+  column directly) → `ImuAnalysisResult.startEpochMs`; the `TimeGrid` canvas
+  draws hh:mm:ss gridline ticks on round LOCAL wall-clock values
+  (`axisBaseSec` folds in the timezone offset), elapsed-time fallback when
+  the anchor is missing. Tick step auto-picks from the zoomed pixel width.
+- **y-scale readouts.** `chartScale` is the single source of truth for a
+  chart's y range AND the panel's top/bottom value tags — the pitch and roll
+  charts pass each other via `scaleWith` so the stacked pair shares one axis
+  (Android folds `second` into one panel instead). The tags stay pinned to
+  the viewport's left edge while the zoomed content pans via
+  `.visualEffect { $0.offset(x: max(0, 12 - $1.frame(in: .scrollView).minX)) }`.
+- **Palette rule.** Pitch = `ImuPalette.pitch` (violet), roll = `.roll`
+  (magenta) — deliberately NOT the glide-blue / paddle-orange of the activity
+  bands; sharing those hues made the legends read as "double orange / double
+  blue" (Zeno, 1.8.2026). No hue may mean two things on this screen. The
+  board-angle panel header carries its own Pitch/Roll legend chips
+  (`seriesLegend`).
 
 ### GPS Debug tab — u-blox UBX survey over BLE
 
