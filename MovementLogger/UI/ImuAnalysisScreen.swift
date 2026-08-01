@@ -196,11 +196,12 @@ private struct ImuAnalysisDetail: View {
                                 Panel(title: "Board angle (mount-relative)", unit: "deg",
                                       xs: r.minutes, startEpochMs: r.startEpochMs,
                                       yTop: asc.map { "\(fmtVal($0.max)) deg" },
-                                      yBottom: asc.map { "\(fmtVal($0.min)) deg" }) { g in
+                                      yBottom: asc.map { "\(fmtVal($0.min)) deg" },
+                                      seriesLegend: [("Pitch", ImuPalette.pitch), ("Roll", ImuPalette.roll)]) { g in
                                     ZStack {
-                                        LineChart(xs: r.minutes, ys: r.pitchDeg, color: .blue, geo: g, bands: r.bands,
+                                        LineChart(xs: r.minutes, ys: r.pitchDeg, color: ImuPalette.pitch, geo: g, bands: r.bands,
                                                   symmetric: true, scaleWith: r.rollDeg)
-                                        LineChart(xs: r.minutes, ys: r.rollDeg, color: .orange, geo: g,
+                                        LineChart(xs: r.minutes, ys: r.rollDeg, color: ImuPalette.roll, geo: g,
                                                   symmetric: true, scaleWith: r.pitchDeg)
                                     }
                                 }
@@ -224,7 +225,7 @@ private struct ImuAnalysisDetail: View {
                         )
 
                         VStack(alignment: .leading, spacing: 4) {
-                            LegendRow(items: [("Pitch (up/down)", .blue), ("Roll (lean L/R)", .orange)])
+                            LegendRow(items: [("Pitch (up/down)", ImuPalette.pitch), ("Roll (lean L/R)", ImuPalette.roll)])
                             LegendRow(items: [("Glide (on foil)", ImuPalette.glide),
                                               ("Paddle / pump", ImuPalette.paddle),
                                               ("Wait / drift", ImuPalette.wait)])
@@ -285,6 +286,10 @@ enum ImuPalette {
     static let glide = Color(red: 0.15, green: 0.39, blue: 0.92)
     static let paddle = Color(red: 0.92, green: 0.45, blue: 0.09)
     static let wait = Color(red: 0.58, green: 0.64, blue: 0.69)
+    // Deliberately NOT the glide-blue / paddle-orange of the activity bands —
+    // pitch/roll shared those hues once and the legend read as "double orange".
+    static let pitch = Color(red: 0.49, green: 0.23, blue: 0.93)   // violet 0x7C3AED
+    static let roll = Color(red: 0.86, green: 0.15, blue: 0.47)    // magenta 0xDB2777
     static func color(_ m: ImuMode) -> Color { m == .glide ? glide : (m == .paddle ? paddle : wait) }
 }
 
@@ -327,12 +332,22 @@ private struct Panel<Content: View>: View {
     var startEpochMs: Int64? = nil
     var yTop: String? = nil
     var yBottom: String? = nil
+    var seriesLegend: [(String, Color)] = []
     @ViewBuilder let content: (GeometryProxy) -> Content
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 8) {
                 Text(title).font(.caption.weight(.semibold))
                 Spacer()
+                // which line is which, right where the question arises — the
+                // bottom legend row is far away and the line hues double as
+                // the activity-band hues
+                ForEach(seriesLegend, id: \.0) { (label, color) in
+                    HStack(spacing: 3) {
+                        RoundedRectangle(cornerRadius: 2).fill(color).frame(width: 12, height: 4)
+                        Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+                    }
+                }
                 Text(unit).font(.caption2).foregroundStyle(.secondary)
             }
             // 114 pt plot band + 16 pt hh:mm:ss ruler below it
