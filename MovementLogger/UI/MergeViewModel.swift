@@ -48,6 +48,14 @@ final class MergeViewModel {
     var gpsFile: URL? = nil
     var sensorRowCount: Int = 0
     var gpsRowCount: Int = 0
+    /// Optional background-music track for the merged film (a local audio
+    /// file — imported from the Files app or already in Documents). Mixed
+    /// under the clips' own audio; nothing is ever downloaded (5.2.3).
+    var musicFile: URL? = nil
+    /// Background-music level, 0…1 (below the footage audio by default).
+    var musicVolume: Double = 0.35
+    /// Drop the clips' original sound so the music carries the film alone.
+    var muteClipAudio: Bool = false
     var parsingCsv: Bool = false
     var computing: Bool = false
     var error: String? = nil
@@ -280,6 +288,89 @@ final class MergeViewModel {
         error = nil
     }
 
+    // -------------------------------------------------------------------------
+    //  Background music (optional)
+    // -------------------------------------------------------------------------
+
+    /// Audio-file extensions we surface as background-music candidates.
+    private static let audioExts: Set<String> = [
+        "mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "flac", "alac", "m4r",
+    ]
+
+    /// Canonical on-device home for background-music tracks: `Documents/Music/`
+    /// (created on demand). Push audio here (`devicectl device copy to …
+    /// Documents/Music/`) and it shows in the picker; the same folder receives
+    /// files imported through the Files picker. Mirrors Android's `files/Music/`.
+    @discardableResult
+    func musicDir() -> URL? {
+        guard let docs = FileManager.default.urls(
+            for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        let dir = docs.appendingPathComponent("Music", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(
+                at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    /// Audio files in `Documents/Music/` plus any loose in `Documents/`
+    /// (legacy / dropped straight in), newest-first, de-duplicated by name.
+    func listLocalAudio() -> [URL] {
+        var urls: [URL] = []
+        if let dir = musicDir() {
+            urls += (try? FileManager.default.contentsOfDirectory(
+                at: dir, includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles])) ?? []
+        }
+        urls += listLocalRecordings()   // Documents root (legacy)
+        var seen = Set<String>()
+        return urls
+            .filter { Self.audioExts.contains($0.pathExtension.lowercased()) }
+            .filter { seen.insert($0.lastPathComponent).inserted }
+            .sorted { a, b in
+                let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate) ?? .distantPast
+                let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey])
+                    .contentModificationDate) ?? .distantPast
+                return da > db
+            }
+    }
+
+    /// Import a music file picked from the Files app. The `.fileImporter`
+    /// URL is security-scoped and in-place, so copy it into `Documents/Music/`
+    /// (where the exporter can read it freely and it survives for re-merges)
+    /// while the scope is held. A file already in the Music folder is used
+    /// as-is; a loose Documents-root file is consolidated into Music on pick.
+    @MainActor
+    func pickMusic(_ src: URL) {
+        if let dir = musicDir(),
+           src.standardizedFileURL.path.hasPrefix(dir.standardizedFileURL.path) {
+            musicFile = src
+            return
+        }
+        let scoped = src.startAccessingSecurityScopedResource()
+        defer { if scoped { src.stopAccessingSecurityScopedResource() } }
+        guard let dir = musicDir() else {
+            error = "Music: no storage directory"
+            return
+        }
+        let dest = dir.appendingPathComponent(src.lastPathComponent)
+        do {
+            if FileManager.default.fileExists(atPath: dest.path) {
+                try FileManager.default.removeItem(at: dest)
+            }
+            try FileManager.default.copyItem(at: src, to: dest)
+            musicFile = dest
+        } catch {
+            self.error = "Music import: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    func clearMusic() {
+        musicFile = nil
+    }
+
     /// Full-session fusion (pitch / baro height / fused height), computed
     /// once; per-clip export inputs slice these by row index.
     @MainActor
@@ -373,7 +464,13 @@ final class MergeViewModel {
         UIApplication.shared.isIdleTimerDisabled = true
         defer { UIApplication.shared.isIdleTimerDisabled = false }
         do {
-            try await MergeExporter.export(clips: specs, panelKinds: kinds, to: outURL) { p in
+            try await MergeExporter.export(
+                clips: specs, panelKinds: kinds,
+                backgroundMusic: musicFile,
+                musicVolume: Float(musicVolume),
+                muteClipAudio: muteClipAudio,
+                to: outURL
+            ) { p in
                 Task { @MainActor [weak self] in self?.exportProgress = p }
             }
             lastExportedPath = outURL.path

@@ -44,6 +44,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         //    At cold launch no clip list exists yet, so every video in tmp
         //    is garbage by definition.
         MergeViewModel.sweepTmpVideos()
+        // 5b) Create the canonical Documents/Music/ folder up front so a
+        //     `devicectl device copy to … Documents/Music/` push has a target
+        //     the moment the app has launched once (mirrors Android files/Music).
+        MergeViewModel().musicDir()
         // 6) Headless merge-export diagnostic (MERGE_SELFTEST=1 launch env,
         //    same hook family as INITIAL_TAB) — no-op in normal launches.
         MergeSelfTest.runIfRequested()

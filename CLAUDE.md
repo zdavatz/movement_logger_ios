@@ -299,6 +299,27 @@ helpers, opacity-gated per segment).
   `Documents/` clips and prints the result to stdout — driven over
   `devicectl … process launch --console --environment-variables`. This is how
   the -11847 failure was bisected.
+- **Background music (v1.0.62).** An optional "Add background music" section
+  picks a LOCAL audio file — from the Files app (`.fileImporter` over
+  `[.audio]`, copied into `Documents/` while its security scope is held) or a
+  track already in `Documents/` (e.g. dropped in via `devicectl copy`). Nothing
+  is ever downloaded — the user supplies the file, so App Store Guideline 5.2.3
+  ("no saving/converting/downloading media from YouTube/SoundCloud/…") is not
+  in play (a bundled yt-dlp WOULD violate it and was deliberately kept off the
+  App Store build — the extract-on-Mac-then-drop-in workflow replaces it).
+  `MergeExporter.export` gained `backgroundMusic:URL?`, `musicVolume:Float`
+  (0…1, default 0.35), `muteClipAudio:Bool`. The picked track is added as a
+  SECOND `AVMutableCompositionTrack(.audio)`, **looped** from the top to fill
+  the whole film (last repeat clamped to `totalDur`) and mixed via an
+  `AVMutableAudioMix` — a 1 s fade-in + 1.5 s fade-out on films > 4 s, a flat
+  level otherwise. The clips' own audio track carries NO mix parameters so it
+  stays at unity gain UNDER which the music sits; `muteClipAudio` skips the
+  clip-audio insertion entirely (the lazily-created `compAudio` never
+  materialises → no zero-segment-track export break) so the music carries the
+  film alone over wind-noisy foil clips. The music `AVURLAsset` is retained in
+  its own `musicAssets` array (weak `AVAssetTrack.asset` trap) but its file is
+  the USER's — never deleted (unlike the generated `stillAssets`). A track that
+  won't decode is skipped silently — background music never fails the merge.
 
 ### Rides tab — watch GPS on a map (v1.0.23+)
 

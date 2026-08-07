@@ -36,6 +36,13 @@ import UIKit
 /// clip's slice of the session CSVs. With `panelKinds` empty the merge is
 /// plain video only.
 ///
+/// When `backgroundMusic` is supplied the picked audio track is added as a
+/// second audio track, looped to fill the whole film and faded in/out, mixed
+/// UNDER the clips' own audio at `musicVolume` (0…1). `muteClipAudio` drops
+/// the footage sound so the music carries the film alone — handy over
+/// wind-noisy foil clips. The music source is decoded from a local file the
+/// user picked; nothing is downloaded (App Store Guideline 5.2.3).
+///
 /// Same pipeline as the single-clip export: `AVMutableComposition` +
 /// `AVMutableVideoComposition` (one instruction per title gap / clip
 /// segment) + `AVVideoCompositionCoreAnimationTool`, exported through
@@ -94,6 +101,9 @@ enum MergeExporter {
     static func export(
         clips: [MergeClipSpec],
         panelKinds: [CompositeExporter.PanelKind],
+        backgroundMusic: URL? = nil,
+        musicVolume: Float = 0.35,
+        muteClipAudio: Bool = false,
         to outputURL: URL,
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
@@ -227,6 +237,11 @@ enum MergeExporter {
             withExtendedLifetime(stillAssets) {}
             for a in stillAssets { try? FileManager.default.removeItem(at: a.url) }
         }
+        // The background-music asset must likewise outlive the export
+        // (AVAssetTrack.asset is weak), but its file is the USER's — never
+        // delete it, only retain.
+        var musicAssets: [AVURLAsset] = []
+        defer { withExtendedLifetime(musicAssets) {} }
         /// Insert a generated still as real media at `at`, returning false
         /// when it couldn't be made (caller falls back to an empty edit).
         let videoRegion = CGSize(width: videoW, height: videoH)
@@ -253,6 +268,14 @@ enum MergeExporter {
         // rendered still it stays MEDIA (no CALayer, no animation tool). If
         // the frame can't be extracted, `makeIntroImage` falls back to the
         // lettering on solid black.
+        // Music credit shown on the intro card under the "MovementLogger"
+        // lettering — title — artist from the track's metadata, else its
+        // filename (the user names tracks by song title). Only when music
+        // actually plays.
+        var musicCredit: String? = nil
+        if let musicURL = backgroundMusic, musicVolume > 0 {
+            musicCredit = await musicCreditString(musicURL)
+        }
         var introHasMedia = false
         if introS > 0 {
             let introDur = CMTime(value: Int64(introS * 1000), timescale: 1000)
@@ -270,7 +293,7 @@ enum MergeExporter {
             }
             introHasMedia = await insertStill(
                 makeIntroImage(size: videoRegion, background: introBg,
-                               backgroundRect: introBgRect),
+                               backgroundRect: introBgRect, musicCredit: musicCredit),
                 at: .zero, duration: introDur, name: "merge_intro.mov")
             if !introHasMedia {
                 compVideo.insertEmptyTimeRange(
@@ -303,7 +326,9 @@ enum MergeExporter {
             // Audio passthrough at the clip's offset; title gaps stay silent.
             // Clamp to the audio track's own extent (it can trail the video
             // by a frame or two) and never let an audio hiccup kill the merge.
-            if !dbg.contains("noaudio"), let a = l.audioTrack {
+            // `muteClipAudio` drops the footage sound entirely (e.g. to let a
+            // background music track carry the film over noisy foil-wind clips).
+            if !dbg.contains("noaudio"), !muteClipAudio, let a = l.audioTrack {
                 if compAudio == nil {
                     compAudio = composition.addMutableTrack(
                         withMediaType: .audio,
@@ -401,6 +426,61 @@ enum MergeExporter {
 
         let totalDur = cursor
         let totalS = CMTimeGetSeconds(totalDur)
+
+        // ----- Background music (optional). A SECOND audio track carrying the
+        // user-picked track, looped to fill the whole film and faded in/out,
+        // mixed UNDER the clips' own audio via an AVMutableAudioMix (the clip
+        // audio track has no mix parameters, so it plays at unity gain while
+        // the music sits at `musicVolume`). A track that won't decode is
+        // skipped silently — background music never fails the merge.
+        var musicMix: AVMutableAudioMix? = nil
+        if let musicURL = backgroundMusic, !dbg.contains("noaudio"), totalS > 0.1 {
+            let musicAsset = AVURLAsset(url: musicURL)
+            musicAssets.append(musicAsset)   // retain: AVAssetTrack.asset is weak
+            if let mTrack = try? await musicAsset.loadTracks(withMediaType: .audio).first,
+               let mRange = try? await mTrack.load(.timeRange),
+               CMTimeGetSeconds(mRange.duration) > 0.05,
+               let bg = composition.addMutableTrack(
+                   withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+                // Loop from the top of the track until the film is covered;
+                // the final repeat is clamped to end exactly at totalDur.
+                var at = CMTime.zero
+                while CMTimeCompare(at, totalDur) < 0 {
+                    let remaining = CMTimeSubtract(totalDur, at)
+                    let chunk = CMTimeMinimum(mRange.duration, remaining)
+                    if CMTimeGetSeconds(chunk) <= 0.001 { break }
+                    do {
+                        try bg.insertTimeRange(
+                            CMTimeRange(start: mRange.start, duration: chunk),
+                            of: mTrack, at: at)
+                    } catch { break }
+                    at = CMTimeAdd(at, chunk)
+                }
+                // Volume + fade. Long films get a 1 s fade-in and a 1.5 s
+                // fade-out so the loop never starts or cuts abruptly; a very
+                // short film just holds a flat level.
+                let vol = max(0, min(musicVolume, 1))
+                let params = AVMutableAudioMixInputParameters(track: bg)
+                if totalS > 4.0 {
+                    let fadeIn = 1.0, fadeOut = 1.5
+                    let inT = CMTime(seconds: fadeIn, preferredTimescale: 600)
+                    params.setVolumeRamp(
+                        fromStartVolume: 0, toEndVolume: vol,
+                        timeRange: CMTimeRange(start: .zero, duration: inT))
+                    params.setVolume(vol, at: inT)
+                    params.setVolumeRamp(
+                        fromStartVolume: vol, toEndVolume: 0,
+                        timeRange: CMTimeRange(
+                            start: CMTime(seconds: totalS - fadeOut, preferredTimescale: 600),
+                            duration: CMTime(seconds: fadeOut, preferredTimescale: 600)))
+                } else {
+                    params.setVolume(vol, at: .zero)
+                }
+                let mix = AVMutableAudioMix()
+                mix.inputParameters = [params]
+                musicMix = mix
+            }
+        }
 
         progress(0.01)
 
@@ -651,6 +731,8 @@ enum MergeExporter {
         if let earliest = clips.map({ $0.startEpochMs }).filter({ $0 > 0 }).min() {
             session.metadata = CompositeExporter.creationDateMetadata(epochMs: earliest)
         }
+        // Background-music level + fades ride here (nil when no track picked).
+        if let musicMix { session.audioMix = musicMix }
 
         progress(0.03)
         let poller = CompositeExporter.ProgressPoller(session: session) { p in
@@ -1014,8 +1096,37 @@ enum MergeExporter {
     /// shows through while the title stays legible over arbitrary footage —
     /// the "title over the first image" opener. With no background it renders
     /// the lettering fully opaque on solid black (the legacy intro card).
+    /// Title — artist for the intro credit: the track's embedded metadata,
+    /// falling back to its filename (the user names tracks by song title).
+    private static func musicCreditString(_ url: URL) async -> String? {
+        let asset = AVURLAsset(url: url)
+        var title: String? = nil
+        var artist: String? = nil
+        if let md = try? await asset.load(.commonMetadata) {
+            for item in md {
+                guard let key = item.commonKey else { continue }
+                if key == .commonKeyTitle, let v = try? await item.load(.stringValue) {
+                    title = v
+                } else if key == .commonKeyArtist,
+                          let v = try? await item.load(.stringValue) {
+                    artist = v
+                }
+            }
+        }
+        let t = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let a = artist?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base: String
+        if let t, !t.isEmpty {
+            base = (a?.isEmpty == false) ? "\(t) — \(a!)" : t
+        } else {
+            base = url.deletingPathExtension().lastPathComponent
+        }
+        return base.isEmpty ? nil : "♫ \(base)"
+    }
+
     private static func makeIntroImage(
-        size canvasSize: CGSize, background: CGImage?, backgroundRect: CGRect
+        size canvasSize: CGSize, background: CGImage?, backgroundRect: CGRect,
+        musicCredit: String? = nil
     ) -> CGImage? {
         let text = "MovementLogger"
         // Over footage the lettering is translucent so the frame reads
@@ -1057,12 +1168,42 @@ enum MergeExporter {
                 range: NSRange(location: i, length: 1))
         }
         let textSize = attr.size()
+        // Optional music credit ("♫ Title — Artist"), drawn as a smaller
+        // translucent line under the title.
+        let creditAttr: NSAttributedString? = musicCredit.map { credit in
+            let cShadow = NSShadow()
+            cShadow.shadowColor = UIColor.black.withAlphaComponent(0.7)
+            cShadow.shadowBlurRadius = fontSize * 0.05
+            cShadow.shadowOffset = .zero
+            let cFont = UIFont.systemFont(ofSize: fontSize * 0.30, weight: .semibold)
+            // Fit within ~90% of the width by shrinking if needed.
+            var size = fontSize * 0.30
+            var font = cFont
+            var w = (credit as NSString).size(withAttributes: [.font: font]).width
+            let maxW = canvasSize.width * 0.90
+            while w > maxW, size > 8 {
+                size -= 2
+                font = UIFont.systemFont(ofSize: size, weight: .semibold)
+                w = (credit as NSString).size(withAttributes: [.font: font]).width
+            }
+            return NSAttributedString(string: credit, attributes: [
+                .font: font,
+                .foregroundColor: UIColor.white.withAlphaComponent(0.9),
+                .shadow: cShadow,
+            ])
+        }
+        let creditSize = creditAttr?.size() ?? .zero
         return cardImage(size: canvasSize) { _ in
             if let background {
                 UIImage(cgImage: background).draw(in: backgroundRect)
             }
-            attr.draw(at: CGPoint(x: (canvasSize.width - textSize.width) / 2,
-                                  y: (canvasSize.height - textSize.height) / 2))
+            let titleTop = (canvasSize.height - textSize.height) / 2
+            attr.draw(at: CGPoint(x: (canvasSize.width - textSize.width) / 2, y: titleTop))
+            if let creditAttr {
+                creditAttr.draw(at: CGPoint(
+                    x: (canvasSize.width - creditSize.width) / 2,
+                    y: titleTop + textSize.height + canvasSize.height * 0.02))
+            }
         }
     }
 

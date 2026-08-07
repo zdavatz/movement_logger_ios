@@ -1,6 +1,7 @@
 import SwiftUI
 import AVKit
 import PhotosUI
+import UniformTypeIdentifiers
 
 /// Merge screen — pick MULTIPLE videos, optionally a Sens*/Gps* CSV pair
 /// from the Sync tab, and export one film: per clip a 2.5 s black title
@@ -57,6 +58,10 @@ struct MergeScreen: View {
                     if vm.computing {
                         InlineSpinner(label: "running fusion + baro + nose-angle…")
                     }
+
+                    Divider()
+
+                    BackgroundMusicSection(vm: vm)
 
                     if let err = vm.error {
                         ErrorBanner(message: err, onDismiss: vm.clearError)
@@ -317,6 +322,168 @@ private struct SensorDataSection: View {
     }
 }
 
+// MARK: - Background music (optional)
+
+/// Pick a local audio file as the merged film's soundtrack. Two sources —
+/// the Files app (`.fileImporter`, copied into Documents) or a track already
+/// in Documents (e.g. one dropped in via `devicectl copy`). Nothing is ever
+/// downloaded; the user supplies the file (App Store Guideline 5.2.3).
+private struct BackgroundMusicSection: View {
+    @Bindable var vm: MergeViewModel
+    @State private var includeMusic = false
+    @State private var audioFiles: [URL] = []
+    @State private var showingImporter = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $includeMusic) {
+                Text("Add background music")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .disabled(vm.exporting)
+            .onChange(of: includeMusic) { _, on in
+                if on {
+                    audioFiles = vm.listLocalAudio()
+                } else if vm.musicFile != nil {
+                    vm.clearMusic()
+                }
+            }
+
+            if includeMusic {
+                Text("Pick an audio file you already have. It plays under the "
+                    + "clips (looped to the film length, faded in/out). Extract "
+                    + "tracks on your computer and drop them in via the Files app.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    Button {
+                        showingImporter = true
+                    } label: {
+                        Label("Choose from Files", systemImage: "music.note.list")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(vm.exporting)
+
+                    Button {
+                        audioFiles = vm.listLocalAudio()
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                // Selected track + clear.
+                HStack(spacing: 8) {
+                    Image(systemName: vm.musicFile != nil
+                          ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(vm.musicFile != nil ? Color.green : Color.secondary)
+                    Text(vm.musicFile?.lastPathComponent ?? "no track selected")
+                        .font(.footnote)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .foregroundStyle(vm.musicFile != nil ? Color.primary : Color.secondary)
+                    Spacer()
+                    if vm.musicFile != nil {
+                        Button("Clear") { vm.clearMusic() }
+                            .buttonStyle(.bordered)
+                            .disabled(vm.exporting)
+                    }
+                }
+
+                if !audioFiles.isEmpty {
+                    Text("In this app's storage").font(.caption.weight(.semibold))
+                    VStack(spacing: 4) {
+                        ForEach(audioFiles, id: \.path) { f in
+                            let isSel = f == vm.musicFile
+                            HStack {
+                                Text(f.lastPathComponent)
+                                    .font(.footnote)
+                                    .fontWeight(isSel ? .bold : .regular)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Button(isSel ? "Selected" : "Use") { vm.pickMusic(f) }
+                                    .buttonStyle(.bordered)
+                                    .disabled(isSel || vm.exporting)
+                            }
+                            .padding(8)
+                            .background(
+                                isSel ? Color.accentColor.opacity(0.15)
+                                      : Color(.secondarySystemBackground),
+                                in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+
+                // Music level + mute-original toggle.
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Music volume")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Text("\(Int((vm.musicVolume * 100).rounded()))%")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $vm.musicVolume, in: 0...1)
+                        .disabled(vm.exporting)
+                }
+                .padding(.top, 2)
+
+                Toggle(isOn: $vm.muteClipAudio) {
+                    Text("Mute original video sound")
+                        .font(.footnote)
+                }
+                .disabled(vm.exporting)
+            }
+        }
+        .sheet(isPresented: $showingImporter) {
+            // A UIDocumentPickerViewController (not SwiftUI's .fileImporter,
+            // which can't set an initial directory) opened AT the app's Music
+            // folder, so "Choose from Files" lands where pushed/imported tracks
+            // already live.
+            AudioDocumentPicker(initialDir: vm.musicDir()) { url in
+                vm.pickMusic(url)
+                audioFiles = vm.listLocalAudio()
+            }
+            .ignoresSafeArea()
+        }
+    }
+}
+
+/// `UIDocumentPickerViewController` wrapper for picking one audio file,
+/// opened at `initialDir` (the app's Music folder) so the Files browser
+/// defaults there instead of wherever it was last.
+private struct AudioDocumentPicker: UIViewControllerRepresentable {
+    let initialDir: URL?
+    let onPick: (URL) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.audio], asCopy: false)
+        picker.allowsMultipleSelection = false
+        if let dir = initialDir { picker.directoryURL = dir }
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+        func documentPicker(
+            _ controller: UIDocumentPickerViewController,
+            didPickDocumentsAt urls: [URL]
+        ) {
+            if let u = urls.first { onPick(u) }
+        }
+    }
+}
+
 private struct CsvChip: View {
     let label: String
     let detail: String?
@@ -404,6 +571,14 @@ private struct MergeRow: View {
                      : "Merging plain videos (no session data loaded).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let music = vm.musicFile {
+                    Text("♫ \(music.lastPathComponent) at \(Int((vm.musicVolume * 100).rounded()))%"
+                        + (vm.muteClipAudio ? " · original sound muted" : ""))
+                        .font(.caption)
+                        .foregroundStyle(.tint)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
             }
             if let path = vm.lastExportedPath {
                 Text("saved → \(path)")
