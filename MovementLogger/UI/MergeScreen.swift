@@ -18,13 +18,16 @@ struct MergeScreen: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Pick several clips — they are sorted by recording time, shown complete (never cut), each introduced by a date/time title card and closed with a fade to black.")
+                    Text("Pick several clips — they are sorted by recording time, shown complete (never cut), each introduced by a date/time title card and closed with a fade to black. Add as many as you like: the estimated output size is shown below, so you can keep adding while it stays under WhatsApp's 2 GB send limit.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
+                    // No fixed selection cap — the estimated output size (below)
+                    // is the real limit, so the user can add more than the old
+                    // 50 as long as the film stays under WhatsApp's 2 GB ceiling.
                     PhotosPicker(
                         selection: $pickerItems,
-                        maxSelectionCount: 50,
+                        maxSelectionCount: nil,
                         matching: .videos,
                         photoLibrary: .shared()
                     ) {
@@ -549,6 +552,28 @@ private struct MergeRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if !vm.clips.isEmpty, let est = vm.estimatedExportBytes {
+                if vm.exceedsShareLimit {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text("Estimated \(formatBytes(est)) — larger than WhatsApp's 2 GB "
+                            + "send limit. Remove or shorten clips to share it on WhatsApp. "
+                            + "(The film still exports and saves to Photos.)")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.12),
+                                in: RoundedRectangle(cornerRadius: 8))
+                } else {
+                    Label("Estimated size ~\(formatBytes(est)) — under WhatsApp's 2 GB limit",
+                          systemImage: "checkmark.seal")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Button {
                     Task { await vm.mergeAndExport() }
@@ -688,6 +713,13 @@ private func formatClipStart(_ epochMs: Int64) -> String {
 private func formatClipDuration(_ ms: Int64) -> String {
     let totalS = Int(max(ms, 0) / 1000)
     return String(format: "%d:%02d", totalS / 60, totalS % 60)
+}
+
+private func formatBytes(_ n: Int64) -> String {
+    let gb = Double(n) / 1_073_741_824.0
+    if gb >= 1.0 { return String(format: "%.1f GB", gb) }
+    let mb = Double(n) / 1_048_576.0
+    return String(format: "%.0f MB", mb)
 }
 
 private func isSensCsvName(_ name: String) -> Bool {

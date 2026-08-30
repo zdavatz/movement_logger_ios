@@ -63,6 +63,13 @@ final class MergeViewModel {
     var exportProgress: Double = 0
     var lastExportedPath: String? = nil
     var savedToPhotos: Bool = false
+    /// Estimated size of the merged film (bytes), refreshed whenever the clip
+    /// set or the sensor-panel selection changes — from AVFoundation's own
+    /// output-length estimator, so the user is warned BEFORE spending minutes
+    /// of CPU on the export. nil = not yet known.
+    var estimatedExportBytes: Int64? = nil
+    /// True when the estimate is at/over WhatsApp's 2 GB share ceiling.
+    var exceedsShareLimit: Bool = false
 
     // ----- Full-session backing (NOT observed) --------------------------------
 
@@ -137,6 +144,7 @@ final class MergeViewModel {
         clips.sort { $0.startMs < $1.startMs }
         skippedClips.sort { $0.startMs < $1.startMs }
         loadingClips = false
+        refreshSizeEstimate()
     }
 
     private static func clipKey(_ startMs: Int64, _ durationMs: Int64) -> String {
@@ -153,6 +161,7 @@ final class MergeViewModel {
     func removeClip(_ clip: Clip) {
         clips.removeAll { $0.id == clip.id }
         Self.deleteTempCopy(clip.url)
+        refreshSizeEstimate()
     }
 
     @MainActor
@@ -160,6 +169,7 @@ final class MergeViewModel {
         for c in clips + skippedClips { Self.deleteTempCopy(c.url) }
         clips = []
         skippedClips = []
+        refreshSizeEstimate()
     }
 
     /// PhotosPicker imports live in the app's tmp dir (`VideoFile`
@@ -282,6 +292,7 @@ final class MergeViewModel {
         fullPitchDeg = []
         fullBaroHeightM = []
         fullFusedHeightM = []
+        refreshSizeEstimate()
     }
 
     func clearError() {
@@ -379,6 +390,7 @@ final class MergeViewModel {
             fullPitchDeg = []
             fullBaroHeightM = []
             fullFusedHeightM = []
+            refreshSizeEstimate()
             return
         }
         computing = true
@@ -405,6 +417,103 @@ final class MergeViewModel {
         fullBaroHeightM = result.baroH
         fullFusedHeightM = result.fusedH
         computing = false
+        refreshSizeEstimate()
+    }
+
+    // -------------------------------------------------------------------------
+    //  Output-size estimate (WhatsApp 2 GB guard)
+    // -------------------------------------------------------------------------
+
+    /// WhatsApp refuses to send a video larger than 2 GB. We estimate the
+    /// merged size the moment the clip set changes and flag a film that would
+    /// land over the limit BEFORE the export burns minutes of CPU.
+    static let shareSizeLimitBytes: Int64 = 2 * 1024 * 1024 * 1024   // 2 GiB
+
+    @ObservationIgnored private var estimateTask: Task<Void, Never>? = nil
+
+    /// Recompute `estimatedExportBytes` / `exceedsShareLimit` from the current
+    /// clip list + panel availability. Cheap: builds a clips-only composition
+    /// (no stills, no image work) and asks AVFoundation to estimate the H.264
+    /// output length, then scales for the intro/title/freeze/outro seconds and
+    /// the sensor-panel stack height.
+    @MainActor
+    func refreshSizeEstimate() {
+        estimateTask?.cancel()
+        let specs = clips
+        guard !specs.isEmpty else {
+            estimatedExportBytes = nil
+            exceedsShareLimit = false
+            return
+        }
+        // Timeline scale: the film adds a 3 s intro, a 2.5 s title + 3 s
+        // freeze per clip, and a 5 s outro on top of the clip seconds
+        // (mirrors `mergeSummary` / the exporter). The extras are low-motion,
+        // so charging them at the average clip bitrate slightly over-estimates
+        // — the safe direction for a "will it exceed 2 GB" warning.
+        let clipMs = specs.reduce(Int64(0)) { $0 + max($1.meta.durationMillis, 0) }
+        let filmMs = clipMs + Int64(specs.count) * (2500 + 3000) + 3000 + 5000
+        let filmFactor = clipMs > 0 ? Double(filmMs) / Double(clipMs) : 1.0
+        // Panel-stack scale: the render frame grows by the panel band height.
+        let panelCount = panelKindCount()
+        var panelFactor = 1.0
+        if panelCount > 0 {
+            let videoH = max(specs.map { $0.meta.displayedSize.height }.max() ?? 1920, 1)
+            let stackH = CompositeExporter.panelHeight * CGFloat(panelCount)
+            panelFactor = Double((videoH + stackH) / videoH)
+        }
+        estimateTask = Task { [weak self] in
+            let base = await Self.estimateClipsBytes(specs)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self, !Task.isCancelled else { return }
+                guard let base else {
+                    self.estimatedExportBytes = nil
+                    self.exceedsShareLimit = false
+                    return
+                }
+                let est = Int64(Double(base) * filmFactor * panelFactor)
+                self.estimatedExportBytes = est
+                self.exceedsShareLimit = est >= Self.shareSizeLimitBytes
+            }
+        }
+    }
+
+    /// The panel kinds that would render, from full-session availability
+    /// (same rule as `mergeAndExport`).
+    private func panelKindCount() -> Int {
+        var n = 0
+        if fullSmoothedSpeed.count >= 2 { n += 1 }
+        if fullPitchDeg.count >= 2 { n += 1 }
+        if fullFusedHeightM.count >= 2 { n += 1 }
+        if fullGpsRows.count >= 2 { n += 1 }
+        return n
+    }
+
+    /// Build a clips-only composition and ask AVFoundation to estimate the
+    /// highest-quality H.264 .mov output length. Returns nil if nothing loads.
+    private static func estimateClipsBytes(_ clips: [Clip]) async -> Int64? {
+        let comp = AVMutableComposition()
+        guard let vTrack = comp.addMutableTrack(
+            withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else { return nil }
+        var cursor = CMTime.zero
+        for clip in clips {
+            let asset = AVURLAsset(url: clip.url)
+            guard let src = try? await asset.loadTracks(withMediaType: .video).first,
+                  let dur = try? await asset.load(.duration),
+                  CMTimeGetSeconds(dur) > 0 else { continue }
+            try? vTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: dur), of: src, at: cursor)
+            cursor = CMTimeAdd(cursor, dur)
+        }
+        guard CMTimeGetSeconds(cursor) > 0,
+              let session = AVAssetExportSession(
+                  asset: comp, presetName: AVAssetExportPresetHighestQuality)
+        else { return nil }
+        session.outputFileType = .mov
+        // The estimator returns 0 unless a finite timeRange is set.
+        session.timeRange = CMTimeRange(start: .zero, duration: comp.duration)
+        return try? await session.estimatedOutputFileLengthInBytes
     }
 
     // -------------------------------------------------------------------------
@@ -457,12 +566,27 @@ final class MergeViewModel {
         lastExportedPath = nil
         savedToPhotos = false
         error = nil
-        // A 36-clip merge encodes for many minutes; if the screen auto-locks
-        // iOS revokes the hardware encoder and the export dies with
-        // AVError -11847 "Operation Interrupted". Keep the screen awake for
-        // the duration (restored below whatever the outcome).
+        // Keep the (multi-minute) export undisturbed, restored below whatever
+        // the outcome:
+        //  • Screen awake — auto-lock revokes the hardware encoder and the
+        //    export dies with AVError -11847 "Operation Interrupted".
+        //  • PORTRAIT-locked — a device rotation mid-export interrupts the
+        //    offline render and STOPS the merge (confirmed on device: the
+        //    progress halts the instant the phone is rotated). Pinning the
+        //    orientation means the screen simply doesn't rotate until the film
+        //    is done, then rotates freely again.
+        //  • A background-task assertion so switching to another app doesn't
+        //    immediately suspend the encode. iOS still caps the background
+        //    window, but within it the export keeps running, and beyond it the
+        //    session is paused and resumes on return rather than failing.
         UIApplication.shared.isIdleTimerDisabled = true
-        defer { UIApplication.shared.isIdleTimerDisabled = false }
+        AppDelegate.lockPortrait = true
+        let bgTask = UIApplication.shared.beginBackgroundTask(withName: "merge-export")
+        defer {
+            UIApplication.shared.isIdleTimerDisabled = false
+            AppDelegate.lockPortrait = false
+            if bgTask != .invalid { UIApplication.shared.endBackgroundTask(bgTask) }
+        }
         do {
             try await MergeExporter.export(
                 clips: specs, panelKinds: kinds,
@@ -641,8 +765,141 @@ final class Pct: @unchecked Sendable {
 enum MergeSelfTest {
 
     static func runIfRequested() {
+        // MERGE_SELFTEST_PHOTOS=<N>: merge the last N videos from the Photos
+        // library through the REAL MergeViewModel path (estimate + export),
+        // reproducing a user-scale merge on device. Takes precedence.
+        if let raw = ProcessInfo.processInfo.environment["MERGE_SELFTEST_PHOTOS"],
+           let count = Int(raw), count > 0 {
+            Task.detached(priority: .userInitiated) { await runPhotos(count: count) }
+            return
+        }
         guard ProcessInfo.processInfo.environment["MERGE_SELFTEST"] == "1" else { return }
         Task.detached(priority: .userInitiated) { await run() }
+    }
+
+    /// Merge the last `count` videos in the Photos library via the full
+    /// `MergeViewModel` path — so the size estimate, portrait lock, and the
+    /// actual export are all exercised exactly as a user tap would. Prints the
+    /// estimate up front (before the long encode) and the final result.
+    private static func runPhotos(count: Int) async {
+        // Reading the library needs NSPhotoLibraryUsageDescription; the app
+        // only ships the add-only string (it uses the out-of-process
+        // PhotosPicker, which needs no read permission). Requesting read access
+        // without that key makes iOS abort (SIGABRT) — so this dev harness only
+        // runs when the key has been added to Info.plist for a test build.
+        guard Bundle.main.object(
+            forInfoDictionaryKey: "NSPhotoLibraryUsageDescription") != nil else {
+            print("[selftest-photos] SKIPPED: add NSPhotoLibraryUsageDescription to "
+                + "Info.plist for this dev build to read the Photos library "
+                + "(the shipping app never requests read access).")
+            return
+        }
+        print("[selftest-photos] requesting Photos access")
+        let status = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+        guard status == .authorized || status == .limited else {
+            print("[selftest-photos] FAILED: Photos access denied (status \(status.rawValue)) "
+                + "— grant Photos access to MovementLogger and relaunch")
+            return
+        }
+        // Wait for foreground-active (VideoToolbox denies codec sessions to
+        // apps that aren't active yet — -12780).
+        var waitedMs = 0
+        while waitedMs < 20000 {
+            let s = await MainActor.run { UIApplication.shared.applicationState }
+            if s == .active { break }
+            try? await Task.sleep(for: .milliseconds(250))
+            waitedMs += 250
+        }
+        print("[selftest-photos] app active after \(waitedMs) ms")
+
+        // Fetch the newest `count` videos.
+        let opts = PHFetchOptions()
+        opts.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        opts.fetchLimit = count
+        let assets = PHAsset.fetchAssets(with: .video, options: opts)
+        print("[selftest-photos] fetched \(assets.count) videos (requested \(count))")
+        guard assets.count > 0 else { print("[selftest-photos] FAILED: no videos"); return }
+
+        // Materialize each into tmp (same as PhotosPicker's own import copy).
+        let tmp = FileManager.default.temporaryDirectory
+        var urls: [URL] = []
+        for i in 0..<assets.count {
+            let asset = assets.object(at: i)
+            let dst = tmp.appendingPathComponent("selftest_photo_\(i).mov")
+            if await materialize(asset, to: dst) { urls.append(dst) }
+        }
+        print("[selftest-photos] materialized \(urls.count)/\(assets.count) clips to tmp")
+        guard !urls.isEmpty else { print("[selftest-photos] FAILED: nothing materialized"); return }
+
+        // Drive the REAL view-model path.
+        let vm = await MainActor.run { MergeViewModel() }
+        await vm.addClips(urls)
+        // Let the (async) size estimate land.
+        try? await Task.sleep(for: .seconds(2))
+        let (nClips, nSkipped, est, over) = await MainActor.run {
+            (vm.clips.count, vm.skippedClips.count, vm.estimatedExportBytes, vm.exceedsShareLimit)
+        }
+        let estStr = est.map { String(format: "%.2f GB (%lld bytes)", Double($0) / 1_073_741_824.0, $0) } ?? "nil"
+        print("[selftest-photos] clips(portrait)=\(nClips) skipped(landscape)=\(nSkipped)")
+        print("[selftest-photos] estimated size = \(estStr) — over 2 GB? \(over)")
+
+        // The full merge is a many-minute encode that also writes the (possibly
+        // multi-GB) film to Photos, so it only runs with the explicit opt-in;
+        // otherwise the harness stops at the estimate.
+        guard ProcessInfo.processInfo.environment["MERGE_SELFTEST_PHOTOS_MERGE"] == "1" else {
+            for u in urls { try? FileManager.default.removeItem(at: u) }
+            print("[selftest-photos] estimate-only (set MERGE_SELFTEST_PHOTOS_MERGE=1 to also run the merge)")
+            print("[selftest-photos] done")
+            return
+        }
+
+        // Run the actual merge (this is the long part).
+        print("[selftest-photos] starting merge export…")
+        let t0 = Date()
+        await vm.mergeAndExport()
+        let (outPath, errMsg, saved) = await MainActor.run {
+            (vm.lastExportedPath, vm.error, vm.savedToPhotos)
+        }
+        if let outPath {
+            let bytes = ((try? FileManager.default.attributesOfItem(atPath: outPath)[.size]) as? Int64) ?? 0
+            print(String(format: "[selftest-photos] SUCCESS in %.1fs — actual %.2f GB (%lld bytes), estimate was %@",
+                         Date().timeIntervalSince(t0),
+                         Double(bytes) / 1_073_741_824.0, bytes, estStr))
+            print("[selftest-photos] savedToPhotos=\(saved) output=\(outPath)")
+            if let errMsg { print("[selftest-photos] note: \(errMsg)") }
+        } else {
+            print("[selftest-photos] FAILED: \(errMsg ?? "unknown")")
+        }
+        // Clean up the tmp import copies.
+        for u in urls { try? FileManager.default.removeItem(at: u) }
+        print("[selftest-photos] done")
+    }
+
+    /// Copy a Photos video asset's original file into `dst` (fast path via the
+    /// AVURLAsset the request hands back), falling back to a passthrough export
+    /// for edited/slow-motion assets that don't expose a plain URL.
+    private static func materialize(_ asset: PHAsset, to dst: URL) async -> Bool {
+        try? FileManager.default.removeItem(at: dst)
+        let opts = PHVideoRequestOptions()
+        opts.isNetworkAccessAllowed = true
+        opts.deliveryMode = .highQualityFormat
+        opts.version = .current
+        let av: AVAsset? = await withCheckedContinuation { cont in
+            PHImageManager.default().requestAVAsset(
+                forVideo: asset, options: opts) { avAsset, _, _ in
+                cont.resume(returning: avAsset)
+            }
+        }
+        if let urlAsset = av as? AVURLAsset {
+            if (try? FileManager.default.copyItem(at: urlAsset.url, to: dst)) != nil { return true }
+        }
+        guard let av,
+              let session = AVAssetExportSession(
+                  asset: av, presetName: AVAssetExportPresetPassthrough) else { return false }
+        session.outputURL = dst
+        session.outputFileType = .mov
+        await session.export()
+        return session.status == .completed
     }
 
     private static func run() async {

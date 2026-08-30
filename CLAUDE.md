@@ -320,6 +320,43 @@ helpers, opacity-gated per segment).
   its own `musicAssets` array (weak `AVAssetTrack.asset` trap) but its file is
   the USER's — never deleted (unlike the generated `stillAssets`). A track that
   won't decode is skipped silently — background music never fails the merge.
+- **Export robustness + 2 GB size guard (v1.0.63).** Three fixes to the
+  Merge-tab export, all reported on the real device:
+  - **Rotation no longer stops the merge.** A device rotation mid-export was
+    *interrupting* the offline `AVAssetExportSession` (the user: "the app did
+    not crash, the merge process stopped when I rotated the phone") — the
+    rotation transition disturbs the same CoreAnimation render server the
+    export runs on, even for a plain merge with no CA overlay tool. Fix:
+    `mergeAndExport` pins the whole app to **portrait** for the duration
+    (`AppDelegate.lockPortrait` → `application(_:supportedInterfaceOrientationsFor:)`
+    returns `.portrait`, and `applyOrientationLock` asks the foreground
+    `UIWindowScene` to `requestGeometryUpdate` + `setNeedsUpdateOfSupported…`).
+    The screen simply doesn't rotate while the film renders, then rotates
+    freely again (normal mask = `.allButUpsideDown` iPhone / `.all` iPad,
+    mirroring Info.plist). The `AppDelegate` is the single orientation
+    authority; the flag is `@MainActor` and only `mergeAndExport` flips it.
+  - **Keeps going when backgrounded.** A `UIApplication.beginBackgroundTask`
+    assertion is held across the export (paired with the existing
+    idle-timer-disable), so switching apps doesn't instantly suspend the
+    encode. iOS still caps the background window for pure compute — beyond it
+    the session pauses and *resumes on return* rather than failing — but it
+    no longer dies the moment the app resigns active.
+  - **2 GB pre-warning + uncapped picker.** WhatsApp refuses videos > 2 GB, so
+    the merged size is **estimated the moment the clip set changes**
+    (`refreshSizeEstimate`, debounced via a cancellable `estimateTask`): a
+    clips-only `AVMutableComposition` fed to AVFoundation's own
+    `estimatedOutputFileLengthInBytes` (needs a finite `timeRange` set, else it
+    returns 0), scaled by the film-length factor (intro/title/freeze/outro
+    seconds charged at the avg clip bitrate — a safe over-estimate) and the
+    panel-stack height factor. `MergeScreen` shows "Estimated size ~X GB" and
+    an amber over-limit banner **before** any CPU is spent. Because size is now
+    the real limit, the PhotosPicker's hard **50-clip cap was removed**
+    (`maxSelectionCount: nil`) — add as many as you like while the estimate
+    stays under 2 GB. Validated on device (`MERGE_SELFTEST_PHOTOS=<N>`, a
+    Photos-reading dev harness — needs a temporary `NSPhotoLibraryUsageDescription`
+    in Info.plist, which the shipping app never carries since it uses the
+    out-of-process PhotosPicker): the last 50 clips estimated 3.95 GB → flagged
+    over 2 GB.
 
 ### Rides tab — watch GPS on a map (v1.0.23+)
 

@@ -18,6 +18,49 @@ struct MovementLoggerApp: App {
 }
 
 final class AppDelegate: NSObject, UIApplicationDelegate {
+
+    /// While a merge export runs the whole app is pinned to PORTRAIT. A
+    /// device rotation mid-export tears down and rebuilds the window's
+    /// render context on the same CoreAnimation render server the offline
+    /// `AVAssetExportSession` merge is using — which was interrupting (and
+    /// crashing) the export. `MergeViewModel` flips this around
+    /// `mergeAndExport` and the scene re-evaluates its allowed orientations,
+    /// so the screen simply stays put while the film renders and rotates
+    /// freely again once it's done.
+    @MainActor static var lockPortrait = false {
+        didSet {
+            guard oldValue != lockPortrait else { return }
+            applyOrientationLock()
+        }
+    }
+
+    /// The app's normal orientation mask (mirrors Info.plist:
+    /// portrait + both landscapes on iPhone, all four on iPad).
+    @MainActor static func defaultMask() -> UIInterfaceOrientationMask {
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .allButUpsideDown
+    }
+
+    /// Ask the foreground scene to re-evaluate its allowed orientations, and
+    /// (when locking) rotate back to portrait if the device is currently
+    /// landscape.
+    @MainActor static func applyOrientationLock() {
+        let scenes = UIApplication.shared.connectedScenes
+        guard let scene = (scenes.first { $0.activationState == .foregroundActive }
+                           ?? scenes.first) as? UIWindowScene else { return }
+        let mask: UIInterfaceOrientationMask = lockPortrait ? .portrait : defaultMask()
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
+        scene.keyWindow?.rootViewController?
+            .setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
+
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?)
+                     -> UIInterfaceOrientationMask {
+        // Portrait-only while a merge export is in flight; the normal mask
+        // (all orientations, per device) otherwise.
+        AppDelegate.lockPortrait ? .portrait : AppDelegate.defaultMask()
+    }
+
     func application(_ application: UIApplication,
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil)
                      -> Bool {
