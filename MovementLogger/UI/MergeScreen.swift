@@ -18,7 +18,7 @@ struct MergeScreen: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("Pick several clips — they are sorted by recording time, shown complete (never cut), each introduced by a date/time title card and closed with a fade to black. Add as many as you like: the estimated output size is shown below, so you can keep adding while it stays under WhatsApp's 2 GB send limit.")
+                    Text("Pick several clips — they are sorted by recording time, shown complete (never cut), each introduced by a date/time title card and closed with a fade to black. Pick as many as you like: the film is cut off where it would cross WhatsApp's 2 GB send limit, and the clips past that point are listed separately.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
 
@@ -149,6 +149,7 @@ private struct ClipList: View {
                 Text(mergeSummary(vm.clips))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                OversizeClips(vm: vm)
                 SkippedClips(vm: vm)
             }
         }
@@ -162,13 +163,14 @@ private struct ClipRow: View {
     let clip: MergeViewModel.Clip
     let index: Int
     let skipped: Bool
+    var oversize: Bool = false
 
     var body: some View {
         HStack {
             if skipped {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.footnote)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(oversize ? Color.orange : Color.red)
             } else {
                 Text("\(index).")
                     .font(.system(size: 13, design: .monospaced))
@@ -179,7 +181,7 @@ private struct ClipRow: View {
                     .font(.footnote)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .foregroundStyle(skipped ? Color.red : Color.primary)
+                    .foregroundStyle(oversize ? Color.orange : skipped ? Color.red : Color.primary)
                 HStack(spacing: 6) {
                     Text(formatClipStart(clip.startMs))
                         .font(.caption2)
@@ -187,7 +189,11 @@ private struct ClipRow: View {
                     Text(formatClipDuration(clip.meta.durationMillis))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    if skipped {
+                    if oversize {
+                        Text("over 2 GB — not merged")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    } else if skipped {
                         Text("landscape — not merged")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.red)
@@ -201,7 +207,9 @@ private struct ClipRow: View {
             }
             Spacer()
             Button {
-                if skipped { vm.removeSkipped(clip) } else { vm.removeClip(clip) }
+                if oversize { vm.removeOversize(clip) }
+                else if skipped { vm.removeSkipped(clip) }
+                else { vm.removeClip(clip) }
             } label: {
                 Image(systemName: "trash")
             }
@@ -212,6 +220,30 @@ private struct ClipRow: View {
         .background(skipped ? Color.red.opacity(0.10)
                             : Color(.secondarySystemBackground),
                     in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// The portrait picks past the 2 GB cut-off, with the reason.
+private struct OversizeClips: View {
+    @Bindable var vm: MergeViewModel
+
+    var body: some View {
+        if !vm.oversizeClips.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Not merged — over 2 GB (\(vm.oversizeClips.count))")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.orange)
+                Text("The film stops where it would cross WhatsApp's 2 GB send "
+                    + "limit. These later clips are left out; remove a merged clip "
+                    + "above to make room, or merge them as a second film.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                ForEach(vm.oversizeClips) { clip in
+                    ClipRow(vm: vm, clip: clip, index: 0, skipped: true, oversize: true)
+                }
+            }
+            .padding(.top, 4)
+        }
     }
 }
 
@@ -614,6 +646,20 @@ private struct MergeRow: View {
                     Text("also added to Photos library")
                         .font(.footnote)
                         .foregroundStyle(.tint)
+                } else if vm.savingToPhotos {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Adding to Photos library…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Button {
+                        Task { await vm.saveExportToPhotos() }
+                    } label: {
+                        Label("Save to Photos again", systemImage: "photo.badge.plus")
+                    }
+                    .buttonStyle(.bordered)
                 }
                 HStack(spacing: 12) {
                     Button {

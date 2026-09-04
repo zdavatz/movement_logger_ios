@@ -28,6 +28,10 @@ final class MergeViewModel {
         /// chronological sort, the title card, and the panel alignment.
         let startMs: Int64
         let hasCreation: Bool
+        /// AVFoundation's estimate of this clip's H.264 output bytes when it
+        /// is re-encoded on its own (see `estimateClipsBytes`). nil = the
+        /// clip failed to load; it then counts as zero toward the budget.
+        var estBytes: Int64? = nil
         var isLandscape: Bool {
             meta.displayedSize.width > meta.displayedSize.height
         }
@@ -38,6 +42,10 @@ final class MergeViewModel {
     var clips: [Clip] = []
     /// Landscape picks, kept out of the merge — see `addClips`.
     var skippedClips: [Clip] = []
+    /// Portrait picks that did not fit under the 2 GB share limit — the
+    /// chronological tail of the pick, held aside so the user sees exactly
+    /// where the film was cut off (see `rebalanceSizeBudget`).
+    var oversizeClips: [Clip] = []
     var loadingClips: Bool = false
     /// Photo-library import progress ("Loading videos… N/M"): copying the
     /// picked movies out of the library takes seconds per clip, so the
@@ -122,7 +130,7 @@ final class MergeViewModel {
                 continue
             }
             seen.insert(key)
-            let clip = Clip(
+            var clip = Clip(
                 url: url, meta: meta, startMs: start,
                 hasCreation: meta.creationTimeMillis != nil
             )
@@ -137,13 +145,42 @@ final class MergeViewModel {
             if clip.isLandscape {
                 skippedClips.append(clip)
             } else {
+                clip.estBytes = await Self.estimateClipsBytes([clip])
                 clips.append(clip)
             }
         }
-        // Chronological by capture time — pick order is irrelevant.
-        clips.sort { $0.startMs < $1.startMs }
         skippedClips.sort { $0.startMs < $1.startMs }
+        // Chronological by capture time — pick order is irrelevant — and
+        // cut off where the film would cross the 2 GB share limit.
+        rebalanceSizeBudget()
         loadingClips = false
+    }
+
+    /// Admit clips in capture order while the projected film stays under
+    /// `shareSizeLimitBytes`; everything after that point moves to
+    /// `oversizeClips`. The user asked for the picker to STOP at 2 GB rather
+    /// than warn afterwards: "I could select 100 videos and the output file
+    /// was 3.2 GB". Chronological admission gives a deterministic answer
+    /// ("the film contains the first N clips that fit") and the cut-off
+    /// clips stay listed, so any of them can be brought back by removing an
+    /// admitted one. Re-run whenever clips or the panel set change — the
+    /// panel stack changes the per-second cost, so a film that fit without
+    /// panels may not with them (and vice versa).
+    @MainActor
+    func rebalanceSizeBudget() {
+        let all = (clips + oversizeClips).sorted { $0.startMs < $1.startMs }
+        var admitted: [Clip] = []
+        var overflow: [Clip] = []
+        for clip in all {
+            if overflow.isEmpty,
+               projectedBytes(admitted + [clip]) < Self.shareSizeLimitBytes {
+                admitted.append(clip)
+            } else {
+                overflow.append(clip)
+            }
+        }
+        clips = admitted
+        oversizeClips = overflow
         refreshSizeEstimate()
     }
 
@@ -158,17 +195,25 @@ final class MergeViewModel {
     }
 
     @MainActor
+    func removeOversize(_ clip: Clip) {
+        oversizeClips.removeAll { $0.id == clip.id }
+        Self.deleteTempCopy(clip.url)
+    }
+
+    @MainActor
     func removeClip(_ clip: Clip) {
         clips.removeAll { $0.id == clip.id }
         Self.deleteTempCopy(clip.url)
-        refreshSizeEstimate()
+        // Freed budget may let a cut-off clip back in.
+        rebalanceSizeBudget()
     }
 
     @MainActor
     func clearClips() {
-        for c in clips + skippedClips { Self.deleteTempCopy(c.url) }
+        for c in clips + skippedClips + oversizeClips { Self.deleteTempCopy(c.url) }
         clips = []
         skippedClips = []
+        oversizeClips = []
         refreshSizeEstimate()
     }
 
@@ -292,7 +337,7 @@ final class MergeViewModel {
         fullPitchDeg = []
         fullBaroHeightM = []
         fullFusedHeightM = []
-        refreshSizeEstimate()
+        rebalanceSizeBudget()
     }
 
     func clearError() {
@@ -390,7 +435,7 @@ final class MergeViewModel {
             fullPitchDeg = []
             fullBaroHeightM = []
             fullFusedHeightM = []
-            refreshSizeEstimate()
+            rebalanceSizeBudget()
             return
         }
         computing = true
@@ -417,7 +462,7 @@ final class MergeViewModel {
         fullBaroHeightM = result.baroH
         fullFusedHeightM = result.fusedH
         computing = false
-        refreshSizeEstimate()
+        rebalanceSizeBudget()
     }
 
     // -------------------------------------------------------------------------
@@ -429,27 +474,20 @@ final class MergeViewModel {
     /// land over the limit BEFORE the export burns minutes of CPU.
     static let shareSizeLimitBytes: Int64 = 2 * 1024 * 1024 * 1024   // 2 GiB
 
-    @ObservationIgnored private var estimateTask: Task<Void, Never>? = nil
-
-    /// Recompute `estimatedExportBytes` / `exceedsShareLimit` from the current
-    /// clip list + panel availability. Cheap: builds a clips-only composition
-    /// (no stills, no image work) and asks AVFoundation to estimate the H.264
-    /// output length, then scales for the intro/title/freeze/outro seconds and
-    /// the sensor-panel stack height.
+    /// Projected size of a film made of `specs`: the sum of the clips' own
+    /// re-encode estimates, scaled for the extra film seconds and the
+    /// sensor-panel stack. Synchronous — the per-clip estimates were taken
+    /// when the clip was added — so `rebalanceSizeBudget` can decide
+    /// admission clip by clip.
     @MainActor
-    func refreshSizeEstimate() {
-        estimateTask?.cancel()
-        let specs = clips
-        guard !specs.isEmpty else {
-            estimatedExportBytes = nil
-            exceedsShareLimit = false
-            return
-        }
+    func projectedBytes(_ specs: [Clip]) -> Int64 {
+        guard !specs.isEmpty else { return 0 }
+        let base = specs.reduce(Int64(0)) { $0 + max($1.estBytes ?? 0, 0) }
         // Timeline scale: the film adds a 3 s intro, a 2.5 s title + 3 s
         // freeze per clip, and a 5 s outro on top of the clip seconds
         // (mirrors `mergeSummary` / the exporter). The extras are low-motion,
         // so charging them at the average clip bitrate slightly over-estimates
-        // — the safe direction for a "will it exceed 2 GB" warning.
+        // — the safe direction for a "will it exceed 2 GB" decision.
         let clipMs = specs.reduce(Int64(0)) { $0 + max($1.meta.durationMillis, 0) }
         let filmMs = clipMs + Int64(specs.count) * (2500 + 3000) + 3000 + 5000
         let filmFactor = clipMs > 0 ? Double(filmMs) / Double(clipMs) : 1.0
@@ -461,21 +499,21 @@ final class MergeViewModel {
             let stackH = CompositeExporter.panelHeight * CGFloat(panelCount)
             panelFactor = Double((videoH + stackH) / videoH)
         }
-        estimateTask = Task { [weak self] in
-            let base = await Self.estimateClipsBytes(specs)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                guard let self, !Task.isCancelled else { return }
-                guard let base else {
-                    self.estimatedExportBytes = nil
-                    self.exceedsShareLimit = false
-                    return
-                }
-                let est = Int64(Double(base) * filmFactor * panelFactor)
-                self.estimatedExportBytes = est
-                self.exceedsShareLimit = est >= Self.shareSizeLimitBytes
-            }
+        return Int64(Double(base) * filmFactor * panelFactor)
+    }
+
+    /// Recompute `estimatedExportBytes` / `exceedsShareLimit` from the current
+    /// clip list + panel availability.
+    @MainActor
+    func refreshSizeEstimate() {
+        guard !clips.isEmpty else {
+            estimatedExportBytes = nil
+            exceedsShareLimit = false
+            return
         }
+        let est = projectedBytes(clips)
+        estimatedExportBytes = est
+        exceedsShareLimit = est >= Self.shareSizeLimitBytes
     }
 
     /// The panel kinds that would render, from full-session availability
@@ -598,13 +636,8 @@ final class MergeViewModel {
                 Task { @MainActor [weak self] in self?.exportProgress = p }
             }
             lastExportedPath = outURL.path
-            do {
-                try await saveVideoToPhotos(outURL)
-                savedToPhotos = true
-            } catch {
-                self.error = "saved to Documents but not Photos: \(Self.describeError(error))"
-            }
             exporting = false
+            await saveExportToPhotos()
         } catch {
             self.error = Self.describeError(error)
             exporting = false
@@ -726,6 +759,27 @@ final class MergeViewModel {
         return lo
     }
 
+    /// True while the finished film is being copied into the Photos library.
+    var savingToPhotos: Bool = false
+
+    /// Add the last exported film to Photos. Also the target of the "Save to
+    /// Photos again" button, so a failed import never loses the film (it is
+    /// already safe in Documents).
+    @MainActor
+    func saveExportToPhotos() async {
+        guard let path = lastExportedPath, !savingToPhotos else { return }
+        savingToPhotos = true
+        defer { savingToPhotos = false }
+        do {
+            try await saveVideoToPhotos(URL(fileURLWithPath: path))
+            savedToPhotos = true
+            if error?.hasPrefix("saved to Documents but not Photos") == true { error = nil }
+        } catch {
+            self.error = "saved to Documents but not Photos: \(Self.describeError(error))"
+                + " — tap “Save to Photos again” below."
+        }
+    }
+
     private func saveVideoToPhotos(_ url: URL) async throws {
         let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
         guard status == .authorized || status == .limited else {
@@ -735,9 +789,27 @@ final class MergeViewModel {
                     "Photos write permission denied — enable in Settings → Privacy → Photos."]
             )
         }
-        try await PHPhotoLibrary.shared().performChanges {
-            let req = PHAssetCreationRequest.forAsset()
-            req.addResource(with: .video, fileURL: url, options: nil)
+        // Importing a multi-GB film is a long copy inside photolibraryd, and
+        // it fails with PHPhotosErrorOperationInterrupted (3301, "transient"
+        // per Apple) when the app is backgrounded or the media server is
+        // still busy tearing down the export. Seen on device after a 1.4 GB
+        // merge. Retry a few times with a growing pause before giving up.
+        var attempt = 0
+        while true {
+            do {
+                try await PHPhotoLibrary.shared().performChanges {
+                    let req = PHAssetCreationRequest.forAsset()
+                    req.addResource(with: .video, fileURL: url, options: nil)
+                }
+                return
+            } catch {
+                let ns = error as NSError
+                let transient = ns.domain == PHPhotosErrorDomain
+                    && ns.code == PHPhotosError.operationInterrupted.rawValue
+                attempt += 1
+                guard transient, attempt < 4 else { throw error }
+                try? await Task.sleep(for: .seconds(2 * attempt))
+            }
         }
     }
 }
@@ -836,11 +908,12 @@ enum MergeSelfTest {
         await vm.addClips(urls)
         // Let the (async) size estimate land.
         try? await Task.sleep(for: .seconds(2))
-        let (nClips, nSkipped, est, over) = await MainActor.run {
-            (vm.clips.count, vm.skippedClips.count, vm.estimatedExportBytes, vm.exceedsShareLimit)
+        let (nClips, nSkipped, nOver, est, over) = await MainActor.run {
+            (vm.clips.count, vm.skippedClips.count, vm.oversizeClips.count,
+             vm.estimatedExportBytes, vm.exceedsShareLimit)
         }
         let estStr = est.map { String(format: "%.2f GB (%lld bytes)", Double($0) / 1_073_741_824.0, $0) } ?? "nil"
-        print("[selftest-photos] clips(portrait)=\(nClips) skipped(landscape)=\(nSkipped)")
+        print("[selftest-photos] clips(portrait)=\(nClips) skipped(landscape)=\(nSkipped) cut(over2GB)=\(nOver)")
         print("[selftest-photos] estimated size = \(estStr) — over 2 GB? \(over)")
 
         // The full merge is a many-minute encode that also writes the (possibly

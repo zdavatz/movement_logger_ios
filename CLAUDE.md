@@ -320,6 +320,19 @@ helpers, opacity-gated per segment).
   its own `musicAssets` array (weak `AVAssetTrack.asset` trap) but its file is
   the USER's — never deleted (unlike the generated `stillAssets`). A track that
   won't decode is skipped silently — background music never fails the merge.
+- **Picker STOPS at 2 GB (v1.0.64).** The v1.0.63 warning was not enough
+  ("I could select 100 videos and the output file was 3.2 GB"). Each clip
+  now gets its own `estBytes` (AVFoundation estimate, taken in `addClips`),
+  and `rebalanceSizeBudget` admits clips in **capture order** while
+  `projectedBytes` (sum of per-clip estimates × film-length × panel-stack
+  factors) stays under `shareSizeLimitBytes`; the chronological tail lands
+  in `oversizeClips`, shown as an orange "Not merged — over 2 GB" section.
+  Re-run on clip removal (a cut-off clip may come back) and whenever the
+  panel set changes (panels raise the per-second cost). Also: the Photos
+  import of the finished film retries on `PHPhotosErrorOperationInterrupted`
+  (3301, transient — seen after a 1.4 GB merge) and the result row offers
+  "Save to Photos again" (`saveExportToPhotos`), the film being safe in
+  Documents regardless.
 - **Export robustness + 2 GB size guard (v1.0.63).** Three fixes to the
   Merge-tab export, all reported on the real device:
   - **Rotation no longer stops the merge.** A device rotation mid-export was
