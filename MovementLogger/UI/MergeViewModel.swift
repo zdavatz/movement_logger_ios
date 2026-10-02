@@ -233,6 +233,7 @@ final class MergeViewModel {
     /// them can be in use before a scene exists — anything found is a leak
     /// from a force-quit or a killed import.
     static func sweepTmpVideos() {
+        MergeExporter.sweepChunkWorkDir()
         let tmp = FileManager.default.temporaryDirectory
         let exts: Set<String> = ["mov", "mp4", "m4v"]
         let files = (try? FileManager.default.contentsOfDirectory(
@@ -635,13 +636,50 @@ final class MergeViewModel {
             ) { p in
                 Task { @MainActor [weak self] in self?.exportProgress = p }
             }
+            resumePending = false
             lastExportedPath = outURL.path
             exporting = false
             await saveExportToPhotos()
         } catch {
-            self.error = Self.describeError(error)
             exporting = false
+            // iOS pulls the GPU from a backgrounded app, so an app switch
+            // mid-merge interrupts the export (-11847). The finished clips
+            // are on disk (see MergeExporter's chunked render); the merge
+            // continues from there by itself when the app is active again
+            // — `continueIfPending` on didBecomeActive — so the user sees
+            // the bar keep going instead of a restart from zero.
+            let msg = Self.describeError(error)
+            let interrupted = msg.contains("-11847") || msg.contains("interrupted")
+            if interrupted {
+                resumePending = true
+                self.error = "Merge paused — iOS stops video rendering while the app is in the background. "
+                    + "It continues automatically from the last finished clip when you come back."
+                if UIApplication.shared.applicationState == .active {
+                    // Interrupted while still active (screen lock race, media
+                    // server pressure): go on right away after a short breath.
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(for: .seconds(1))
+                        await self?.continueIfPending()
+                    }
+                }
+            } else {
+                self.error = msg
+            }
         }
+    }
+
+    /// Set while an interrupted merge is waiting to carry on; the already
+    /// rendered clips stay cached on disk between the attempts.
+    var resumePending: Bool = false
+
+    /// Carry an interrupted merge on (called on `didBecomeActive`, and from
+    /// the "Continue merge" button). No-op unless one is pending.
+    @MainActor
+    func continueIfPending() async {
+        guard resumePending, !exporting, !clips.isEmpty else { return }
+        resumePending = false
+        error = nil
+        await mergeAndExport()
     }
 
     /// Human-debuggable error text: localizedDescription PLUS the NSError

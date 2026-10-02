@@ -77,6 +77,12 @@ struct MergeScreen: View {
             .navigationTitle("Merge")
             .navigationBarTitleDisplayMode(.inline)
         }
+        // An interrupted merge (app switch — iOS stops rendering in the
+        // background) carries on by itself the moment the app is active again.
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.didBecomeActiveNotification)) { _ in
+            Task { await vm.continueIfPending() }
+        }
         .onChange(of: pickerItems) { _, items in
             guard !items.isEmpty else { return }
             // Clear the binding IMMEDIATELY (before the slow import below).
@@ -608,9 +614,13 @@ private struct MergeRow: View {
             }
             HStack {
                 Button {
-                    Task { await vm.mergeAndExport() }
+                    Task {
+                        if vm.resumePending { await vm.continueIfPending() }
+                        else { await vm.mergeAndExport() }
+                    }
                 } label: {
-                    Text(vm.exporting ? "Merging…" : "Merge videos")
+                    Text(vm.exporting ? "Merging…"
+                         : vm.resumePending ? "Continue merge" : "Merge videos")
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(

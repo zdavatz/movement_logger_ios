@@ -98,6 +98,27 @@ enum MergeExporter {
     private static let pumpSquash: Double = 0.035     // compress/extend
     private static let pumpLogoHeightFrac: CGFloat = 0.55  // foil size (of H)
 
+    /// One source clip, loaded once for the whole export.
+    private struct Loaded {
+        let spec: MergeClipSpec
+        /// The source asset MUST be retained here for the whole export:
+        /// `AVAssetTrack.asset` is a WEAK reference, so keeping only the
+        /// tracks deallocates each AVURLAsset at the end of its loop
+        /// iteration — the composition then can't read any source media
+        /// and AVAssetExportSession fails instantly with -11800 /
+        /// OSStatus -12780 ("The operation could not be completed").
+        /// This was the real-device 14-clip merge failure.
+        let asset: AVURLAsset
+        let videoTrack: AVAssetTrack
+        let audioTrack: AVAssetTrack?
+        let audioRange: CMTimeRange
+        let duration: CMTime
+        let naturalSize: CGSize
+        let preferredTransform: CGAffineTransform
+        let displayedW: CGFloat
+        let displayedH: CGFloat
+    }
+
     static func export(
         clips: [MergeClipSpec],
         panelKinds: [CompositeExporter.PanelKind],
@@ -126,25 +147,6 @@ enum MergeExporter {
         let outroSecs = (dbg.contains("nogaps") || dbg.contains("nooutro")) ? 0.0 : outroS
 
         // ----- Load per-clip assets + geometry
-        struct Loaded {
-            let spec: MergeClipSpec
-            /// The source asset MUST be retained here for the whole export:
-            /// `AVAssetTrack.asset` is a WEAK reference, so keeping only the
-            /// tracks deallocates each AVURLAsset at the end of its loop
-            /// iteration — the composition then can't read any source media
-            /// and AVAssetExportSession fails instantly with -11800 /
-            /// OSStatus -12780 ("The operation could not be completed").
-            /// This was the real-device 14-clip merge failure.
-            let asset: AVURLAsset
-            let videoTrack: AVAssetTrack
-            let audioTrack: AVAssetTrack?
-            let audioRange: CMTimeRange
-            let duration: CMTime
-            let naturalSize: CGSize
-            let preferredTransform: CGAffineTransform
-            let displayedW: CGFloat
-            let displayedH: CGFloat
-        }
         var loaded: [Loaded] = []
         for spec in clips {
             let asset = AVURLAsset(url: spec.url)
@@ -182,101 +184,104 @@ enum MergeExporter {
         let outputSize = CGSize(width: videoW, height: videoH + panelStackH)
         let panelSize = CGSize(width: videoW, height: CompositeExporter.panelHeight)
 
-        // ----- Composition. One video + one audio track; an explicit empty
-        // (black) 2.5 s edit before every clip carries its title card. Each
-        // clip is inserted with its FULL [0, duration] range — never a
-        // sub-range (hard product rule: no trimming).
+
+        // ----- Two-phase, RESUMABLE render (v1.0.65).
+        //
+        // iOS revokes the GPU from any app that leaves the foreground, and
+        // the video compositor needs it — so an export session carrying a
+        // video composition is interrupted (-11847) the moment the user
+        // switches to WhatsApp mid-merge. Before, the whole film was ONE
+        // session and an interruption threw away every rendered minute
+        // ("the merge process is gone and I have to start from 0 again").
+        //
+        // Now each clip is rendered into its own CHUNK file —
+        // [title][clip][freeze-fade] (+ its panel stack) at the full canvas
+        // — and kept in Caches/MergeWork, keyed by the clip's identity and
+        // the render settings. A chunk that already exists is skipped, so a
+        // re-run after an interruption continues from the last finished
+        // clip with nothing re-encoded. The final ASSEMBLY pass stitches
+        // intro + chunks + outro (+ music) with NO video composition — a
+        // plain decode/encode that doesn't need the compositor — and the
+        // chunks are deleted once the film is written. Peak memory also
+        // drops: one clip's sources are live at a time, not fifty.
+        let videoRegion = CGSize(width: videoW, height: videoH)
+        let titleDur = CMTime(value: Int64(titleS * 1000), timescale: 1000)
+        let freezeDur = CMTime(value: Int64(freezeS * 1000), timescale: 1000)
+        let totalClipS = loaded.reduce(0.0) { $0 + CMTimeGetSeconds($1.duration) }
+        // Progress budget: chunk rendering by clip seconds, assembly as a
+        // flat fraction of that (a re-encode without compositing is a few
+        // times faster than the composited pass).
+        let assemblyWeight = max(0.35 * totalClipS, 1.0)
+        let totalWork = totalClipS + assemblyWeight
+        var workDone = 0.0
+
+        let workDir = chunkWorkDir()
+        try? FileManager.default.createDirectory(
+            at: workDir, withIntermediateDirectories: true)
+        let settingsKey = "\(Int(videoW))x\(Int(videoH))|\(panelKinds.map { "\($0.rawValue)" }.joined(separator: ","))|\(muteClipAudio)|\(titleS)|\(freezeS)|\(dbg.sorted().joined(separator: ","))"
+
+        struct Chunk {
+            let url: URL
+            let loaded: Loaded
+        }
+        var chunks: [Chunk] = []
+        var chunkAssets: [AVURLAsset] = []
+        defer { withExtendedLifetime(chunkAssets) {} }
+
+        for (i, l) in loaded.enumerated() {
+            let key = chunkKey(
+                clipURL: l.spec.url, startEpochMs: l.spec.startEpochMs,
+                durationMs: Int64(CMTimeGetSeconds(l.duration) * 1000),
+                hasPanels: l.spec.panelInputs != nil, settings: settingsKey)
+            let chunkURL = workDir.appendingPathComponent("seg_\(key).mov")
+            let clipS = CMTimeGetSeconds(l.duration)
+            if chunkIsComplete(chunkURL) {
+                // Already rendered by an earlier (interrupted) run — reuse.
+                chunks.append(Chunk(url: chunkURL, loaded: l))
+                workDone += clipS
+                progress(0.01 + 0.98 * workDone / totalWork)
+                continue
+            }
+            let baseDone = workDone
+            try await renderChunk(
+                l, index: i, to: chunkURL,
+                videoW: videoW, videoH: videoH, outputSize: outputSize,
+                panelSize: panelSize, panelKinds: panelKinds,
+                titleDur: titleDur, freezeDur: freezeDur,
+                titleS: titleS, freezeS: freezeS,
+                muteClipAudio: muteClipAudio, dbg: dbg
+            ) { p in
+                progress(0.01 + 0.98 * (baseDone + p * clipS) / totalWork)
+            }
+            chunks.append(Chunk(url: chunkURL, loaded: l))
+            workDone += clipS
+        }
+
+        // ----- Assembly: intro + chunks + outro on one video track, clip
+        // audio passed through, music looped underneath. No video
+        // composition: every segment is already at outputSize, upright.
         let composition = AVMutableComposition()
         guard let compVideo = composition.addMutableTrack(
             withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid
         ) else { throw MergeExportError.exportFailed("could not add video track") }
-        // Created lazily on the first clip that actually has audio — a
-        // composition track with zero segments (all clips muted) is a
-        // known export-breaker.
         var compAudio: AVMutableCompositionTrack? = nil
-
-        struct Segment {
-            let loaded: Loaded
-            let titleStart: CMTime
-            let clipStart: CMTime
-            let clipEnd: CMTime
-            /// End of the post-clip last-frame freeze (== clipEnd when the
-            /// freeze is disabled by a diagnostic knob).
-            let freezeEnd: CMTime
-            /// Displayed size of the freeze segment's own video, when the
-            /// freeze was inserted as real media (nil = no freeze media, the
-            /// segment stays plain black).
-            let freezeSize: CGSize?
-            /// Whether the title card was inserted as real media (false =
-            /// the segment is an empty black edit, no layer instruction).
-            let titleHasMedia: Bool
-        }
-        let titleDur = CMTime(value: Int64(titleS * 1000), timescale: 1000)
-        let freezeDur = CMTime(value: Int64(freezeS * 1000), timescale: 1000)
-        var cursor = CMTime.zero
         var audioCursor = CMTime.zero
-
-        // Generated stills (intro card, title cards, freeze frames, outro),
-        // retained for the whole export — AVAssetTrack.asset is a WEAK
-        // reference, the same trap as the source clips — and deleted from
-        // tmp once the export returns.
-        //
-        // Why these are MEDIA and not CALayers: every layer's `contents`
-        // stays resident in the offline CoreAnimation renderer for the
-        // entire export, and its per-frame cost scales with them. Bisected
-        // on device with MERGE_SELFTEST over 30 clips (a 441 s film): the
-        // full layer tree died at 25 % with -11847 ← -16101 ("Operation
-        // Interrupted"), dropping the freeze layers moved it to 80 %, and
-        // both `noca` (no animation tool) and `nogaps` (empty tree)
-        // exported cleanly. So the overlays are rendered into short
-        // two-frame H.264 segments instead, which lets a plain merge run
-        // with NO animation tool at all — the configuration proven to
-        // survive any length.
         var stillAssets: [AVURLAsset] = []
         defer {
             withExtendedLifetime(stillAssets) {}
             for a in stillAssets { try? FileManager.default.removeItem(at: a.url) }
         }
-        // The background-music asset must likewise outlive the export
-        // (AVAssetTrack.asset is weak), but its file is the USER's — never
-        // delete it, only retain.
         var musicAssets: [AVURLAsset] = []
         defer { withExtendedLifetime(musicAssets) {} }
-        /// Insert a generated still as real media at `at`, returning false
-        /// when it couldn't be made (caller falls back to an empty edit).
-        let videoRegion = CGSize(width: videoW, height: videoH)
-        func insertStill(
-            _ image: CGImage?, at: CMTime, duration: CMTime, name: String
-        ) async -> Bool {
-            guard let still = try? await makeStillAsset(
-                    image: image, size: videoRegion,
-                    durationS: CMTimeGetSeconds(duration), filename: name),
-                  let track = try? await still.loadTracks(withMediaType: .video).first,
-                  ((try? compVideo.insertTimeRange(
-                      CMTimeRange(start: .zero, duration: duration),
-                      of: track, at: at)) != nil)
-            else { return false }
-            stillAssets.append(still)
-            return true
-        }
+        var cursor = CMTime.zero
 
-        // "MovementLogger" gradient intro — the lettering floats
-        // semi-transparently over a freeze of the FIRST clip's first frame
-        // (aspect-fit into the video region with a black letterbox, exactly
-        // where clip 1 will play), so the film opens ON the footage with the
-        // title over it instead of a black card, then the clip starts. As a
-        // rendered still it stays MEDIA (no CALayer, no animation tool). If
-        // the frame can't be extracted, `makeIntroImage` falls back to the
-        // lettering on solid black.
-        // Music credit shown on the intro card under the "MovementLogger"
-        // lettering — title — artist from the track's metadata, else its
-        // filename (the user names tracks by song title). Only when music
-        // actually plays.
+        // Intro over the first clip's first frame — rendered at the FULL
+        // output size (video region + black panel band) so it needs no
+        // transform in the plain assembly.
         var musicCredit: String? = nil
         if let musicURL = backgroundMusic, musicVolume > 0 {
             musicCredit = await musicCreditString(musicURL)
         }
-        var introHasMedia = false
         if introS > 0 {
             let introDur = CMTime(value: Int64(introS * 1000), timescale: 1000)
             var introBg: CGImage? = nil
@@ -291,174 +296,104 @@ enum MergeExporter {
                 introBg = await firstFrameImage(
                     asset: first.asset, maxSize: CGSize(width: fw, height: fh))
             }
-            introHasMedia = await insertStill(
-                makeIntroImage(size: videoRegion, background: introBg,
-                               backgroundRect: introBgRect, musicCredit: musicCredit),
-                at: .zero, duration: introDur, name: "merge_intro.mov")
-            if !introHasMedia {
-                compVideo.insertEmptyTimeRange(
-                    CMTimeRange(start: .zero, duration: introDur))
+            let introImg = makeIntroImage(
+                size: videoRegion, background: introBg,
+                backgroundRect: introBgRect, musicCredit: musicCredit)
+            if let still = try? await makeStillAsset(
+                   image: padToCanvas(introImg, canvas: outputSize),
+                   size: outputSize, durationS: introS, filename: "merge_intro.mov"),
+               let track = try? await still.loadTracks(withMediaType: .video).first,
+               (try? compVideo.insertTimeRange(
+                   CMTimeRange(start: .zero, duration: introDur),
+                   of: track, at: .zero)) != nil {
+                stillAssets.append(still)
+                cursor = introDur
             }
-            cursor = introDur
         }
-        let introEnd = cursor
 
-        var segments: [Segment] = []
-        for l in loaded {
-            let titleStart = cursor
-            let clipStart = CMTimeAdd(titleStart, titleDur)
-            var titleHasMedia = false
-            if titleS > 0 {
-                titleHasMedia = await insertStill(
-                    makeTitleImage(startEpochMs: l.spec.startEpochMs, size: videoRegion),
-                    at: titleStart, duration: titleDur,
-                    name: "merge_title_\(segments.count).mov")
-                if !titleHasMedia {
-                    compVideo.insertEmptyTimeRange(
-                        CMTimeRange(start: titleStart, duration: titleDur))
-                }
+        for chunk in chunks {
+            let asset = AVURLAsset(url: chunk.url)
+            chunkAssets.append(asset)
+            guard let v = try? await asset.loadTracks(withMediaType: .video).first,
+                  let dur = try? await asset.load(.duration),
+                  CMTimeGetSeconds(dur) > 0 else {
+                // A chunk that won't load is stale/corrupt — drop it so the
+                // next run re-renders it, and fail this one loudly.
+                try? FileManager.default.removeItem(at: chunk.url)
+                throw MergeExportError.exportFailed(
+                    "rendered segment unreadable: \(chunk.url.lastPathComponent) — tap Merge again")
             }
             try compVideo.insertTimeRange(
-                CMTimeRange(start: .zero, duration: l.duration),
-                of: l.videoTrack, at: clipStart
-            )
-            let clipEnd = CMTimeAdd(clipStart, l.duration)
-            // Audio passthrough at the clip's offset; title gaps stay silent.
-            // Clamp to the audio track's own extent (it can trail the video
-            // by a frame or two) and never let an audio hiccup kill the merge.
-            // `muteClipAudio` drops the footage sound entirely (e.g. to let a
-            // background music track carry the film over noisy foil-wind clips).
-            if !dbg.contains("noaudio"), !muteClipAudio, let a = l.audioTrack {
+                CMTimeRange(start: .zero, duration: dur), of: v, at: cursor)
+            if let a = try? await asset.loadTracks(withMediaType: .audio).first,
+               let aRange = try? await a.load(.timeRange),
+               CMTimeGetSeconds(aRange.duration) > 0 {
                 if compAudio == nil {
                     compAudio = composition.addMutableTrack(
                         withMediaType: .audio,
                         preferredTrackID: kCMPersistentTrackID_Invalid)
                 }
-                if let audioTrack = compAudio {
-                    if CMTimeCompare(audioCursor, clipStart) < 0 {
-                        audioTrack.insertEmptyTimeRange(
-                            CMTimeRange(start: audioCursor, end: clipStart))
+                if let at = compAudio {
+                    let dst = CMTimeAdd(cursor, aRange.start)
+                    if CMTimeCompare(audioCursor, dst) < 0 {
+                        at.insertEmptyTimeRange(CMTimeRange(start: audioCursor, end: dst))
                     }
-                    let aDur = CMTimeMinimum(l.audioRange.duration, l.duration)
-                    try? audioTrack.insertTimeRange(
-                        CMTimeRange(start: l.audioRange.start, duration: aDur),
-                        of: a, at: clipStart
-                    )
-                    audioCursor = CMTimeAdd(clipStart, aDur)
+                    let aDur = CMTimeMinimum(aRange.duration, CMTimeSubtract(dur, aRange.start))
+                    try? at.insertTimeRange(
+                        CMTimeRange(start: aRange.start, duration: aDur), of: a, at: dst)
+                    audioCursor = CMTimeAdd(dst, aDur)
                 }
             }
-            // Post-clip freeze: the clip's last frame, held and faded to
-            // black. This is REAL MEDIA (a 2-frame H.264 still written to
-            // tmp), not a CALayer holding the bitmap — the offline
-            // CoreAnimation renderer keeps every layer's contents resident
-            // for the whole export, so N full-region freeze bitmaps grow
-            // without bound and iOS kills the export with -11847 ← -16101
-            // ("Operation Interrupted"). Bisected on device with
-            // MERGE_SELFTEST: 30 clips died at 25 %, and at 80 % with the
-            // freeze layers removed — memory pressure, not a structural
-            // fault. As media the frames stream off disk and the fade
-            // becomes a native opacity ramp on the layer instruction.
-            let freezeEnd = freezeS > 0 ? CMTimeAdd(clipEnd, freezeDur) : clipEnd
-            var freezeSize: CGSize? = nil
-            if freezeS > 0, !dbg.contains("nofreeze") {
-                let fit = min(videoW / max(l.displayedW, 1),
-                              videoH / max(l.displayedH, 1))
-                let size = CGSize(width: evenDown(l.displayedW * fit),
-                                  height: evenDown(l.displayedH * fit))
-                if let frame = await lastFrameImage(
-                       asset: l.asset, duration: l.duration, maxSize: size),
-                   let still = try? await makeStillAsset(
-                       image: frame, size: size, durationS: freezeS,
-                       filename: "merge_freeze_\(segments.count).mov"),
-                   let stillTrack = try? await still.loadTracks(
-                       withMediaType: .video).first,
-                   (try? compVideo.insertTimeRange(
-                       CMTimeRange(start: .zero, duration: freezeDur),
-                       of: stillTrack, at: clipEnd)) != nil {
-                    stillAssets.append(still)
-                    freezeSize = size
-                }
-            }
-            // No freeze media (extraction/encode failed, or the knob is
-            // set): fall back to the empty black edit the fade used to sit
-            // on. Mid-timeline empty edits are preserved — only TRAILING
-            // ones get dropped, and the last freeze is followed by the
-            // outro anchor.
-            if freezeS > 0, freezeSize == nil {
-                compVideo.insertEmptyTimeRange(
-                    CMTimeRange(start: clipEnd, end: freezeEnd))
-            }
-            segments.append(Segment(
-                loaded: l, titleStart: titleStart, clipStart: clipStart,
-                clipEnd: clipEnd, freezeEnd: freezeEnd, freezeSize: freezeSize,
-                titleHasMedia: titleHasMedia))
-            cursor = freezeEnd
+            cursor = CMTimeAdd(cursor, dur)
         }
 
-        // ----- Pumping-foil outro after the last clip's fade-out. The foil
-        // icon rocks about its wings (mapped from Ayano's pumping footage)
-        // over a sky→sea gradient, fading IN from black — which bridges the
-        // last clip's own fade-to-black seamlessly — and back OUT to black to
-        // close the film. Pre-rendered as an H.264 media segment (NOT a
-        // CALayer animation), so the empty-layer-tree / no-animation-tool
-        // property is preserved. A trailing EMPTY edit does not work here —
-        // AVFoundation silently drops empty edits at the end of a track — so
-        // a real media clip is needed to anchor the film's end regardless.
-        let outroStart = cursor
-        var outroHasMedia = false
+        // Pumping-foil outro, rendered at the full output size.
         if outroSecs > 0 {
             let outroDur = CMTime(value: Int64(outroSecs * 1000), timescale: 1000)
             if let pump = try? await makeVideoAsset(
-                   size: videoRegion, durationS: outroSecs, fps: pumpFps,
+                   size: outputSize, durationS: outroSecs, fps: pumpFps,
                    filename: "merge_pump_outro.mov",
-                   frame: { i, n in pumpFrameImage(i, n, size: videoRegion) }),
+                   frame: { i, n in
+                       padToCanvas(pumpFrameImage(i, n, size: videoRegion), canvas: outputSize)
+                   }),
                let track = try? await pump.loadTracks(withMediaType: .video).first,
                (try? compVideo.insertTimeRange(
                    CMTimeRange(start: .zero, duration: outroDur),
-                   of: track, at: outroStart)) != nil {
+                   of: track, at: cursor)) != nil {
                 stillAssets.append(pump)
-                outroHasMedia = true
-                cursor = CMTimeAdd(outroStart, outroDur)
+                cursor = CMTimeAdd(cursor, outroDur)
             }
-            // No outro media (render failed) — the film simply ends after the
-            // last clip's fade-out.
         }
 
         let totalDur = cursor
         let totalS = CMTimeGetSeconds(totalDur)
+        guard totalS > 0.05 else {
+            throw MergeExportError.exportFailed("assembled film is empty")
+        }
 
-        // ----- Background music (optional). A SECOND audio track carrying the
-        // user-picked track, looped to fill the whole film and faded in/out,
-        // mixed UNDER the clips' own audio via an AVMutableAudioMix (the clip
-        // audio track has no mix parameters, so it plays at unity gain while
-        // the music sits at `musicVolume`). A track that won't decode is
-        // skipped silently — background music never fails the merge.
+        // ----- Background music (optional) — unchanged design: a second
+        // audio track looped over the film, faded in/out, under the clips.
         var musicMix: AVMutableAudioMix? = nil
         if let musicURL = backgroundMusic, !dbg.contains("noaudio"), totalS > 0.1 {
             let musicAsset = AVURLAsset(url: musicURL)
-            musicAssets.append(musicAsset)   // retain: AVAssetTrack.asset is weak
+            musicAssets.append(musicAsset)
             if let mTrack = try? await musicAsset.loadTracks(withMediaType: .audio).first,
                let mRange = try? await mTrack.load(.timeRange),
                CMTimeGetSeconds(mRange.duration) > 0.05,
                let bg = composition.addMutableTrack(
                    withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-                // Loop from the top of the track until the film is covered;
-                // the final repeat is clamped to end exactly at totalDur.
                 var at = CMTime.zero
                 while CMTimeCompare(at, totalDur) < 0 {
                     let remaining = CMTimeSubtract(totalDur, at)
-                    let chunk = CMTimeMinimum(mRange.duration, remaining)
-                    if CMTimeGetSeconds(chunk) <= 0.001 { break }
+                    let piece = CMTimeMinimum(mRange.duration, remaining)
+                    if CMTimeGetSeconds(piece) <= 0.001 { break }
                     do {
                         try bg.insertTimeRange(
-                            CMTimeRange(start: mRange.start, duration: chunk),
+                            CMTimeRange(start: mRange.start, duration: piece),
                             of: mTrack, at: at)
                     } catch { break }
-                    at = CMTimeAdd(at, chunk)
+                    at = CMTimeAdd(at, piece)
                 }
-                // Volume + fade. Long films get a 1 s fade-in and a 1.5 s
-                // fade-out so the loop never starts or cuts abruptly; a very
-                // short film just holds a flat level.
                 let vol = max(0, min(musicVolume, 1))
                 let params = AVMutableAudioMixInputParameters(track: bg)
                 if totalS > 4.0 {
@@ -482,146 +417,264 @@ enum MergeExporter {
             }
         }
 
-        progress(0.01)
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try? FileManager.default.removeItem(at: outputURL)
+        }
+        guard let session = AVAssetExportSession(
+            asset: composition, presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            throw MergeExportError.exportFailed("could not create export session")
+        }
+        session.outputURL = outputURL
+        session.outputFileType = .mov
+        session.shouldOptimizeForNetworkUse = true
+        if let earliest = clips.map({ $0.startEpochMs }).filter({ $0 > 0 }).min() {
+            session.metadata = CompositeExporter.creationDateMetadata(epochMs: earliest)
+        }
+        if let musicMix { session.audioMix = musicMix }
 
-        // ----- Video composition instructions: [intro] then per clip
-        // [title gap][clip][freeze], tiling [0, totalDur] exactly (shared
-        // CMTime boundaries).
-        var instructions: [AVMutableVideoCompositionInstruction] = []
-        // Card segments (intro / title / outro) are full-video-region
-        // stills written at exactly videoW×videoH, so they need no
-        // transform — an identity layer instruction composites them at the
-        // origin, which IS the video region at the top of the canvas.
-        func cardInstruction(from: CMTime, to: CMTime, hasMedia: Bool)
-            -> AVMutableVideoCompositionInstruction {
-            let inst = AVMutableVideoCompositionInstruction()
-            inst.timeRange = CMTimeRange(start: from, end: to)
-            inst.backgroundColor = UIColor.black.cgColor
-            if hasMedia {
-                let li = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideo)
-                li.setTransform(.identity, at: from)
-                inst.layerInstructions = [li]
+        let assemblyBase = workDone
+        let poller = CompositeExporter.ProgressPoller(session: session) { p in
+            progress(0.01 + 0.98 * (assemblyBase + max(0, min(p, 1)) * assemblyWeight) / totalWork)
+        }
+        poller.start()
+        await session.export()
+        poller.stop()
+
+        switch session.status {
+        case .completed:
+            // The film exists — the chunks have served their purpose.
+            for c in chunks { try? FileManager.default.removeItem(at: c.url) }
+            progress(1.0)
+        case .failed:
+            throw MergeExportError.exportFailed(
+                describeError(session.error) + CompositeExporter.interruptedHint(session.error))
+        case .cancelled:
+            throw MergeExportError.exportFailed("cancelled")
+        default:
+            throw MergeExportError.exportFailed("status \(session.status.rawValue)")
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    //  Chunk rendering (one clip → one file at the full canvas)
+    // -------------------------------------------------------------------------
+
+    /// Where finished per-clip segments wait for assembly. Caches (not
+    /// Documents): invisible in the Files app, and iOS may reclaim it under
+    /// storage pressure — a reclaimed chunk simply re-renders.
+    static func chunkWorkDir() -> URL {
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return caches.appendingPathComponent("MergeWork", isDirectory: true)
+    }
+
+    /// Delete leftover segments older than `maxAgeDays` (abandoned merges).
+    static func sweepChunkWorkDir(maxAgeDays: Double = 3) {
+        let dir = chunkWorkDir()
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let cutoff = Date().addingTimeInterval(-maxAgeDays * 86400)
+        for f in files {
+            let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            if m < cutoff || f.pathExtension == "part" {
+                try? FileManager.default.removeItem(at: f)
+            }
+        }
+    }
+
+    /// Stable identity for a rendered segment: the clip (capture time +
+    /// duration + file name — PhotosPicker copies change path per import,
+    /// so the path itself is NOT part of the key) and everything that
+    /// changes its pixels.
+    private static func chunkKey(
+        clipURL: URL, startEpochMs: Int64, durationMs: Int64,
+        hasPanels: Bool, settings: String
+    ) -> String {
+        let s = "\(clipURL.lastPathComponent)|\(startEpochMs)|\(durationMs)|\(hasPanels)|\(settings)"
+        // FNV-1a 64-bit — deterministic across launches (Hasher is seeded).
+        var h: UInt64 = 0xcbf29ce484222325
+        for b in s.utf8 { h ^= UInt64(b); h = h &* 0x100000001b3 }
+        return String(h, radix: 16)
+    }
+
+    /// A segment counts as finished only once it was renamed from `.part`
+    /// — an interrupted export leaves a truncated `.part` behind, never a
+    /// complete-looking file.
+    private static func chunkIsComplete(_ url: URL) -> Bool {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? NSNumber, size.int64Value > 4096 else { return false }
+        return true
+    }
+
+    /// Letterbox a video-region image onto the full output canvas (black
+    /// below, where the panel band sits), so cards need no transform in
+    /// the plain assembly pass. Identity when there is no panel band.
+    private static func padToCanvas(_ image: CGImage?, canvas: CGSize) -> CGImage? {
+        guard let image else { return nil }
+        if CGFloat(image.width) == canvas.width.rounded(),
+           CGFloat(image.height) == canvas.height.rounded() { return image }
+        let fmt = UIGraphicsImageRendererFormat()
+        fmt.scale = 1
+        fmt.opaque = true
+        let out = UIGraphicsImageRenderer(size: canvas, format: fmt).image { ctx in
+            UIColor.black.setFill()
+            ctx.fill(CGRect(origin: .zero, size: canvas))
+            UIImage(cgImage: image).draw(in: CGRect(
+                x: (canvas.width - CGFloat(image.width)) / 2, y: 0,
+                width: CGFloat(image.width), height: CGFloat(image.height)))
+        }
+        return out.cgImage
+    }
+
+    private static func renderChunk(
+        _ l: Loaded, index: Int, to chunkURL: URL,
+        videoW: CGFloat, videoH: CGFloat, outputSize: CGSize, panelSize: CGSize,
+        panelKinds: [CompositeExporter.PanelKind],
+        titleDur: CMTime, freezeDur: CMTime, titleS: Double, freezeS: Double,
+        muteClipAudio: Bool, dbg: Set<String>,
+        progress: @escaping @Sendable (Double) -> Void
+    ) async throws {
+        func evenDown(_ v: CGFloat) -> CGFloat {
+            let r = max(v.rounded(), 2)
+            return r - r.truncatingRemainder(dividingBy: 2)
+        }
+        let videoRegion = CGSize(width: videoW, height: videoH)
+        let composition = AVMutableComposition()
+        guard let compVideo = composition.addMutableTrack(
+            withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else { throw MergeExportError.exportFailed("could not add video track") }
+        var stillAssets: [AVURLAsset] = []
+        defer {
+            withExtendedLifetime(stillAssets) {}
+            for a in stillAssets { try? FileManager.default.removeItem(at: a.url) }
+        }
+
+        // [title]
+        var titleHasMedia = false
+        if titleS > 0 {
+            if let still = try? await makeStillAsset(
+                   image: makeTitleImage(startEpochMs: l.spec.startEpochMs, size: videoRegion),
+                   size: videoRegion, durationS: titleS,
+                   filename: "merge_title_\(index).mov"),
+               let t = try? await still.loadTracks(withMediaType: .video).first,
+               (try? compVideo.insertTimeRange(
+                   CMTimeRange(start: .zero, duration: titleDur), of: t, at: .zero)) != nil {
+                stillAssets.append(still)
+                titleHasMedia = true
             } else {
-                inst.layerInstructions = []   // just the black background
+                compVideo.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: titleDur))
             }
-            return inst
         }
-        if introS > 0 {
-            instructions.append(cardInstruction(
-                from: .zero, to: introEnd, hasMedia: introHasMedia))
-        }
-        for seg in segments {
-            if titleS > 0 {
-                instructions.append(cardInstruction(
-                    from: seg.titleStart, to: seg.clipStart,
-                    hasMedia: seg.titleHasMedia))
+        // [clip] — FULL range, never trimmed.
+        let clipStart = titleS > 0 ? titleDur : .zero
+        try compVideo.insertTimeRange(
+            CMTimeRange(start: .zero, duration: l.duration), of: l.videoTrack, at: clipStart)
+        let clipEnd = CMTimeAdd(clipStart, l.duration)
+        if !dbg.contains("noaudio"), !muteClipAudio, let a = l.audioTrack,
+           let compAudio = composition.addMutableTrack(
+               withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            if CMTimeCompare(clipStart, .zero) > 0 {
+                compAudio.insertEmptyTimeRange(CMTimeRange(start: .zero, duration: clipStart))
             }
+            let aDur = CMTimeMinimum(l.audioRange.duration, l.duration)
+            try? compAudio.insertTimeRange(
+                CMTimeRange(start: l.audioRange.start, duration: aDur), of: a, at: clipStart)
+        }
+        // [freeze] — last frame held and faded to black (real media).
+        var freezeEnd = clipEnd
+        var freezeSize: CGSize? = nil
+        if freezeS > 0, !dbg.contains("nofreeze") {
+            let fit = min(videoW / max(l.displayedW, 1), videoH / max(l.displayedH, 1))
+            let size = CGSize(width: evenDown(l.displayedW * fit),
+                              height: evenDown(l.displayedH * fit))
+            if let frame = await lastFrameImage(asset: l.asset, duration: l.duration, maxSize: size),
+               let still = try? await makeStillAsset(
+                   image: frame, size: size, durationS: freezeS,
+                   filename: "merge_freeze_\(index).mov"),
+               let t = try? await still.loadTracks(withMediaType: .video).first,
+               (try? compVideo.insertTimeRange(
+                   CMTimeRange(start: .zero, duration: freezeDur), of: t, at: clipEnd)) != nil {
+                stillAssets.append(still)
+                freezeSize = size
+                freezeEnd = CMTimeAdd(clipEnd, freezeDur)
+            }
+            // No freeze media: the chunk just ends on the clip (a trailing
+            // empty edit would be dropped by AVFoundation anyway).
+        }
+        let totalDur = freezeEnd
+        let totalS = CMTimeGetSeconds(totalDur)
 
+        // ----- Instructions tiling [0, totalDur].
+        var instructions: [AVMutableVideoCompositionInstruction] = []
+        if titleS > 0 {
             let inst = AVMutableVideoCompositionInstruction()
-            inst.timeRange = CMTimeRange(start: seg.clipStart, end: seg.clipEnd)
+            inst.timeRange = CMTimeRange(start: .zero, end: clipStart)
+            inst.backgroundColor = UIColor.black.cgColor
+            if titleHasMedia {
+                let li = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideo)
+                li.setTransform(.identity, at: .zero)
+                inst.layerInstructions = [li]
+            }
+            instructions.append(inst)
+        }
+        do {
+            let inst = AVMutableVideoCompositionInstruction()
+            inst.timeRange = CMTimeRange(start: clipStart, end: clipEnd)
             inst.backgroundColor = UIColor.black.cgColor
             let li = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideo)
-
-            // Orient the source into the origin quadrant (same normalization
-            // as CompositeExporter), then aspect-fit + center it into the
-            // common video region at the TOP of the render canvas.
-            let l = seg.loaded
             var xform = l.preferredTransform
-            let rotated = CGRect(origin: .zero, size: l.naturalSize)
-                .applying(l.preferredTransform)
+            let rotated = CGRect(origin: .zero, size: l.naturalSize).applying(l.preferredTransform)
             xform = xform.concatenating(CGAffineTransform(
                 translationX: -rotated.origin.x, y: -rotated.origin.y))
-            let w = abs(rotated.width)
-            let h = abs(rotated.height)
+            let w = abs(rotated.width), h = abs(rotated.height)
             if w > 0, h > 0 {
                 let s = min(videoW / w, videoH / h)
                 xform = xform.concatenating(CGAffineTransform(scaleX: s, y: s))
                 xform = xform.concatenating(CGAffineTransform(
                     translationX: (videoW - w * s) / 2, y: (videoH - h * s) / 2))
             }
-            li.setTransform(xform, at: seg.clipStart)
-            li.setOpacity(1.0, at: seg.clipStart)
-            // NO fade during the clip — it plays completely unfaded ("play
-            // every movie till the end and then add phase out over 3
-            // seconds"); the fade lives on the post-clip freeze layer.
+            li.setTransform(xform, at: clipStart)
+            li.setOpacity(1.0, at: clipStart)
             inst.layerInstructions = [li]
             instructions.append(inst)
-
-            // Post-clip freeze region. With freeze media inserted, the held
-            // frame is composited from the track and faded by a native
-            // opacity ramp; without it the segment is plain black.
-            if freezeS > 0 {
-                let freeze = AVMutableVideoCompositionInstruction()
-                freeze.timeRange = CMTimeRange(start: seg.clipEnd, end: seg.freezeEnd)
-                freeze.backgroundColor = UIColor.black.cgColor
-                if let fs = seg.freezeSize {
-                    let fli = AVMutableVideoCompositionLayerInstruction(
-                        assetTrack: compVideo)
-                    // The still is written at its fitted size, so it only
-                    // needs centering in the video region at the top of the
-                    // canvas — no rotation (the frame was extracted upright).
-                    fli.setTransform(CGAffineTransform(
-                        translationX: (videoW - fs.width) / 2,
-                        y: (videoH - fs.height) / 2), at: seg.clipEnd)
-                    fli.setOpacityRamp(
-                        fromStartOpacity: 1.0, toEndOpacity: 0.0,
-                        timeRange: CMTimeRange(start: seg.clipEnd, end: seg.freezeEnd))
-                    freeze.layerInstructions = [fli]
-                } else {
-                    freeze.layerInstructions = []
-                }
-                instructions.append(freeze)
-            }
+        }
+        if let fs = freezeSize {
+            let freeze = AVMutableVideoCompositionInstruction()
+            freeze.timeRange = CMTimeRange(start: clipEnd, end: freezeEnd)
+            freeze.backgroundColor = UIColor.black.cgColor
+            let fli = AVMutableVideoCompositionLayerInstruction(assetTrack: compVideo)
+            fli.setTransform(CGAffineTransform(
+                translationX: (videoW - fs.width) / 2, y: (videoH - fs.height) / 2), at: clipEnd)
+            fli.setOpacityRamp(fromStartOpacity: 1.0, toEndOpacity: 0.0,
+                               timeRange: CMTimeRange(start: clipEnd, end: freezeEnd))
+            freeze.layerInstructions = [fli]
+            instructions.append(freeze)
         }
 
-        // Outro instruction: the logo is drawn INTO the outro still, so an
-        // identity layer instruction is all it needs.
-        if outroSecs > 0, CMTimeCompare(totalDur, outroStart) > 0 {
-            instructions.append(cardInstruction(
-                from: outroStart, to: totalDur, hasMedia: outroHasMedia))
-        }
-
-        // ----- CALayer tree: ONLY the per-clip panel stacks. Intro, title
-        // cards, freeze frames and the outro are all real media now — see
-        // the composition loop for why (layer contents stay resident for
-        // the whole export and sink long merges). A plain merge therefore
-        // ends up with an EMPTY tree, and the animation tool is skipped
-        // entirely below.
+        // ----- Panel stack for THIS clip only (CA tool attached only then).
         let parentLayer = CALayer()
         parentLayer.frame = CGRect(origin: .zero, size: outputSize)
         parentLayer.backgroundColor = UIColor.black.cgColor
         let videoLayer = CALayer()
-        videoLayer.frame = parentLayer.frame   // FULL parent — no inner letterbox
+        videoLayer.frame = parentLayer.frame
         parentLayer.addSublayer(videoLayer)
-
-        for seg in segments {
-            let clipStartS = CMTimeGetSeconds(seg.clipStart)
-            let clipEndS = CMTimeGetSeconds(seg.clipEnd)
+        if !panelKinds.isEmpty, let inputs = l.spec.panelInputs {
+            let clipStartS = CMTimeGetSeconds(clipStart)
+            let clipEndS = CMTimeGetSeconds(clipEnd)
             let clipDurS = max(clipEndS - clipStartS, 0.001)
-
-            // Panel stack for this clip (only when sensor data was selected).
-            guard !panelKinds.isEmpty, let inputs = seg.loaded.spec.panelInputs else {
-                continue
-            }
             let container = CALayer()
             container.frame = parentLayer.frame
             gateOpacity(container, fromS: clipStartS, toS: clipEndS, totalS: totalS)
             for (slot, kind) in panelKinds.enumerated() {
                 let panel = CALayer()
-                // Y-up Quartz: slot 0 sits at the HIGH-Y side of the panel
-                // area — directly below the video (same as CompositeExporter).
-                let yQuartz = CGFloat(panelKinds.count - 1 - slot)
-                    * CompositeExporter.panelHeight
-                panel.frame = CGRect(
-                    origin: CGPoint(x: 0, y: yQuartz), size: panelSize)
+                let yQuartz = CGFloat(panelKinds.count - 1 - slot) * CompositeExporter.panelHeight
+                panel.frame = CGRect(origin: CGPoint(x: 0, y: yQuartz), size: panelSize)
                 panel.isGeometryFlipped = true
                 panel.contents = CompositeExporter.renderPanelImage(
                     index: kind.rawValue, size: panelSize, inputs: inputs)
                 panel.contentsGravity = .resize
-
-                // Cursor sweep / GPS dot + live labels only when this clip's
-                // slice actually has the series (a clip outside the session
-                // window shows the empty panel frame — no crash, no cursor).
                 if kindHasData(kind, inputs) {
                     if kind != .gpsTrack {
                         let cursorLayer = CAShapeLayer()
@@ -634,8 +687,7 @@ enum MergeExporter {
                         cursorLayer.path = path
                         let (values, keyTimes) = CompositeExporter.sweepCursorValues(
                             panelIndex: kind.rawValue, durationS: clipDurS,
-                            panelWidth: videoW, inputs: inputs
-                        )
+                            panelWidth: videoW, inputs: inputs)
                         let anim = CAKeyframeAnimation(keyPath: "transform.translation.x")
                         anim.values = values
                         anim.keyTimes = keyTimes.map { NSNumber(value: $0) }
@@ -648,20 +700,15 @@ enum MergeExporter {
                     } else {
                         let dotR: CGFloat = 14
                         let dot = CAShapeLayer()
-                        dot.frame = CGRect(
-                            x: -dotR, y: -dotR, width: dotR * 2, height: dotR * 2)
+                        dot.frame = CGRect(x: -dotR, y: -dotR, width: dotR * 2, height: dotR * 2)
                         dot.path = CGPath(
                             ellipseIn: CGRect(x: 0, y: 0, width: dotR * 2, height: dotR * 2),
-                            transform: nil
-                        )
+                            transform: nil)
                         dot.fillColor = UIColor.systemRed.cgColor
                         let (xs, ys, keyTimes) = CompositeExporter.gpsDotValues(
-                            durationS: clipDurS, panelSize: panelSize, inputs: inputs
-                        )
+                            durationS: clipDurS, panelSize: panelSize, inputs: inputs)
                         let anim = CAKeyframeAnimation(keyPath: "position")
-                        anim.values = zip(xs, ys).map { x, y in
-                            NSValue(cgPoint: CGPoint(x: x, y: y))
-                        }
+                        anim.values = zip(xs, ys).map { NSValue(cgPoint: CGPoint(x: $0, y: $1)) }
                         anim.keyTimes = keyTimes.map { NSNumber(value: $0) }
                         anim.duration = clipDurS
                         anim.beginTime = AVCoreAnimationBeginTimeAtZero + clipStartS
@@ -672,9 +719,7 @@ enum MergeExporter {
                     }
                     if let live = CompositeExporter.makeLiveValueLayer(
                         panelIndex: kind.rawValue, panelSize: panelSize,
-                        durationS: clipDurS, inputs: inputs,
-                        beginOffsetS: clipStartS
-                    ) {
+                        durationS: clipDurS, inputs: inputs, beginOffsetS: clipStartS) {
                         panel.addSublayer(live)
                     }
                 }
@@ -683,87 +728,57 @@ enum MergeExporter {
             parentLayer.addSublayer(container)
         }
 
-        // ----- Video composition + export
         let videoComp = AVMutableVideoComposition()
         videoComp.renderSize = outputSize
         videoComp.frameDuration = CMTime(value: 1, timescale: 30)
-        // Force an SDR (Rec.709) rendering path. iPhone camera clips are
-        // 10-bit HDR (Dolby Vision / HLG, BT.2020); letting the composition
-        // infer HDR color properties while a CoreAnimation overlay tool is
-        // attached makes AVAssetExportSession fail (-11800 / OSStatus
-        // -12780). Rec.709 output also keeps a mixed SDR+HDR clip list
-        // uniform in the merged film.
         if !dbg.contains("nosdr") {
             videoComp.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
             videoComp.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
             videoComp.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
         }
-        // Attach the CoreAnimation tool ONLY when there is something in the
-        // tree (i.e. sensor panels). A plain merge now renders every card
-        // from media, so it skips the tool altogether — the configuration
-        // that survived a 441 s / 30-clip export on device while every
-        // layer-tree variant was interrupted at 25–80 %.
         if !dbg.contains("noca"), parentLayer.sublayers?.count ?? 0 > 1 {
             videoComp.animationTool = AVVideoCompositionCoreAnimationTool(
-                postProcessingAsVideoLayer: videoLayer, in: parentLayer
-            )
+                postProcessingAsVideoLayer: videoLayer, in: parentLayer)
         }
         videoComp.instructions = instructions
 
-        if FileManager.default.fileExists(atPath: outputURL.path) {
-            try? FileManager.default.removeItem(at: outputURL)
-        }
+        // Write to `.part`, rename on success — see `chunkIsComplete`.
+        let partURL = chunkURL.appendingPathExtension("part")
+        try? FileManager.default.removeItem(at: partURL)
+        try? FileManager.default.removeItem(at: chunkURL)
         guard let session = AVAssetExportSession(
             asset: composition, presetName: AVAssetExportPresetHighestQuality
-        ) else {
-            throw MergeExportError.exportFailed("could not create export session")
-        }
-        session.outputURL = outputURL
+        ) else { throw MergeExportError.exportFailed("could not create export session") }
+        session.outputURL = partURL
         session.outputFileType = .mov
-        if !dbg.contains("novc") {
-            session.videoComposition = videoComp
-        }
-        session.shouldOptimizeForNetworkUse = true
-        // Stamp the film with the EARLIEST clip's capture date. Without it
-        // the merged .mov has no creation_time at all, so re-picking it
-        // (e.g. merging yesterday's films into a bigger one) lands in the
-        // "no capture date — using file date" fallback.
-        if let earliest = clips.map({ $0.startEpochMs }).filter({ $0 > 0 }).min() {
-            session.metadata = CompositeExporter.creationDateMetadata(epochMs: earliest)
-        }
-        // Background-music level + fades ride here (nil when no track picked).
-        if let musicMix { session.audioMix = musicMix }
-
-        progress(0.03)
+        if !dbg.contains("novc") { session.videoComposition = videoComp }
         let poller = CompositeExporter.ProgressPoller(session: session) { p in
-            progress(0.03 + 0.97 * max(0, min(p, 1)))
+            progress(max(0, min(p, 1)))
         }
         poller.start()
         await session.export()
         poller.stop()
-
         switch session.status {
         case .completed:
-            progress(1.0)
+            try FileManager.default.moveItem(at: partURL, to: chunkURL)
         case .failed:
-            // Surface the FULL failure identity — AVFoundation's
-            // localizedDescription alone ("The operation could not be
-            // completed") is undiagnosable from a user bug report. Append
-            // the NSError domain+code+underlying chain, plus the video
-            // composition's own validation findings when it is the culprit.
+            try? FileManager.default.removeItem(at: partURL)
             var detail = describeError(session.error)
                 + CompositeExporter.interruptedHint(session.error)
             let findings = validationFindings(videoComp, for: composition)
             if !findings.isEmpty {
                 detail += " · composition invalid: " + findings.joined(separator: "; ")
             }
-            throw MergeExportError.exportFailed(detail)
+            throw MergeExportError.exportFailed("clip \(index + 1): " + detail)
         case .cancelled:
+            try? FileManager.default.removeItem(at: partURL)
             throw MergeExportError.exportFailed("cancelled")
         default:
+            try? FileManager.default.removeItem(at: partURL)
             throw MergeExportError.exportFailed("status \(session.status.rawValue)")
         }
     }
+
 
     private static func describeError(_ error: Error?) -> String {
         guard let error else { return "unknown" }

@@ -320,6 +320,33 @@ helpers, opacity-gated per segment).
   its own `musicAssets` array (weak `AVAssetTrack.asset` trap) but its file is
   the USER's — never deleted (unlike the generated `stillAssets`). A track that
   won't decode is skipped silently — background music never fails the merge.
+- **Chunked, resumable render (v1.0.65).** iOS revokes the GPU from a
+  backgrounded app, so an export carrying a video composition is
+  interrupted (-11847) the moment the user switches to WhatsApp — and
+  before, the whole film was ONE session, so every rendered minute was
+  lost ("the merge process is gone and I have to start from 0"). No
+  crash/jetsam report existed for the app; it was purely the session
+  dying. `MergeExporter.export` is now two-phase: `renderChunk` renders
+  each clip — [title][clip][freeze-fade] + its own panel stack, at the
+  full canvas — into `Library/Caches/MergeWork/seg_<fnv1a key>.mov`
+  (written as `.part`, renamed on success, so a truncated chunk never
+  passes `chunkIsComplete`; key = clip name + capture time + duration +
+  render settings, NOT the tmp path, which changes per PhotosPicker
+  import). Existing chunks are skipped, so a re-run continues from the
+  last finished clip. The assembly pass stitches intro + chunks + outro
+  (+ looped music/audio mix) with NO video composition (cards are padded
+  to the full canvas via `padToCanvas`), deletes the chunks on success.
+  `MergeViewModel` flags an interrupted error as `resumePending` and
+  `continueIfPending` re-runs the merge on `didBecomeActive` (hooked in
+  `MergeScreen`) — the bar simply carries on when the user returns; a
+  "Continue merge" button is the manual twin. Peak memory also drops to
+  one clip's sources at a time. **No iOS app may render video in the
+  background** (no background mode for it, ~30 s grace) — the time away
+  is paused, never worked; this is the closest achievable behaviour.
+  Stale chunks (>3 days or `.part`) are swept at cold launch
+  (`sweepChunkWorkDir`, from `sweepTmpVideos`). Verified on device with
+  `MERGE_SELFTEST` over the 14 `clip*` files: 143 s film, decodes clean,
+  `MergeWork` empty afterwards.
 - **Picker STOPS at 2 GB (v1.0.64).** The v1.0.63 warning was not enough
   ("I could select 100 videos and the output file was 3.2 GB"). Each clip
   now gets its own `estBytes` (AVFoundation estimate, taken in `addClips`),
