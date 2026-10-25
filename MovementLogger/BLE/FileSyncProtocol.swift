@@ -129,6 +129,12 @@ enum FileSyncProtocol {
     static let statusNotFound: UInt8 = 0xE1
     static let statusIOError: UInt8 = 0xE2
     static let statusBadRequest: UInt8 = 0xE3
+    /// Firmware v0.0.70+: an SD-writing op (DELETE / START_LOG / SET_MODE /
+    /// CAL_SET) was refused because a USB host has the card mounted.
+    /// Only replies to writes — deliberately not in `isStatusByte`.
+    static let statusSdUsb: UInt8 = 0xE8
+    /// Firmware v0.0.70+: same, refused by the low-battery SD lock.
+    static let statusSdLowBat: UInt8 = 0xE9
 
     // Firmware-update status bytes (in single-byte FW_* error notifies).
     /// FW_COMMIT success: image verified, box is swapping banks + resetting.
@@ -154,6 +160,8 @@ enum FileSyncProtocol {
         case statusNotFound: return "NOT_FOUND"
         case statusIOError: return "IO_ERROR"
         case statusBadRequest: return "BAD_REQUEST"
+        case statusSdUsb: return "SD card is mounted over USB — eject it on the computer (or unplug USB-C), then retry"
+        case statusSdLowBat: return "battery too low — SD writes are locked, charge the box via USB-C"
         default: return "unknown error"
         }
     }

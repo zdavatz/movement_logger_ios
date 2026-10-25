@@ -1030,7 +1030,13 @@ final class BleClient: NSObject {
         // FileData path — drive the in-flight op's state machine.
         switch op {
         case .idle:
-            break  // stray notify between ops — harmless
+            // Stray notify between ops — harmless, except the v0.0.70
+            // SD-refusal byte for a fire-and-forget START_LOG: "eject the
+            // USB drive" / "battery lock" must reach the user.
+            if data.count == 1, let b = data.first,
+               b == FileSyncProtocol.statusSdUsb || b == FileSyncProtocol.statusSdLowBat {
+                emitErr(FileSyncProtocol.statusMessage(b))
+            }
         case .listing:
             handleListNotify(data)
         case .reading:
