@@ -633,8 +633,11 @@ private struct FileRow: View {
         let queued = vm.queuedDownloads.contains(file.name)
         let savedPath = vm.savedPaths[file.name]
         let deleteReason = deleteUnsupported(file.name)
-        // Fully downloaded = local mirror has at least the box's size.
-        let downloaded = file.size > 0 && (vm.localBytes[file.name] ?? 0) >= file.size
+        // Fully downloaded = local mirror is exactly the box's size. A
+        // LARGER local copy is a stale mirror of an older file with the
+        // same name (ERRLOG.LOG deleted on the box and recreated) —
+        // offer Download, which `mirrorOffset` turns into drop + refetch.
+        let downloaded = file.size > 0 && (vm.localBytes[file.name] ?? 0) == file.size
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading) {
