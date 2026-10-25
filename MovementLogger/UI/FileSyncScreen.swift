@@ -781,7 +781,7 @@ struct DownloadedFileViewer: View {
             defer { try? h.close() }
             let bytes = (try? h.read(upToCount: cap)) ?? Data()
             let didTruncate = Int64(bytes.count) < size
-            if !bytes.contains(0x00), let s = String(data: bytes, encoding: .utf8) {
+            if let s = textPreview(bytes, truncated: didTruncate) {
                 return (size, s, true, didTruncate)
             }
             return (size, "", false, false)
@@ -792,6 +792,34 @@ struct DownloadedFileViewer: View {
         truncated = result.3
         loading = false
     }
+}
+
+/// Decode a preview chunk as text, or nil if it is genuinely binary.
+///
+/// The old check (`!contains(0x00)` + strict UTF-8) called a whole file
+/// "binary" for one bad byte: an ERRLOG.LOG with a cross-linked cluster
+/// (a corrupted card stitched 72 KB of FAT directory entries into it) and,
+/// worse, ANY log whose 48 KB preview cut happened to split a multi-byte
+/// character such as the "—" the firmware writes in many lines. Now: drop
+/// a partial character at the cut, call it binary only when >10 % of the
+/// bytes are non-whitespace control bytes or invalid UTF-8 (a damaged log
+/// scores ~3 %, PCM/WAV ~75 %), and show damaged spots instead of hiding
+/// the file — invalid bytes as "�", NUL as "␀".
+fileprivate func textPreview(_ data: Data, truncated: Bool) -> String? {
+    var bytes = [UInt8](data)
+    if truncated, let lead = bytes.lastIndex(where: { $0 & 0xC0 != 0x80 }),
+       bytes[lead] >= 0xC0 {
+        let need = bytes[lead] >= 0xF0 ? 4 : bytes[lead] >= 0xE0 ? 3 : 2
+        if bytes.count - lead < need { bytes.removeSubrange(lead...) }
+    }
+    guard !bytes.isEmpty else { return "" }
+    let control = bytes.reduce(0) { n, b in
+        n + ((b < 0x20 && b != 0x09 && b != 0x0A && b != 0x0D) ? 1 : 0)
+    }
+    let text = String(decoding: bytes, as: UTF8.self)
+    let invalid = text.unicodeScalars.reduce(0) { $0 + ($1 == "\u{FFFD}" ? 1 : 0) }
+    if (control + invalid) * 10 > bytes.count { return nil }
+    return text.replacingOccurrences(of: "\u{0}", with: "\u{2400}")
 }
 
 // MARK: - Log
