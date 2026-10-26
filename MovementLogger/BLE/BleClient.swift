@@ -69,6 +69,13 @@ final class BleClient: NSObject {
     /// Reset on disconnect; keeps `onCharacteristicsDiscovered` idempotent.
     private var battSubscribeKicked: Bool = false
     private var op: CurrentOp = .idle
+    /// Segmented READ (v1.0.71, desktop v0.0.83): absolute file offset where
+    /// the current READ segment ends, when it was requested, whether any byte
+    /// of it has arrived, and how often the request was re-sent.
+    private var readSegEnd: Int64 = 0
+    private var readSegRequestedAt: Int64 = 0
+    private var readSegGotData: Bool = false
+    private var readSegResends: Int = 0
     private var scanning: Bool = false
     /// Monotonic deadline (`now()` clock, ms) until which file commands must
     /// hold off because the box is still digesting a SET_TIME. The firmware
@@ -412,10 +419,17 @@ final class BleClient: NSObject {
         if emitEvent { emit(.disconnected) }
     }
 
-    private func writeCmdBytes(_ payload: Data) -> Bool {
+    /// `confirmed`: ATT write-with-response when the characteristic allows it.
+    /// CoreBluetooth silently drops a write-without-response while its queue
+    /// is busy (`canSendWriteWithoutResponse == false`) — for a READ request
+    /// that is a 20 s stall and a reconnect. The confirmed write is
+    /// link-layer acknowledged, so the box's chip has it.
+    private func writeCmdBytes(_ payload: Data, confirmed: Bool = false) -> Bool {
         guard let p = peripheral else { emitErr("not connected"); return false }
         guard let c = cmdChar else { emitErr("FileCmd characteristic missing"); return false }
-        p.writeValue(payload, for: c, type: .withoutResponse)
+        let type: CBCharacteristicWriteType =
+            confirmed && c.properties.contains(.write) ? .withResponse : .withoutResponse
+        p.writeValue(payload, for: c, type: type)
         return true
     }
 
@@ -460,19 +474,33 @@ final class BleClient: NSObject {
         guard case .idle = op else {
             emitErr("another op is in flight — wait or Disconnect"); return
         }
-        // Opcode payload: 0x02 + name + NUL + 4-byte LE start offset.
-        // The firmware seeks to `offset` before streaming, so a resumed
-        // or grown file continues mid-file. offset is u32 on the wire —
-        // SD files are well under 4 GiB.
-        var payload = Data([FileSyncProtocol.opRead])
-        payload.append(Data(name.utf8))
-        payload.append(0x00)
-        var le = UInt32(clamping: offset).littleEndian
-        withUnsafeBytes(of: &le) { payload.append(contentsOf: $0) }
-        if !writeCmdBytes(payload) { return }
+        readSegResends = 0
+        if !requestReadSegment(name: name, from: offset, expected: size) { return }
         op = .reading(name: name, expected: size, base: offset, content: Data(),
                       lastEmit: offset, lastProgress: now(), firstPacket: true)
         emit(.readStarted(name: name, size: size))
+    }
+
+    /// One READ segment of at most `readSegmentBytes` (desktop v0.0.83).
+    /// Opcode payload: 0x02 + name + NUL + 4-byte LE start offset + 4-byte
+    /// LE length cap (box v0.0.24+). The box seeks to `from` and streams
+    /// exactly `cap` bytes. A dropped link then costs at most one segment,
+    /// and a lost request is noticed within `readResendAfterMs`.
+    @discardableResult
+    private func requestReadSegment(name: String, from: Int64, expected: Int64) -> Bool {
+        let cap = max(0, min(Self.readSegmentBytes, expected - from))
+        var payload = Data([FileSyncProtocol.opRead])
+        payload.append(Data(name.utf8))
+        payload.append(0x00)
+        var le = UInt32(clamping: from).littleEndian
+        withUnsafeBytes(of: &le) { payload.append(contentsOf: $0) }
+        var capLe = UInt32(clamping: cap).littleEndian
+        withUnsafeBytes(of: &capLe) { payload.append(contentsOf: $0) }
+        if !writeCmdBytes(payload, confirmed: true) { return false }
+        readSegEnd = from + cap
+        readSegRequestedAt = now()
+        readSegGotData = false
+        return true
     }
 
     private func sendDelete(name: String) {
@@ -1212,6 +1240,9 @@ final class BleClient: NSObject {
         // CSV/log files (which start with ASCII text, well below 0x80).
         if firstPacket, value.count == 1, FileSyncProtocol.isStatusByte(value[value.startIndex]) {
             let b = value[value.startIndex]
+            // A later segment refused: hand back what the earlier ones
+            // delivered so the mirror keeps it and resumes from there.
+            if !content.isEmpty { emit(.readAborted(name: name, content: content, base: base)) }
             emitErr("READ \(name): \(FileSyncProtocol.statusMessage(b)) " +
                 "(0x\(String(format: "%02X", b)))")
             op = .idle
@@ -1219,6 +1250,7 @@ final class BleClient: NSObject {
         }
 
         content.append(value)
+        readSegGotData = true
         // `done` is the absolute byte position in the file: the resume
         // base plus what this segment has received. EOF is the box's
         // full size, not the segment length.
@@ -1237,8 +1269,15 @@ final class BleClient: NSObject {
             emit(.readDone(name: name, content: Data(bytes), base: base))
             op = .idle
         } else {
+            // Segment complete → ask for the next one. Its first notify may
+            // again be a status byte (e.g. the file was deleted meanwhile).
+            var next = false
+            if done >= readSegEnd {
+                readSegResends = 0
+                next = requestReadSegment(name: name, from: done, expected: expected)
+            }
             op = .reading(name: name, expected: expected, base: base, content: content,
-                          lastEmit: lastEmit, lastProgress: now(), firstPacket: false)
+                          lastEmit: lastEmit, lastProgress: now(), firstPacket: next)
         }
     }
 
@@ -1443,6 +1482,20 @@ final class BleClient: NSObject {
            rowsSeen > 0, n - lastProgress > Self.listInactivityDoneMs {
             op = .idle
             emit(.listDone)
+            return
+        }
+        // READ segment request lost (no byte of it after readResendAfterMs):
+        // re-send from where the data stopped. Only while nothing of the
+        // segment has arrived, so a slow-but-flowing stream is never doubled.
+        if case .reading(let name, let expected, let base, let content, let le, _, let fp) = op,
+           !readSegGotData, n - readSegRequestedAt > Self.readResendAfterMs,
+           readSegResends < Self.readResendMax {
+            readSegResends += 1
+            let from = base + Int64(content.count)
+            emitStatus("READ \(name) — no data, re-sending request @\(from) (\(readSegResends)/\(Self.readResendMax))")
+            requestReadSegment(name: name, from: from, expected: expected)
+            op = .reading(name: name, expected: expected, base: base, content: content,
+                          lastEmit: le, lastProgress: n, firstPacket: fp)
             return
         }
         // FW_DATA has a dedicated resend-on-timeout path (the box is
@@ -1665,6 +1718,13 @@ final class BleClient: NSObject {
         AgentConfig.keepSynced && AgentConfig.logModeManual != true
     }
     private static let progressChunkBytes: Int64 = 4 * 1024
+    /// READ segment length (desktop v0.0.83: 64 KB ≈ 3.5 s on air).
+    private static let readSegmentBytes: Int64 = 64 * 1024
+    /// Re-send a READ segment request when none of its bytes arrived after
+    /// this long (the box answers within one connection interval), …
+    private static let readResendAfterMs: Int64 = 3_000
+    /// … at most this often per segment; then the 20 s stall path takes over.
+    private static let readResendMax = 3
 
     // Firmware-update tunables.
     /// Emit a progress event at most every ~512 B. The box's OTA ACK path is
