@@ -741,7 +741,7 @@ final class BleClient: NSObject {
         var lenLE = UInt32(clamping: image.count).littleEndian
         withUnsafeBytes(of: &lenLE) { payload.append(contentsOf: $0) }
         payload.append(sha256)
-        if !writeCmdBytes(payload) {
+        if !writeCmdBytes(payload, confirmed: true) {
             emit(.fwUploadDone(success: false, message: "not connected"))
             return
         }
@@ -765,13 +765,16 @@ final class BleClient: NSObject {
         var offLE = UInt32(clamping: offset).littleEndian
         withUnsafeBytes(of: &offLE) { payload.append(contentsOf: $0) }
         payload.append(image[start..<end])
-        return writeCmdBytes(payload)
+        // Confirmed (v1.0.72, desktop v0.0.84): a write-without-response that
+        // CoreBluetooth drops costs a 1.5 s ACK timeout + resend — on
+        // 2026-10-26 that paced a 124 KB upload at ~360 B/s (5.7 min).
+        return writeCmdBytes(payload, confirmed: true)
     }
 
     /// FW_COMMIT — verify + swap + reset. The box drops the link right after
     /// the 0xA0 reply; the disconnect-after-commit is treated as success.
     private func sendFwCommit() {
-        if !writeCmdBytes(Data([FileSyncProtocol.opFwCommit])) {
+        if !writeCmdBytes(Data([FileSyncProtocol.opFwCommit]), confirmed: true) {
             // Lost the link before COMMIT could be written. If we'd already
             // staged the whole image the box may still commit on its own
             // timeout, but we can't know — report a clean failure.
