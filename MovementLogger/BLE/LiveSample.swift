@@ -242,8 +242,8 @@ struct LiveSample: Equatable {
 /// One decoded BatteryStatus snapshot. 8-byte packed little-endian layout
 /// (firmware `Src/battery.c`; desktop `stbox-viz-gui/src/ble.rs` BatterySample).
 /// NOTE its flags byte differs from `LiveSample`'s: here bit0 = low_batt,
-/// bit1 = logging, bit2 = sd_lowbat_lock (firmware v0.0.72+; always 0 on
-/// older firmware). 8 B is well under any MTU — single-notify only, no
+/// bit1 = logging, bit2 = sd_lowbat_lock (firmware v0.0.72+), bit3 =
+/// sd_usb_host (firmware v0.0.73+); both always 0 on older firmware. 8 B is well under any MTU — single-notify only, no
 /// chunk reassembly (unlike SensorStream).
 struct BatterySample: Equatable {
     static let wireSize: Int = 8
@@ -259,6 +259,11 @@ struct BatterySample: Equatable {
     /// bit — never derive it from `voltageMv` (hysteresis, release rule may
     /// change).
     let sdLowBatLock: Bool
+    /// flags @6 bit3 — a computer has the box's SD card mounted over USB-C
+    /// (firmware v0.0.73+). While set the box refuses every SD write
+    /// (DELETE / START_LOG / SET_MODE / CAL_SET → 0xE8 SD_USB). Notified
+    /// within ~1 s of every change and on subscribe.
+    let sdUsbHost: Bool
     // byte 7 reserved
 
     /// SoC as a 0…1 fraction for a ProgressView.
@@ -282,7 +287,8 @@ struct BatterySample: Equatable {
                 currentX100uA: Int16(littleEndian: i16(4)),
                 lowBatt:       flags & 0x01 != 0,
                 logging:       flags & 0x02 != 0,
-                sdLowBatLock:  flags & 0x04 != 0
+                sdLowBatLock:  flags & 0x04 != 0,
+                sdUsbHost:     flags & 0x08 != 0
             )
         }
     }

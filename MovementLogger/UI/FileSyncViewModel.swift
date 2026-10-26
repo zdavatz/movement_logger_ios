@@ -402,6 +402,21 @@ final class FileSyncViewModel {
     /// BAD_REQUEST). Surfaced as a dismissable banner; cleared on a
     /// successful delete, a fresh attempt, or disconnect (desktop #7).
     var deleteError: String? = nil
+    /// A failed box-control op — SET_MODE / GPS_POWER / START_LOG / CAL_SET
+    /// refused (0xE8 / 0xE9 / other status), rejected, or timed out — or one
+    /// blocked locally because a computer owns the SD card. Shown as a
+    /// dismissable banner next to the Log mode / GPS controls so a tap never
+    /// fails silently. Cleared on a fresh attempt, success, or disconnect.
+    var boxControlError: String? = nil
+    /// The GPS toggle value before the last optimistic `setGpsPower`, so a
+    /// refused / timed-out GPS_POWER can snap the toggle back.
+    private var gpsPowerBeforeSet: Bool? = nil
+
+    /// BatteryStatus flags bit3 (firmware v0.0.73+): a computer has the SD
+    /// card mounted over USB-C, so every SD write would be refused (0xE8).
+    var sdUsbHostActive: Bool {
+        connection == .connected && (latestBattery?.sdUsbHost ?? false)
+    }
     /// A transfer was cut by a link drop / stall; the partial is safe in
     /// the mirror. Drives the reconnect banner and the auto-resume on
     /// the next `.connected` (desktop v0.0.9). Persists across the
@@ -856,6 +871,13 @@ final class FileSyncViewModel {
 
     func delete(_ file: RemoteFile) {
         deleteError = nil  // clear a stale rejection on a fresh attempt
+        if sdUsbHostActive {
+            // The box would refuse with 0xE8 — and in the field that reply
+            // sometimes never arrives (20 s timeout). Say it up front.
+            deleteError = FileSyncProtocol.sdUsbHostMessage
+            logLine("DELETE \(file.name) not sent — SD card in use by a computer (USB)")
+            return
+        }
         briefOpInFlight = true
         logLine("DELETE \(file.name)")
         ble.send(.delete(name: file.name))
@@ -1074,6 +1096,12 @@ final class FileSyncViewModel {
 
     func startSession() {
         let dur = sessionDurationSeconds
+        boxControlError = nil
+        if sdUsbHostActive {
+            boxControlError = FileSyncProtocol.sdUsbHostMessage
+            logLine("START_LOG not sent — SD card in use by a computer (USB)")
+            return
+        }
         // Current firmware does not reboot on START_LOG — it opens a
         // session and auto-stops after `dur` s, the link stays up. Only
         // meaningful in manual mode (in auto the box already logs).
@@ -1084,6 +1112,12 @@ final class FileSyncViewModel {
 
     /// Persist the box log-mode and remember it locally.
     func setLogMode(_ manual: Bool) {
+        boxControlError = nil
+        if sdUsbHostActive {
+            boxControlError = FileSyncProtocol.sdUsbHostMessage
+            logLine("SET_MODE not sent — SD card in use by a computer (USB)")
+            return
+        }
         briefOpInFlight = true
         logLine("SET_MODE \(manual ? "manual" : "auto")")
         ble.send(.setLogMode(manual: manual))
@@ -1095,7 +1129,11 @@ final class FileSyncViewModel {
     /// the optimistic value stays (harmless — the write was ignored, but the
     /// user sees their intent; a reconnect + GET would correct a wrong guess).
     func setGpsPower(_ on: Bool) {
+        // Not gated on the USB/SD bit: the firmware records the choice and
+        // applies it regardless (GPS_POWER is not an SD-refused op).
+        boxControlError = nil
         briefOpInFlight = true
+        gpsPowerBeforeSet = gpsPowerOn
         gpsPowerOn = on
         logLine("GPS_POWER \(on ? "on" : "off")")
         ble.send(.setGpsPower(on: on))
@@ -1233,6 +1271,13 @@ final class FileSyncViewModel {
     /// reset) do.
     private func pushCalToBox(_ input: Calibration.EncodeInput) {
         guard connection == .connected, !reconnecting else { return }
+        if sdUsbHostActive {
+            // Local calibration still applies; the box copy can't be saved.
+            boxControlError = FileSyncProtocol.sdUsbHostMessage +
+                " (calibration kept on this phone only)"
+            logLine("CAL_SET not sent — SD card in use by a computer (USB)")
+            return
+        }
         let blob = Calibration.encode(input)
         ble.send(.setCalibration(blob: blob))
     }
@@ -1250,8 +1295,16 @@ final class FileSyncViewModel {
     private func onEvent(_ e: BleEvent) {
         switch e {
         case .status(let msg): logLine(msg)
-        case .error(let msg):
-            logLine("ERROR: \(msg)")
+        case .error(let rawMsg):
+            // A DELETE / SET_MODE that times out while the box reports its
+            // card mounted over USB is the 0xE8 refusal that never arrived —
+            // say what to do instead of the bare timeout.
+            var msg = rawMsg
+            if latestBattery?.sdUsbHost == true, rawMsg.contains("timed out"),
+               rawMsg.hasPrefix("DELETE ") || rawMsg.hasPrefix("SET_MODE") {
+                msg = FileSyncProtocol.sdUsbHostMessage
+            }
+            logLine("ERROR: \(rawMsg)")
             // Any op that ended in an error releases the brief-op guard
             // (DELETE / mode-query aborts all surface here).
             briefOpInFlight = false
@@ -1259,8 +1312,23 @@ final class FileSyncViewModel {
             // some Debug rows (8.3-name miss → NOT_FOUND, >15 chars →
             // BAD_REQUEST, logging active → BUSY). Without this it only
             // hits the log and looks like the tap did nothing (#7).
-            if msg.hasPrefix("DELETE ") {
+            if rawMsg.hasPrefix("DELETE ") {
                 deleteError = msg
+            }
+            // Box-control failures (refusal / rejection / timeout) — before
+            // this they only reached the log, so a tap on Auto/Manual or
+            // GPS On/Off on a refusing box looked like nothing happened.
+            // GET_* timeouts stay log-only (expected on legacy firmware).
+            if rawMsg.hasPrefix("SET_MODE") || rawMsg.hasPrefix("START_LOG")
+                || rawMsg.hasPrefix("CAL_SET") || rawMsg.hasPrefix("GPS_POWER") {
+                boxControlError = msg
+            }
+            if rawMsg.hasPrefix("GPS_POWER") {
+                // Snap the optimistic toggle back to what the box last had.
+                gpsPowerOn = gpsPowerBeforeSet
+            }
+            if rawMsg.hasPrefix("START_LOG") {
+                sessionRunning = nil  // the box never opened the session
             }
             // "another op is in flight" means the BLE worker rejected
             // the command BEFORE dispatching — the in-flight op (a
@@ -1414,6 +1482,7 @@ final class FileSyncViewModel {
             if gpsSurveyActive { gps.stop() }
             connectedBoxId = nil
             deleteError = nil
+            boxControlError = nil
             briefOpInFlight = false
             gpsPowerQueryPending = false
             calibrationQueryPending = false
@@ -1582,6 +1651,17 @@ final class FileSyncViewModel {
                 logLine(b.sdLowBatLock
                         ? String(format: "box battery lock ON (%.2f V) — recording + GPS paused, SD writes refused", b.volts)
                         : String(format: "box battery lock released (%.2f V)", b.volts))
+            }
+            if b.sdUsbHost != (latestBattery?.sdUsbHost ?? false) {
+                logLine(b.sdUsbHost
+                        ? "box SD card in use by a computer (USB) — SD writes refused, unplug USB-C"
+                        : "box SD card released by the computer")
+                if !b.sdUsbHost {
+                    if deleteError == FileSyncProtocol.sdUsbHostMessage { deleteError = nil }
+                    if boxControlError?.hasPrefix(FileSyncProtocol.sdUsbHostMessage) == true {
+                        boxControlError = nil
+                    }
+                }
             }
             latestBattery = b
             latestBatteryAt = Date()

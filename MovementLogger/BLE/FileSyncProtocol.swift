@@ -150,6 +150,10 @@ enum FileSyncProtocol {
     /// FW_COMMIT: fewer bytes staged than `image_len` (short image).
     static let fwBadSeq: UInt8 = 0xE7
 
+    /// Shown when an SD-writing op is blocked because a computer has the
+    /// card mounted over USB-C (0xE8 reply, or BatteryStatus flags bit3).
+    static let sdUsbHostMessage = "Unplug USB-C — the box's SD card is in use by a computer"
+
     static func isStatusByte(_ b: UInt8) -> Bool {
         b == statusBusy || b == statusNotFound || b == statusIOError || b == statusBadRequest
     }
@@ -160,7 +164,7 @@ enum FileSyncProtocol {
         case statusNotFound: return "NOT_FOUND"
         case statusIOError: return "IO_ERROR"
         case statusBadRequest: return "BAD_REQUEST"
-        case statusSdUsb: return "SD card is mounted over USB — eject it on the computer (or unplug USB-C), then retry"
+        case statusSdUsb: return FileSyncProtocol.sdUsbHostMessage + " (or eject it in Finder), then retry"
         case statusSdLowBat: return "Battery lock: the box refuses SD writes while the battery is low. Charge the box (until about 3.7 V), then retry"
         default: return "unknown error"
         }

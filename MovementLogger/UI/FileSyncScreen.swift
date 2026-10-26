@@ -17,6 +17,9 @@ struct FileSyncScreen: View {
                         SessionBanner(running: s, onCleared: vm.clearSession)
                     }
                     ConnectionBar(vm: vm)
+                    if vm.connection == .connected, let b = vm.latestBattery, b.sdUsbHost {
+                        UsbHostBanner()
+                    }
                     if vm.connection == .connected, let b = vm.latestBattery, b.sdLowBatLock {
                         BatteryLockBanner(volts: b.volts)
                     }
@@ -137,6 +140,9 @@ private struct ConnectionBar: View {
                         bytesDone: vm.syncCumulativeBytes,
                         bytesTotal: vm.syncPassTotalBytes,
                         fraction: vm.syncCumulativeFraction)
+                }
+                if let err = vm.boxControlError {
+                    DeleteErrorBanner(message: err) { vm.boxControlError = nil }
                 }
                 LogModeSelector(vm: vm)
                 if vm.logModeManual == true {
@@ -612,7 +618,31 @@ struct BatteryLockBanner: View {
     }
 }
 
-/// Prominent dismissable banner for a DELETE the box rejected (BUSY /
+/// Amber, non-dismissable banner shown while a computer has the box's SD
+/// card mounted over USB-C (BatteryStatus flags bit3, firmware v0.0.73+).
+/// The box refuses every SD write then (0xE8). Notified within ~1 s of each
+/// change, so it appears/clears live; clears on disconnect
+/// (`latestBattery = nil`). Shared with the Live tab.
+struct UsbHostBanner: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("🔌 SD card in use by a computer")
+                .font(.footnote.weight(.semibold))
+            Text("Unplug USB-C to delete files or change the log mode. Live data and download keep working.")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(Color(red: 0.67, green: 0.12, blue: 0.12))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(red: 1.0, green: 0.90, blue: 0.90),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(Color(red: 0.78, green: 0.31, blue: 0.31), lineWidth: 1))
+    }
+}
+
+/// Prominent dismissable banner for a DELETE (or box-control op) the box rejected (BUSY /
 /// NOT_FOUND / IO_ERROR / BAD_REQUEST). Port of the desktop's
 /// `ble_delete_err` frame (v0.0.10) — without it a rejected delete only
 /// shows in the log and looks like the tap did nothing.

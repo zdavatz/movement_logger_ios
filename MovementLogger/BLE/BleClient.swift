@@ -1035,7 +1035,7 @@ final class BleClient: NSObject {
             // USB drive" / "battery lock" must reach the user.
             if data.count == 1, let b = data.first,
                b == FileSyncProtocol.statusSdUsb || b == FileSyncProtocol.statusSdLowBat {
-                emitErr(FileSyncProtocol.statusMessage(b))
+                emitErr("START_LOG: \(FileSyncProtocol.statusMessage(b))")
             }
         case .listing:
             handleListNotify(data)
