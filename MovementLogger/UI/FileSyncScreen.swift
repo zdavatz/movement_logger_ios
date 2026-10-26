@@ -17,6 +17,9 @@ struct FileSyncScreen: View {
                         SessionBanner(running: s, onCleared: vm.clearSession)
                     }
                     ConnectionBar(vm: vm)
+                    if vm.connection == .connected, let b = vm.latestBattery, b.sdLowBatLock {
+                        BatteryLockBanner(volts: b.volts)
+                    }
                     if vm.connection == .connected, let rel = vm.firmwareUpdateAvailable {
                         FirmwareUpdateBanner(
                             version: rel.version,
@@ -581,6 +584,31 @@ private struct TransferInterruptedBanner: View {
                         in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10)
                 .stroke(Color(red: 0.85, green: 0.65, blue: 0.20), lineWidth: 1))
+    }
+}
+
+/// Red, non-dismissable banner shown while the connected box reports the
+/// low-battery SD lock (BatteryStatus flags bit2, firmware v0.0.72+). The box
+/// notifies the moment the bit flips, so the banner appears/clears live; it
+/// also clears on disconnect (`latestBattery = nil`). Shared with the Live tab.
+struct BatteryLockBanner: View {
+    let volts: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(String(format: "🔋 Battery lock (%.2f V)", volts))
+                .font(.footnote.weight(.semibold))
+            Text("Recording and GPS paused, SD writes refused. Charge the box (until about 3.7 V) — in AUTO mode logging then resumes by itself.")
+                .font(.footnote)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .foregroundStyle(Color(red: 0.67, green: 0.12, blue: 0.12))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(red: 1.0, green: 0.90, blue: 0.90),
+                    in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .stroke(Color(red: 0.78, green: 0.31, blue: 0.31), lineWidth: 1))
     }
 }
 

@@ -242,7 +242,8 @@ struct LiveSample: Equatable {
 /// One decoded BatteryStatus snapshot. 8-byte packed little-endian layout
 /// (firmware `Src/battery.c`; desktop `stbox-viz-gui/src/ble.rs` BatterySample).
 /// NOTE its flags byte differs from `LiveSample`'s: here bit0 = low_batt,
-/// bit1 = logging. 8 B is well under any MTU — single-notify only, no
+/// bit1 = logging, bit2 = sd_lowbat_lock (firmware v0.0.72+; always 0 on
+/// older firmware). 8 B is well under any MTU — single-notify only, no
 /// chunk reassembly (unlike SensorStream).
 struct BatterySample: Equatable {
     static let wireSize: Int = 8
@@ -252,6 +253,12 @@ struct BatterySample: Equatable {
     let currentX100uA: Int16   // @4  signed: + charging / − draining
     let lowBatt: Bool          // flags @6 bit0 (raised at SoC < 10 %)
     let logging: Bool          // flags @6 bit1
+    /// flags @6 bit2 — low-battery SD lock (firmware v0.0.72+). While set the
+    /// box has closed its session, put the GPS into backup and refuses every
+    /// SD write (0xE9 SD_LOWBAT) until the cell recovers (charging). Read the
+    /// bit — never derive it from `voltageMv` (hysteresis, release rule may
+    /// change).
+    let sdLowBatLock: Bool
     // byte 7 reserved
 
     /// SoC as a 0…1 fraction for a ProgressView.
@@ -274,7 +281,8 @@ struct BatterySample: Equatable {
                 socX10:        UInt16(littleEndian: u16(2)),
                 currentX100uA: Int16(littleEndian: i16(4)),
                 lowBatt:       flags & 0x01 != 0,
-                logging:       flags & 0x02 != 0
+                logging:       flags & 0x02 != 0,
+                sdLowBatLock:  flags & 0x04 != 0
             )
         }
     }

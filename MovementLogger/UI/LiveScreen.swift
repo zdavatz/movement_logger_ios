@@ -27,6 +27,9 @@ struct LiveScreen: View {
                     if vm.connection != .connected {
                         notConnectedView
                     } else {
+                        if let b = vm.latestBattery, b.sdLowBatLock {
+                            BatteryLockBanner(volts: b.volts)
+                        }
                         FreshnessStrip(live: vm.live)
                         Divider()
                         if let sample = vm.live.latestSample {

@@ -1578,6 +1578,11 @@ final class FileSyncViewModel {
         case .sample(let s):
             onSample(s)
         case .battery(let b):
+            if b.sdLowBatLock != (latestBattery?.sdLowBatLock ?? false) {
+                logLine(b.sdLowBatLock
+                        ? String(format: "box battery lock ON (%.2f V) — recording + GPS paused, SD writes refused", b.volts)
+                        : String(format: "box battery lock released (%.2f V)", b.volts))
+            }
             latestBattery = b
             latestBatteryAt = Date()
         case .fwUploadStarted(let total):

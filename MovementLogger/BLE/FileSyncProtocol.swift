@@ -161,7 +161,7 @@ enum FileSyncProtocol {
         case statusIOError: return "IO_ERROR"
         case statusBadRequest: return "BAD_REQUEST"
         case statusSdUsb: return "SD card is mounted over USB — eject it on the computer (or unplug USB-C), then retry"
-        case statusSdLowBat: return "battery too low — SD writes are locked, charge the box via USB-C"
+        case statusSdLowBat: return "Battery lock: the box refuses SD writes while the battery is low. Charge the box (until about 3.7 V), then retry"
         default: return "unknown error"
         }
     }
