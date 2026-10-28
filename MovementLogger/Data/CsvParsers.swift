@@ -86,6 +86,16 @@ struct AccBin {
     let meanZMg: Double
 }
 
+/// Flat columns of a `Sens*` CSV from `CsvParsers.sensorColumns` — the
+/// Session view's input. `values` order: ax, ay, az (mg), gx, gy, gz (mdps),
+/// pressure (hPa).
+struct SensorColumns {
+    var ticks: [Double] = []
+    var values: [[Float]] = Array(repeating: [], count: 7)
+    var anchors: [SyncAnchor] = []
+    var count: Int { ticks.count }
+}
+
 enum CsvParsers {
 
     static func parseSensorFile(_ url: URL) throws -> [SensorRow] {
@@ -171,6 +181,93 @@ enum CsvParsers {
             return AccBin(bin: bin, n: Int(a.n),
                           meanXMg: a.x / a.n, meanYMg: a.y / a.n, meanZMg: a.z / a.n)
         }
+    }
+
+    /// Column-oriented sensor parse for million-row files (the Session view:
+    /// 100 Hz × 3 h ≈ 1 M rows). Same raw-byte walk as `accBins` — no `String`
+    /// per line or field — keeping only the columns the Session charts need,
+    /// as flat arrays (`Float` values: a `[SensorRow]` of 1 M rows is ~100 MB,
+    /// these ~35 MB). Ticks use the same 10 ms unit as `parseSensorText`. The
+    /// `# SYNC` comment lines are handed back through `parseSyncAnchors`, so
+    /// the file is read exactly once. `progress` gets the parsed fraction
+    /// 0…1 about every 2 MB.
+    static func sensorColumns(fromSensorFile url: URL,
+                              progress: ((Double) -> Void)? = nil) throws -> SensorColumns {
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard let headerEnd = data.firstIndex(of: 0x0A) else {
+            throw CsvParseError(message: "sensor csv: empty file")
+        }
+        let header = String(decoding: data[data.startIndex..<headerEnd], as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cols = try HeaderMap(headerLine: header)
+        let iT: Int
+        let tickDiv: Double
+        if let i = cols.idxOrNil("ms") { iT = i; tickDiv = 10.0 }
+        else { iT = try cols.idxAny("Time [10ms]", "Time [mS]"); tickDiv = 1.0 }
+        // Field order in `want` is the order of `vals` below.
+        let want = [
+            iT,
+            try cols.idxAny("AccX [mg]", "ax_mg"), try cols.idxAny("AccY [mg]", "ay_mg"),
+            try cols.idxAny("AccZ [mg]", "az_mg"),
+            try cols.idxAny("GyroX [mdps]", "gx_mdps"), try cols.idxAny("GyroY [mdps]", "gy_mdps"),
+            try cols.idxAny("GyroZ [mdps]", "gz_mdps"),
+            try cols.idxAny("P [mB]", "p_hPa"),
+        ]
+        let maxIdx = want.max()!
+        var slot = [Int](repeating: -1, count: maxIdx + 1)
+        for (k, i) in want.enumerated() { slot[i] = k }
+
+        var out = SensorColumns()
+        // ~60 bytes per compact-schema row.
+        let estimate = data.count / 55
+        out.ticks.reserveCapacity(estimate)
+        for k in 0..<7 { out.values[k].reserveCapacity(estimate) }
+        var comments = header + "\n"
+        let headerNL = data.distance(from: data.startIndex, to: headerEnd)
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return }
+            let n = raw.count
+            var vals = [Double](repeating: 0, count: want.count)
+            var nextReport = 2 << 20
+            var i = headerNL + 1
+            while i < n {
+                var lineEnd = i
+                while lineEnd < n && base[lineEnd] != 0x0A { lineEnd += 1 }
+                if i < lineEnd && base[i] == UInt8(ascii: "#") {
+                    let buf = UnsafeBufferPointer(start: base + i, count: lineEnd - i)
+                    comments += String(decoding: buf, as: UTF8.self) + "\n"
+                } else if i < lineEnd {
+                    var start = i, idx = 0, ok = true
+                    while idx <= maxIdx {
+                        var comma = start
+                        while comma < lineEnd && base[comma] != UInt8(ascii: ",") { comma += 1 }
+                        let k = slot[idx]
+                        if k >= 0 {
+                            guard let v = parseAsciiDouble(base, start, comma) else { ok = false; break }
+                            vals[k] = v
+                        }
+                        if comma >= lineEnd {
+                            if idx < maxIdx { ok = false }
+                            break
+                        }
+                        start = comma + 1
+                        idx += 1
+                    }
+                    if ok {
+                        out.ticks.append(vals[0] / tickDiv)
+                        for k in 0..<7 { out.values[k].append(Float(vals[k + 1])) }
+                    }
+                }
+                i = lineEnd + 1
+                if i >= nextReport {
+                    nextReport = i + (2 << 20)
+                    progress?(Double(i) / Double(n))
+                }
+            }
+        }
+        out.anchors = parseSyncAnchors(comments)
+        progress?(1)
+        return out
     }
 
     /// Parse an ASCII decimal (optional sign, fraction, exponent) straight from
@@ -266,6 +363,35 @@ enum CsvParsers {
         var deduped: [SyncAnchor] = []
         for a in out where deduped.last?.ticks != a.ticks { deduped.append(a) }
         return deduped
+    }
+
+    /// Map row ticks → absolute epoch ms through the firmware's host-clock
+    /// `# SYNC` anchors. Piecewise-linear between anchors (drift-free when
+    /// several connects produced markers across the session); constant
+    /// 10 ms/tick extrapolation before the first / after the last anchor.
+    /// A single anchor degenerates to a fixed 10 ms/tick offset from that
+    /// one connect — still phone-clock-correct near the connect, only
+    /// re-accumulating ThreadX drift far from it. `anchors` must be
+    /// tick-sorted + deduped (as `CsvParsers.parseSyncAnchors` returns).
+    static func absTimesFromSyncAnchors(ticks: [Double], anchors: [SyncAnchor]) -> [Int64] {
+        let n = ticks.count
+        guard n > 0, let first = anchors.first, let last = anchors.last else { return [] }
+        var out = [Int64](repeating: 0, count: n)
+        var j = 0
+        for i in 0..<n {
+            let t = ticks[i]
+            if t <= first.ticks {
+                out[i] = first.epochMs + Int64((t - first.ticks) * 10.0)
+            } else if t >= last.ticks {
+                out[i] = last.epochMs + Int64((t - last.ticks) * 10.0)
+            } else {
+                while j + 1 < anchors.count && anchors[j + 1].ticks <= t { j += 1 }
+                let a = anchors[j], b = anchors[j + 1]
+                let frac = (t - a.ticks) / (b.ticks - a.ticks)
+                out[i] = Int64(Double(a.epochMs) + Double(b.epochMs - a.epochMs) * frac)
+            }
+        }
+        return out
     }
 
     static func parseSensorText(_ text: String) throws -> [SensorRow] {

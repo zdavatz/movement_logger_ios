@@ -11,6 +11,8 @@ struct ReplayScreen: View {
     @State private var player = AVPlayer()
     @State private var playheadMs: Int64 = 0
     @State private var pickerItem: PhotosPickerItem? = nil
+    /// The video-less Session view (`SessionScreen`) for one sensor CSV.
+    @State private var session: SessionRequest? = nil
 
     var body: some View {
         NavigationStack {
@@ -37,9 +39,11 @@ struct ReplayScreen: View {
 
                     Divider()
 
-                    RecordingPicker(vm: vm) { url in
+                    RecordingPicker(vm: vm, onVideoPick: { url in
                         Task { await loadVideoFromUrl(url) }
-                    }
+                    }, onSession: { sens, gps in
+                        session = SessionRequest(sens: sens, gps: gps)
+                    })
 
                     if vm.loading {
                         InlineSpinner(label: "loading…")
@@ -95,6 +99,10 @@ struct ReplayScreen: View {
             .navigationTitle("Replay")
             .navigationBarTitleDisplayMode(.inline)
         }
+        .fullScreenCover(item: $session) { req in
+            SessionScreen(sensURL: req.sens, gpsURL: req.gps)
+        }
+        .onAppear(perform: openSessionFromEnv)
         .onChange(of: pickerItem) { _, newItem in
             guard let item = newItem else { return }
             Task {
@@ -115,10 +123,31 @@ struct ReplayScreen: View {
         }
     }
 
+    /// `OPEN_SESSION=SENS000.CSV` launch-env hook (simulator checks / store
+    /// screenshots, like `INITIAL_TAB`): opens that `Documents/` file in the
+    /// Session view on launch.
+    private func openSessionFromEnv() {
+        guard session == nil,
+              let name = ProcessInfo.processInfo.environment["OPEN_SESSION"],
+              let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        let sens = dir.appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: sens.path) else { return }
+        session = SessionRequest(sens: sens,
+                                 gps: SessionData.matchingGpsFile(for: sens, in: vm.listLocalRecordings()))
+    }
+
     private func loadVideoFromUrl(_ url: URL) async {
         await vm.pickVideo(url)
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
     }
+}
+
+/// Which files the Session view opens (`.fullScreenCover(item:)`).
+private struct SessionRequest: Identifiable {
+    let sens: URL
+    let gps: URL?
+    var id: String { sens.path }
 }
 
 // MARK: - Video surface
@@ -158,6 +187,8 @@ private struct RecordingPicker: View {
     /// Invoked when the user taps Load on a video file under Documents.
     /// The parent owns the AVPlayer so it knows how to swap clips.
     let onVideoPick: (URL) -> Void
+    /// "Session" on a sensor row: (sensor CSV, its GPS CSV if found).
+    let onSession: (URL, URL?) -> Void
     /// Cached file list so a Refresh tap (or `.onAppear` when the user
     /// switches back from Sync) can repopulate without re-launching the
     /// app. Sorted newest-first by mod date via `listLocalRecordings()`.
@@ -191,9 +222,16 @@ private struct RecordingPicker: View {
                     }
                 }
                 Text("Sensor CSV").font(.subheadline.weight(.semibold))
-                FileChooserList(files: sensorCandidates, selected: vm.sensorFile) { url in
+                Text("Session = GPS track map + sensor charts of one recording, no video needed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                FileChooserList(files: sensorCandidates, selected: vm.sensorFile, onPick: { url in
                     Task { await vm.pickSensorCsv(url) }
-                }
+                }, onSession: { url in
+                    // The matching GPSnnn for SENSnnn, else the GPS CSV
+                    // already loaded here, else sensor-only.
+                    onSession(url, SessionData.matchingGpsFile(for: url, in: gpsCandidates) ?? vm.gpsFile)
+                })
                 Text("GPS CSV").font(.subheadline.weight(.semibold))
                 FileChooserList(files: gpsCandidates, selected: vm.gpsFile) { url in
                     Task { await vm.pickGpsCsv(url) }
@@ -210,6 +248,8 @@ private struct FileChooserList: View {
     let files: [URL]
     let selected: URL?
     let onPick: (URL) -> Void
+    /// Set for sensor CSVs: adds a "Session" button to each row.
+    var onSession: ((URL) -> Void)? = nil
 
     var body: some View {
         if files.isEmpty {
@@ -229,6 +269,12 @@ private struct FileChooserList: View {
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
+                        if let onSession {
+                            Button { onSession(f) } label: {
+                                Label("Session", systemImage: "map")
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         Button(isSelected ? "Reload" : "Load") { onPick(f) }
                             .buttonStyle(.bordered)
                     }

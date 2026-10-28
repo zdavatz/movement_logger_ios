@@ -10,7 +10,7 @@ Tabs (the first three match the desktop and Android tab order; **GPS**, **Rides*
 
 - **Live** — when connected to a PumpLogger-firmware box (advertises as `STBoxFs`), renders the 0.5 Hz SensorStream snapshot: accel / gyro / mag / baro / GPS readouts + two `Canvas` sparklines (acc magnitude, pressure), topped by a **`BoardAnglesCard`** that reads the box attitude (pitch / roll / yaw in degrees, absolute + a zeroable calibration — see the *Live tab — board angles* section below). Subscription is automatic on Connect. Legacy PumpTsueri firmware doesn't expose the SensorStream characteristic — the tab stays empty with a status-line log entry.
 - **Sync** — scan / connect / LIST / READ / DELETE / SET_MODE / GET_MODE / START_LOG / SET_TIME. Auto/Manual box log-mode (firmware v0.0.7+): `GET_MODE 0x07` on connect reflects the box's persisted mode, `SET_MODE 0x06` changes it, `START_LOG 0x05 [<dur:u32-LE>]` opens a fixed-duration manual session (no reboot/disconnect — only shown in manual mode). Single-byte SET/GET replies route through a `.modeReq` op. **GPS on/off (`GpsPowerSelector`, firmware v0.0.35+):** an On/Off control next to the log-mode selector turns the box's u-blox receiver off to save battery when GPS is faulty/unused — `GPS_POWER 0x11 [<u8 on>]` (off drops the receiver into UBX-RXM-PMREQ backup, ~tens of µA vs ~25 mA; persisted on the box + re-applied at boot) and `GPS_GET_POWER 0x12` (reflects the box's persisted state on connect). Both mirror SET_MODE/GET_MODE exactly — single-byte writes whose one-byte reply routes through a `.gpsPwrReq` op (the `.modeReq` twin, same 4 s `modeReqTimeoutMs`); `handleGpsPwrNotify` decodes it, `BleEvent.gpsPower(on:)` publishes it, and `FileSyncViewModel.queryGpsPower(attempt:)` is the idle-deferred connect-time query (the same self-deferring pattern as the firmware-version query). VM state is `gpsPowerOn: Bool?` (`nil` = unknown), toggled via `setGpsPower(_:)`. The box owns the persisted state; the app only reflects + sends. With GPS off, logging (IMU + baro) keeps running and Replay still time-aligns via the `# SYNC` anchor — you lose the speed + GPS-track panels but keep pitch/roll/height. Legacy firmware (< v0.0.35) ignores 0x11/0x12 → the op times out and the toggle stays "unknown" (neither button highlights). **`SET_TIME 0x08 [<epoch_ms:u64-LE>]` (firmware v0.0.10+)** is sent on **every connect**: the box has no RTC, so the phone hands it the current wall-clock millis and the firmware stamps a `# SYNC epoch_ms=… tick_ms=…` anchor line into the open `Sens*/Gps*.csv`, pairing the phone epoch with the box's free-running `ms` counter. This is what lets Replay time-align without a GPS fix (see CSV-schema + Replay notes below). Sent *fire-and-forget* (no tracked reply — legacy firmware without 0x08 just ignores the write); the epoch is sampled right before the send so it matches the box tick the firmware stamps. **Settle window (`BleClient.setTimeSettleMs = 2000`):** after `0x08` the firmware is busy appending the `# SYNC` line to SD and **silently drops the next FileCmd that arrives too soon** — confirmed on Android's wire trace, where a LIST ~0.5 s after SET_TIME timed out (20 s watchdog) but the same LIST ≥1.8 s later always succeeded (this bit hard in **Auto mode** where the user connects then immediately taps List). `sendSetTime` sets `setTimeSettleUntil = now() + setTimeSettleMs`; `handleCommand` `await`s `awaitCmdSettle()` before dispatching `.list/.read/.delete/.setLogMode/.getLogMode` — connection-control + SET_TIME itself never wait. So the first file command after a connect is held up to ~2 s instead of being swallowed. STOP_LOG/Disconnect buttons removed (always-on firmware). Downloaded files land in the app's `Documents/` (exposed in the Files app via `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace`).
-- **Replay** — pick a video (Photos picker OR a `.mov`/`.mp4`/`.m4v` already in `Documents/`) + a `Sens*.csv` + a `Gps*.csv` from the Sync tab's downloads, watch the four overlay panels (speed, pitch / Nasenwinkel, height above water, GPS track) update against the video playhead, then optionally export a V-stack composite MOV (source video on top, panels below with animated cursors) — the iOS equivalent of the desktop's `combined_*.mov`. The composite is saved to `Documents/combined_<basename>.mov` AND added to the Photos library.
+- **Replay** — pick a video (Photos picker OR a `.mov`/`.mp4`/`.m4v` already in `Documents/`) + a `Sens*.csv` + a `Gps*.csv` from the Sync tab's downloads, watch the four overlay panels (speed, pitch / Nasenwinkel, height above water, GPS track) update against the video playhead, then optionally export a V-stack composite MOV (source video on top, panels below with animated cursors) — the iOS equivalent of the desktop's `combined_*.mov`. The composite is saved to `Documents/combined_<basename>.mov` AND added to the Photos library. Each sensor CSV row also has a **Session** button: map + charts of that recording with no video (see *Session view* below).
 - **Rides** — the ride list (`RidesScreen`). Each row is one session's 1 Hz GPS CSV. Two sources are merged (v1.0.57+): Apple-Watch rides synced over WatchConnectivity into `Documents/WatchRides/`, **plus iPhone-recorded rides** in `Documents/` — the phone-logger card's `GpsPhone_*` (and legacy `iPhoneGps_*` — the GPS tab's standalone CSV recorder was removed in v1.0.59 as a redundant subset of the phone logger, but existing files still list) — so a ride logged with **no Apple Watch connected** still maps here (it falls back to the speed-gradient rendering since there's no submersion column). `WatchRideReceiver.refresh()` scans both (`watchRideFiles()` + `phoneRideFiles()`); only watch files feed the WatchConnectivity delivery manifest. Tapping a row opens **`RideMapView`** (v1.0.23+), which plots the recorded track on an interactive Apple `Map` as **one continuous line coloured by inferred activity** — in-water swim / on-board / on-land walk (v1.0.24+) — and can export a **shareable PNG** — real map tiles under the activity-coloured track, start/end markers, a legend, and a branded footer (app logo + ride stats + the GitHub source link). See the *Rides tab — watch GPS on a map* section below. The raw CSV is still shareable straight from the row.
 
 The Live tab observes the same `FileSyncViewModel` instance as Sync — `MainNav` owns it (`@State`) and passes a `@Bindable` reference to both tabs. The BLE client subscribes to FileData *and* SensorStream characteristics in parallel; the desktop's per-firmware advertise-name handling (`PumpTsueri` vs `STBoxFs`) is mirrored via `FileSyncProtocol.boxNames`. iOS auto-negotiates ATT MTU up to ~185 B at connect time, so the firmware delivers full 46-byte snapshots in a single notify; the 3-chunk reassembly path (sequence bytes 0x00/0x01/0x02) is implemented as a fallback but rarely triggers in practice.
@@ -873,6 +873,66 @@ so recordings are interchangeable across the apps.
   logger is its superset).
 - Mount guidance (shown in the card): phone flat on the board, top edge
   toward the nose — device axes then match the box's Y-nose convention.
+
+### Session view — one box recording without a video (v1.0.73+)
+
+Port of the desktop's Session tab (`movement_logger_desktop`
+`stbox-viz-gui/src/session_view.rs`, desktop v0.0.86). `Data/SessionData.swift`
+(pure data prep, Foundation only) + `UI/SessionScreen.swift` (map, charts,
+playback). **Placement:** a **Session** button on each row of the Replay tab's
+*Sensor CSV* list (`FileChooserList.onSession`) opens `SessionScreen` as a
+`.fullScreenCover` with its own `NavigationStack` (same pattern as the Rides map
+and Analyze detail). It doesn't touch `ReplayViewModel`'s state — it reads the
+files itself. The GPS file is `SessionData.matchingGpsFile` (`sens` prefix →
+`gps`, case-insensitive: `SENS000.CSV` → `GPS000.CSV`, `SensPhone_x` →
+`GpsPhone_x`), else the GPS CSV already loaded in Replay, else sensor-only.
+Launch hook for simulator checks / screenshots:
+`SIMCTL_CHILD_INITIAL_TAB=replay SIMCTL_CHILD_OPEN_SESSION=SENS000.CSV`.
+
+- **One clock.** Both CSVs carry the box's `HAL_GetTick()` ms, so t = 0 is the
+  first sample of either file — no alignment step. Wall clock (local time) from
+  the sensor file's `# SYNC` anchors (GPS file's as second choice) through
+  `CsvParsers.absTimesFromSyncAnchors` (moved there from `ReplayViewModel`,
+  which now forwards), else the median (GPS-UTC seconds-of-day − box seconds)
+  over the first 200 fixed rows (`SessionClock.gpsUtc`, no date).
+- **Fast load.** `CsvParsers.sensorColumns` is the `accBins` raw-byte walk
+  generalised to the 8 needed columns, flat `[Float]` arrays (a `[SensorRow]`
+  for 1 M rows would be ~100 MB plus a `String` per line); `#` lines are
+  collected during the same pass and fed to `parseSyncAnchors`, so each file is
+  read once. Runs in `Task.detached`; progress via a locked
+  `SessionLoadProgress` polled every 100 ms. Measured on the 2 h 50 min test
+  session (956 k sensor rows, 22 k GPS rows at 10 Hz): 0.35 s on a Mac (-O),
+  0.4 s Release / 5.0 s Debug in the iPhone 17 Pro simulator.
+- **Angles** from the accelerometer only, 0.5 s centred moving average, box
+  frame nose = +Y, up = +Z: pitch = atan2(ay, √(ax²+az²)), roll = atan2(ax, az).
+  Phone-style long-axis-X formulas swap pitch and roll on this box.
+  **Height** = 44330·(1 − (p/p0)^(1/5.255)), p0 = median of the first 100
+  samples, same 0.5 s smoothing. |acc| in g, |gyro| in °/s.
+- **Track.** Fixed rows with a non-zero position; a hop implying > 60 km/h is a
+  multipath jump and dropped (also from the distance). Speed = the module's
+  speed, NaN without a fix. Colour = hue ramp of `RideMode.speedGradientColors`
+  in 16 bands of `speedScale` (95th-percentile speed, ≥ 5 km/h).
+  `SessionData.speedRuns` thins points < 3 m apart and averages speed over ~1 s
+  before banding — 22 k points become ~570 `MapPolyline`s instead of
+  thousands of 1-point colour flips that would make the SwiftUI `Map` crawl.
+- **Charts never draw raw rows.** `SessionData.decimate` = min/max per bucket,
+  1200 buckets over the visible range (binary-searched, one sample past each
+  edge); NaN samples skipped and a hole > 4 buckets (min 2 s) is drawn as a gap.
+  `SessionChartPlot` is an `Equatable` view keyed on (chart, lo, hi), so a cursor
+  move or playback frame only redraws the yellow cursor overlay — not the
+  decimation. Unzoomed, the range is the whole session and nothing re-decimates
+  during playback; pinch-zoom (`MagnifyGesture`, max down to a 20 s window)
+  centres the window on the cursor. Time-axis ticks are "nice" steps on round
+  local times (`SessionTimeAxis.ticks`).
+- **Cursor.** Slider + play/pause (`.task(id: playing)` loop, 33 ms) at
+  1/5/20/60/300×; tap a chart → that time; tap the map within ~30 pt of the
+  track (`MapReader` + `proxy.convert`) → nearest fix's time. *Follow*
+  re-centres the camera at most twice a second, keeping the user's zoom
+  (`onMapCameraChange` distance).
+- No test target exists; the pure parts (UTC parse, decimation, angle math,
+  smoothing, baro formula, GPS matching, the real-session numbers 5.30 km /
+  35.0 km/h / 10 Hz / 17:14:59) were checked with a throwaway `swiftc` harness
+  compiling `CsvParsers.swift` + `GpsTime.swift` + `SessionData.swift`.
 
 ### Analyze tab — on-device ride analysis (v1.0.56+)
 

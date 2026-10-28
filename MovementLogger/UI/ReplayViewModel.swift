@@ -544,33 +544,11 @@ final class ReplayViewModel {
         rideSlicingSummary = summary
     }
 
-    /// Map row ticks → absolute epoch ms through the firmware's host-clock
-    /// `# SYNC` anchors. Piecewise-linear between anchors (drift-free when
-    /// several connects produced markers across the session); constant
-    /// 10 ms/tick extrapolation before the first / after the last anchor.
-    /// A single anchor degenerates to a fixed 10 ms/tick offset from that
-    /// one connect — still phone-clock-correct near the connect, only
-    /// re-accumulating ThreadX drift far from it. `anchors` must be
-    /// tick-sorted + deduped (as `CsvParsers.parseSyncAnchors` returns).
+    /// Map row ticks → absolute epoch ms through the `# SYNC` anchors. The
+    /// implementation lives in `CsvParsers.absTimesFromSyncAnchors` so the
+    /// video-less Session view (`SessionData`) shares it.
     static func absTimesFromSyncAnchors(ticks: [Double], anchors: [SyncAnchor]) -> [Int64] {
-        let n = ticks.count
-        guard n > 0, let first = anchors.first, let last = anchors.last else { return [] }
-        var out = [Int64](repeating: 0, count: n)
-        var j = 0
-        for i in 0..<n {
-            let t = ticks[i]
-            if t <= first.ticks {
-                out[i] = first.epochMs + Int64((t - first.ticks) * 10.0)
-            } else if t >= last.ticks {
-                out[i] = last.epochMs + Int64((t - last.ticks) * 10.0)
-            } else {
-                while j + 1 < anchors.count && anchors[j + 1].ticks <= t { j += 1 }
-                let a = anchors[j], b = anchors[j + 1]
-                let frac = (t - a.ticks) / (b.ticks - a.ticks)
-                out[i] = Int64(Double(a.epochMs) + Double(b.epochMs - a.epochMs) * frac)
-            }
-        }
-        return out
+        CsvParsers.absTimesFromSyncAnchors(ticks: ticks, anchors: anchors)
     }
 
     /// Build a linear abs-time array of `count` entries that spans the
